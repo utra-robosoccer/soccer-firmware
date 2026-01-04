@@ -1,0 +1,5 @@
+../Core/Src/motor_chain.c:5:13:get_fault_string	24	static
+../Core/Src/motor_chain.c:15:13:get_mode_string	16	static
+../Core/Src/motor_chain.c:27:13:print_unified_can_response	432	static
+../Core/Src/motor_chain.c:82:19:motor_chain_init	24	static
+../Core/Src/motor_chain.c:140:19:motor_set_spd	40	static

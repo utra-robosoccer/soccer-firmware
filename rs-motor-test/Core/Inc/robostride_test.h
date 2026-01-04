@@ -3,8 +3,9 @@
 #include <stdint.h>
 #include "stm32f4xx_hal.h"
 #include "stm32f4xx_hal_can.h"
-#include "cubemars.h"
 #include "main.h"
+#include "stm32f4xx_hal_def.h"
+#include <string.h> // Required for memcpy
 
 // --- Constants (DO NOT CHANGE) ---
 #define P_MIN   -12.57f
@@ -17,6 +18,8 @@
 #define KD_MAX  100.0f
 #define T_MIN   -60.0f
 #define T_MAX    60.0f
+
+#define CAN_MASTER_ID 0xFD
 
 // --- Structs ---
 typedef struct {
@@ -86,6 +89,8 @@ typedef struct {
     float kd;
     float torq; // Nm
 } motor_t;
+
+
 
 extern CAN_RxHeaderTypeDef rs_can_rx_header;
 

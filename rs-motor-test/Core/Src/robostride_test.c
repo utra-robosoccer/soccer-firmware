@@ -1,9 +1,5 @@
 #include "robostride_test.h"
-#include "main.h"
-#include "stm32f4xx_hal_can.h"
-#include "stm32f4xx_hal_def.h"
-#include <stdint.h>
-#include <string.h> // Required for memcpy
+
 
 CAN_TxHeaderTypeDef rs_can_tx_header = {
     .StdId = 0x0,
@@ -43,7 +39,7 @@ static float uint_to_float(int x_int, float x_min, float x_max, int bits)
 HAL_StatusTypeDef can_get_motor_id(uint8_t id, uint16_t master_id)
 {
     txCanIdEx.mode = 0; // Type 0
-    txCanIdEx.id = id;  // Target Motor ID (or 0 for broadcast?)
+    txCanIdEx.id = id;  // Target Motor ID
     txCanIdEx.data = master_id; // Bits 8-23: Master ID
     txCanIdEx.res = 0;
 
@@ -58,22 +54,13 @@ HAL_StatusTypeDef can_unpack_get_id(motor_t* motor, uint8_t* recv_buf)
     // Rx Header Check: Mode should be 0.
     if (rxCanIdEx.mode != 0) return HAL_ERROR;
 
-    // In Response Type 0:
-    // rxCanIdEx.data (16 bits) -> High byte is Master ID (Bit 15-8), Low byte is Target ID (Bit 23-16)?
-    // Datasheet says: Bit 23-8: Target Motor CAN ID. Bit 7-0: Master ID (Wait, checking datasheet Source 634)
-    // Response: 28-24: 0x00. 23-8: Target Motor ID. 7-0: 0xFE (Reserved/Master?).
-
-    // In our struct:
-    // id = bits 0-7.
-    // data = bits 8-23 (This contains the Motor ID in response)
-
     uint8_t reported_id = (uint8_t)(rxCanIdEx.data & 0xFF);
+
     if (reported_id != motor->id) {
-       // ID mismatch or new discovery logic needed
+       motor -> id = reported_id;
     }
 
     // Payload: 64-bit MCU unique identifier
-    // Assuming Big Endian or Little Endian? Usually Little Endian in CAN payload
     uint64_t uid = 0;
     for(int i=0; i<8; i++){
         uid |= ((uint64_t)recv_buf[i] << (8 * i));
@@ -167,7 +154,6 @@ HAL_StatusTypeDef can_enable_motor(uint8_t id, uint16_t master_id)
     txCanIdEx.mode = 3;
     txCanIdEx.id = id;
     txCanIdEx.res = 0;
-    // Datasheet Source 645: Bit 23-8: Master ID
     txCanIdEx.data = master_id;
 
     rs_can_tx_header.DLC = 8;

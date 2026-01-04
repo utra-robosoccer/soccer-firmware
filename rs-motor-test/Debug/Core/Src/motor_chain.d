@@ -1,4 +1,5 @@
-Core/Src/uart_dbg.o: ../Core/Src/uart_dbg.c ../Core/Inc/uart_dbg.h \
+Core/Src/motor_chain.o: ../Core/Src/motor_chain.c \
+ ../Core/Inc/motor_chain.h \
  ../Drivers/STM32F4xx_HAL_Driver/Inc/stm32f4xx_hal.h \
  ../Core/Inc/stm32f4xx_hal_conf.h \
  ../Drivers/STM32F4xx_HAL_Driver/Inc/stm32f4xx_hal_rcc.h \
@@ -26,10 +27,9 @@ Core/Src/uart_dbg.o: ../Core/Src/uart_dbg.c ../Core/Inc/uart_dbg.h \
  ../Drivers/STM32F4xx_HAL_Driver/Inc/stm32f4xx_hal_pwr.h \
  ../Drivers/STM32F4xx_HAL_Driver/Inc/stm32f4xx_hal_pwr_ex.h \
  ../Drivers/STM32F4xx_HAL_Driver/Inc/stm32f4xx_hal_uart.h \
- ../Core/Inc/main.h \
- ../Drivers/STM32F4xx_HAL_Driver/Inc/stm32f4xx_hal_def.h \
- ../Core/Inc/cubemars.h
-../Core/Inc/uart_dbg.h:
+ ../Core/Inc/robostride_test.h ../Core/Inc/main.h \
+ ../Drivers/STM32F4xx_HAL_Driver/Inc/stm32f4xx_hal_def.h
+../Core/Inc/motor_chain.h:
 ../Drivers/STM32F4xx_HAL_Driver/Inc/stm32f4xx_hal.h:
 ../Core/Inc/stm32f4xx_hal_conf.h:
 ../Drivers/STM32F4xx_HAL_Driver/Inc/stm32f4xx_hal_rcc.h:
@@ -57,6 +57,6 @@ Core/Src/uart_dbg.o: ../Core/Src/uart_dbg.c ../Core/Inc/uart_dbg.h \
 ../Drivers/STM32F4xx_HAL_Driver/Inc/stm32f4xx_hal_pwr.h:
 ../Drivers/STM32F4xx_HAL_Driver/Inc/stm32f4xx_hal_pwr_ex.h:
 ../Drivers/STM32F4xx_HAL_Driver/Inc/stm32f4xx_hal_uart.h:
+../Core/Inc/robostride_test.h:
 ../Core/Inc/main.h:
 ../Drivers/STM32F4xx_HAL_Driver/Inc/stm32f4xx_hal_def.h:
-../Core/Inc/cubemars.h:
