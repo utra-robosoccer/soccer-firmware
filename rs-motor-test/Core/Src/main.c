@@ -77,42 +77,212 @@ uint32_t TxMailbox;
 
 uint8_t recv_msg[8];
 
-// uint32_t cur_time = 0;
-// float cur_pos = 3.14;
-
 char uart_msg[100];
 
-uint8_t can_receive_flag;
+uint8_t can_rx_flag;
 
-motor_t motors[5]; //By default we assume 5 motors will be connected to the chain
+#define MAX_MOTOR_COUNT 10 //this defines the total motors
+motor_t motors[MAX_MOTOR_COUNT];
 
-
-void can_motor_init()
+void HAL_CAN_RxFifo0MsgPendingCallback(CAN_HandleTypeDef *hcan)
 {
-	for (int i = 0; i < sizeof motors ; i ++){
-		motors[i].id = i + 1;
-		motors[i].master_id = CAN_master_id;
-		motors[i].motor_mode = MIT_MODE;
+    uint8_t rx_data[8];
+    HAL_CAN_GetRxMessage(hcan, CAN_RX_FIFO0, &rs_can_rx_header, rx_data);
 
-		can_enable_motor(motors[i].id, motors[i].master_id);
-	}
+    // 1. Cast the Extended ID to your struct to interpret bit fields
+    // NOTE: This assumes Little Endian ordering matches the hardware register layout
+    exCanIdInfo *rx_id_info = (exCanIdInfo *)&rs_can_rx_header.ExtId;
+
+    uint8_t comm_type = rx_id_info->mode; // Bits 24-28
+    uint8_t sender_id = 0;
+
+    // 2. Identify Sender Motor ID
+    // For Rx frames (Type 2, 17, 0), the Sender ID is usually in Bits 8-15
+    // In exCanIdInfo, 'data' covers Bits 8-23, so we mask the lower 8 bits.
+    sender_id = (uint8_t)(rx_id_info->data & 0xFF);
+
+    // 3. Dispatch to specific Unpack Function
+    if (sender_id > 0 && sender_id <= MAX_MOTOR_COUNT)
+    {
+        motor_t *target_motor = &motors[sender_id - 1]; // Map ID 1 -> Index 0
+
+        switch (comm_type)
+        {
+            case 2: // Motor Feedback
+                can_unpack_motor_feedback(target_motor, rx_data);
+                break;
+
+            case 17: // Single Parameter Read
+            {
+                float param_value = 0.0f;
+                // Unpack the float value from the buffer
+                if (can_unpack_single_param(rx_data, &param_value) == HAL_OK) {
+                    // TODO: Assign param_value to specific struct member based on Index?
+                    // The Index is in rx_data[0] and rx_data[1].
+                    // Example: if (rx_data[0] == 0x1E) target_motor->kp = param_value;
+                }
+                break;
+            }
+
+            case 0: // Get ID Response
+                can_unpack_get_id(target_motor, rx_data);
+                break;
+
+            default:
+                // Handle unknown types or other responses (e.g. Type 1 response is Type 2)
+                break;
+        }
+
+
+    }
+    can_rx_flag = 1;
+
 }
 
+static void get_fault_string(motor_error_t errors, char* buffer) {
+    if (errors.undervoltage) sprintf(buffer, "UnderVolt");
+    else if (errors.driver_fault) sprintf(buffer, "DriverFault");
+    else if (errors.overheat) sprintf(buffer, "OverHeat");
+    else if (errors.encoder_fault) sprintf(buffer, "EncoderFault");
+    else if (errors.stall_overload) sprintf(buffer, "Stall");
+    else if (errors.uncalibrated) sprintf(buffer, "Uncalibrated");
+    else sprintf(buffer, "None");
+}
 
+static void get_mode_string(motor_status_t status, char* buffer) {
+    switch (status) {
+        case RS_MODE_RESET:  sprintf(buffer, "RESET"); break;
+        case RS_MODE_CALI:   sprintf(buffer, "CALI"); break;
+        case RS_MODE_NORMAL: sprintf(buffer, "MOTOR"); break; // 对应手册中的 Motor Mode
+        default:             sprintf(buffer, "UNKNOWN"); break;
+    }
+}
 
+// 统一打印函数：用于 Step 2, 3, 4 的 Type 2 反馈帧
+static void print_motor_feedback(motor_t *m, UART_HandleTypeDef *huart) {
+    char uart_buf[256];
+    char mode_str[10];
+    char fault_str[20];
 
-void HAL_CAN_RxFifo0MsgPendingCallback(CAN_HandleTypeDef *hcan1)
+    get_mode_string(m->status, mode_str);
+    get_fault_string(m->motor_errors, fault_str);
+
+    // 格式: Motor: 1 Pos: -0.0033 Spd: -0.0571 Torq: -0.0009 Mode: MOTOR Temp: 23.0000 Fault: None
+    int len = sprintf(uart_buf,
+        "Motor: %d Pos: %.4f Spd: %.4f Torq: %.4f Mode: %s Temp: %.4f Fault: %s\r\n",
+        m->id,
+        m->pos,
+        m->rpm,
+        m->torq,
+        mode_str,
+        m->temperature,
+        fault_str
+    );
+    HAL_UART_Transmit(huart, (uint8_t*)uart_buf, len, 100);
+}
+
+// ---------------------------------------------------------
+// 主测试程序
+// ---------------------------------------------------------
+void RoboStride_Test_Routine(void)
 {
+    uint8_t target_id = 1;
+    uint16_t master_id = 0xFD;
+    char uart_buf[256];
+    uint32_t tickstart;
+    motor_t *m = &motors[target_id - 1];
+    m->id = target_id;
 
-  HAL_CAN_GetRxMessage(hcan1, CAN_RX_FIFO0, &rs_can_rx_header, recv_msg);
-  uint8_t motor_id = rs_can_rx_header.ExtId & 0xFF;
-  snprintf(uart_msg, sizeof uart_msg, "Motor #%d Feedback Received:\n", motor_id);
-  HAL_UART_Transmit(&huart2, recv_msg, strlen(recv_msg), HAL_MAX_DELAY);
-  can_unpack_motor_feedback(&motors[(motor_id) - 1], recv_msg);
-  snprintf(uart_msg, sizeof(uart_msg), "RS Feedback:\r\n temp=%.1f, pos=%.3f, rpm=%.3f, torq=%.3f\n\r",
-		  motors[motor_id - 1].temperature, motors[motor_id - 1].pos, motors[motor_id - 1].rpm,
-		  motors[motor_id - 1].torq);
-//  can_receive_flag = 1;
+    // =========================================================
+    // 步骤 1: 获取 Motor ID (Type 0)
+    // =========================================================
+    can_rx_flag = 0;
+    if (can_get_motor_id(target_id, master_id) == HAL_OK) {
+        tickstart = HAL_GetTick();
+        while (can_rx_flag == 0) {
+            if ((HAL_GetTick() - tickstart) > 100) {
+                HAL_UART_Transmit(&huart2, (uint8_t*)"Timeout: Get ID\r\n", 17, 100);
+                break;
+            }
+        }
+        if (can_rx_flag) {
+            // 解析 MCU UID
+            uint32_t uid_high = (uint32_t)((m->mcu_id >> 32) & 0xFFFFFFFF);
+            uint32_t uid_low  = (uint32_t)(m->mcu_id & 0xFFFFFFFF);
+
+            // 获取实际接收到的 Motor ID
+            // 根据手册 ，Type 0 应答帧的 CAN ID Bit 23-8 为 Motor ID
+            // 我们的结构体 exCanIdInfo 将 Bit 8-23 映射为 .data 域
+            // 因此 (ExtId >> 8) & 0xFF 即为接收到的 Motor ID
+            uint8_t received_motor_id = (rs_can_rx_header.ExtId >> 8) & 0xFF;
+
+            int len = sprintf(uart_buf, "Step 1 Get ID -> Received Motor ID: %d, MCU UID: 0x%08lX%08lX\r\n",
+                              received_motor_id, uid_high, uid_low);
+            HAL_UART_Transmit(&huart2, (uint8_t*)uart_buf, len, 100);
+        }
+    }
+    HAL_Delay(50);
+
+    // =========================================================
+    // 步骤 2: 设置模式为 MIT_MODE (Type 18)
+    // =========================================================
+    // Type 18 写入成功后，电机会回复 Type 2 反馈帧 [cite: 691]
+    can_rx_flag = 0;
+    if (can_change_motor_mode(target_id, master_id, MIT_MODE) == HAL_OK) {
+        tickstart = HAL_GetTick();
+        while (can_rx_flag == 0) {
+            if ((HAL_GetTick() - tickstart) > 100) {
+                HAL_UART_Transmit(&huart2, (uint8_t*)"Timeout: Set Mode\r\n", 19, 100);
+                break;
+            }
+        }
+        if (can_rx_flag) {
+            HAL_UART_Transmit(&huart2, (uint8_t*)"Step 2 Set Mode -> ", 19, 100);
+            print_motor_feedback(m, &huart2);
+        }
+    }
+    HAL_Delay(50);
+
+    // =========================================================
+    // 步骤 3: 使能电机 (Type 3)
+    // =========================================================
+    // Type 3 使能成功后，电机会回复 Type 2 反馈帧 [cite: 646]
+    can_rx_flag = 0;
+    if (can_enable_motor(target_id, master_id) == HAL_OK) {
+        tickstart = HAL_GetTick();
+        while (can_rx_flag == 0) {
+            if ((HAL_GetTick() - tickstart) > 100) {
+                HAL_UART_Transmit(&huart2, (uint8_t*)"Timeout: Enable Motor\r\n", 23, 100);
+                break;
+            }
+        }
+        if (can_rx_flag) {
+             HAL_UART_Transmit(&huart2, (uint8_t*)"Step 3 Enable -> ", 17, 100);
+             print_motor_feedback(m, &huart2);
+        }
+    }
+    HAL_Delay(50);
+
+    // =========================================================
+    // 步骤 4: 发送 MIT 控制指令 (Type 1)
+    // =========================================================
+    // 设置: Speed=1.0, Kd=10.0. Type 1 发送后回复 Type 2 反馈帧 [cite: 641]
+    can_rx_flag = 0;
+    if (can_mit_control_set(target_id, 0.0f, 0.0f, 1.0f, 0.0f, 10.0f) == HAL_OK) {
+
+        tickstart = HAL_GetTick();
+        while (can_rx_flag == 0) {
+            if ((HAL_GetTick() - tickstart) > 100) {
+                HAL_UART_Transmit(&huart2, (uint8_t*)"Timeout: MIT Control\r\n", 22, 100);
+                break;
+            }
+        }
+
+        if (can_rx_flag) {
+            HAL_UART_Transmit(&huart2, (uint8_t*)"Step 4 Control -> ", 18, 100);
+            print_motor_feedback(m, &huart2);
+        }
+    }
 }
 
 /* USER CODE END 0 */
@@ -134,7 +304,7 @@ int main(void)
   HAL_Init();
 
   /* USER CODE BEGIN Init */
-  can_receive_flag = 0;
+  can_rx_flag = 0;
 
   /* USER CODE END Init */
 
@@ -150,27 +320,36 @@ int main(void)
   MX_USART2_UART_Init();
   MX_CAN1_Init();
   /* USER CODE BEGIN 2 */
+  CAN_FilterTypeDef sFilterConfig;
+  sFilterConfig.FilterBank = 0;
+  sFilterConfig.FilterMode = CAN_FILTERMODE_IDMASK;
+  sFilterConfig.FilterScale = CAN_FILTERSCALE_32BIT;
+  sFilterConfig.FilterIdHigh = 0x0000;
+  sFilterConfig.FilterIdLow = 0x0000;
+  sFilterConfig.FilterMaskIdHigh = 0x0000;
+  sFilterConfig.FilterMaskIdLow = 0x0000;
+  sFilterConfig.FilterFIFOAssignment = CAN_RX_FIFO0;
+  sFilterConfig.FilterActivation = ENABLE;
+  sFilterConfig.SlaveStartFilterBank = 14;
+
+  if (HAL_CAN_ConfigFilter(&hcan1, &sFilterConfig) != HAL_OK)
+  {
+    Error_Handler();
+  }
+
   if (HAL_CAN_Start(&hcan1) != HAL_OK){
      return 1;
    }
    HAL_CAN_ActivateNotification(&hcan1, CAN_IT_RX_FIFO0_MSG_PENDING);
-   char uart_msg[100];
    /*
      Go to the can filter config defined in the CAN 1 init function
      Filter Fifo assignment was assigned to CAN rx fifo 0
      since we have turned on thee RX fifo0 intr, RXfifo msg pending callback will be called once incoming data was stored in the RX FIFO0
      count will increment
    */
-//   can_enable_motor(RS_test_motor_id, CAN_master_id);
-//   HAL_Delay(1000);
-   can_motor_init();
-   HAL_Delay(1);
-   can_mit_control_set(motors[0].id, 0, 0, 10, 0, 5);
-   can_mit_control_set(motors[1].id, 0, 0, 2, 0, 5);
 
+   RoboStride_Test_Routine();
 
-
-   // CUBEMARS_enable_motion_ctrl(&hcan1, &TxMailbox);
 
   /* USER CODE END 2 */
 
@@ -181,27 +360,6 @@ int main(void)
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
-	  // if (HAL_GetTick() - cur_time > 3000) {
-	      //   cur_time = HAL_GetTick();
-	      //   snprintf(uart_msg, sizeof(uart_msg), "Motor Report:\r\nTEMP: %0d | ERROR_CODE: %0x\r\nPOS: %0d | SPD: %0d | TORQ: %0d\r\n", motor_temp, error_code, pos_int, spd_int, torq_int);
-	      //   HAL_UART_Transmit(&huart2, uart_msg, sizeof(uart_msg), HAL_MAX_DELAY);
-	      //   if (CUBEMARS_set_motion_ctrl_parameters(&hcan1, &TxMailbox, cur_pos, 0, 200, 3, 0.0) != HAL_OK){
-	      //     char *msg = "set pos failed\n";
-	      //     HAL_UART_Transmit(&huart2, msg, strlen(msg), HAL_MAX_DELAY);
-	      //   }
-	      //     CUBEMARS_enable_motion_ctrl(&hcan1, &TxMailbox);
-	      //   cur_pos = -cur_pos;
-	      // }
-	      snprintf(uart_msg, sizeof(uart_msg), "uart-cmd$: ");
-	      HAL_UART_Transmit(&huart2, uart_msg, strlen(uart_msg), HAL_MAX_DELAY);
-	      if(uart_get_new_line(&huart2, uart_msg, sizeof(uart_msg))!=HAL_OK){
-	        snprintf(uart_msg, sizeof(uart_msg), "UART error\r\n");
-	        HAL_UART_Transmit(&huart2, uart_msg, strlen(uart_msg), HAL_MAX_DELAY);
-	        return -1;
-	      }
-	      uart_parse_cmd(&huart2, uart_msg, strlen(uart_msg));
-
-
   }
   /* USER CODE END 3 */
 }
