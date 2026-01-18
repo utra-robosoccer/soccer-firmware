@@ -44,8 +44,6 @@ typedef enum{
 } motor_status_t;
 
 // --- Feedback Decoding Masks (Based on exCanIdInfo.data field) ---
-// The .data field corresponds to CAN bits 8-23 (16 bits total).
-// According to Datasheet Type 2 Rx:
 // CAN Bits 8-15:  Motor ID -> .data bits 0-7
 // CAN Bits 16-21: Faults   -> .data bits 8-13
 // CAN Bits 22-23: Mode     -> .data bits 14-15
@@ -89,8 +87,6 @@ typedef struct {
     float kd;
     float torq; // Nm
 } motor_t;
-
-
 
 extern CAN_RxHeaderTypeDef rs_can_rx_header;
 

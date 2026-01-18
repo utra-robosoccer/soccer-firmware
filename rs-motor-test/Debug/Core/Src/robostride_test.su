@@ -8,6 +8,6 @@
 ../Core/Src/robostride_test.c:166:19:can_disable_motor	24	static
 ../Core/Src/robostride_test.c:182:19:can_set_mech_zero	24	static
 ../Core/Src/robostride_test.c:199:19:can_set_motor_can_id	24	static
-../Core/Src/robostride_test.c:218:19:can_read_single_param	24	static
-../Core/Src/robostride_test.c:235:19:can_unpack_single_param	24	static
-../Core/Src/robostride_test.c:254:19:can_change_motor_mode	32	static
+../Core/Src/robostride_test.c:214:19:can_read_single_param	24	static
+../Core/Src/robostride_test.c:229:19:can_unpack_single_param	24	static
+../Core/Src/robostride_test.c:246:19:can_change_motor_mode	32	static

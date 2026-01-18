@@ -19,7 +19,15 @@
 extern motor_t motors[MAX_MOTOR_COUNT];
 
 HAL_StatusTypeDef motor_chain_init();
+
 HAL_StatusTypeDef motor_set_spd (uint8_t target_id, float spd, float pd);
+HAL_StatusTypeDef motor_set_spd_dbg (uint8_t target_id, float spd, float pd);
+
+HAL_StatusTypeDef motor_set_pos_spd_dbg (uint8_t target_id, float pos, float spd);
+
+HAL_StatusTypeDef motor_check_angle (motor_t *motor, float pos, float spd, float pd);
+HAL_StatusTypeDef motor_check_angle_dbg (motor_t *motor, float pos, float spd, float pd);
+
 
 
 #endif /* INC_MOTOR_CHAIN_H_ */

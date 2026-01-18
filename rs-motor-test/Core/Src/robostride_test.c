@@ -170,7 +170,7 @@ HAL_StatusTypeDef can_disable_motor(uint8_t id, uint16_t master_id)
     txCanIdEx.data = master_id;
     txCanIdEx.res = 0;
 
-    uint8_t msg[8] = {0x0}; // Clear faults if msg[0]=1, here we just stop.
+    uint8_t msg[8] = {0x0};
     rs_can_tx_header.DLC = 8;
 
     return HAL_CAN_AddTxMessage(&hcan1, &rs_can_tx_header, msg, &TxMailbox);
@@ -187,7 +187,7 @@ HAL_StatusTypeDef can_set_mech_zero(uint8_t id, uint16_t master_id)
     txCanIdEx.res = 0;
 
     uint8_t msg[8] = {0};
-    msg[0] = 0x1; // Set Byte[0]=1 to trigger
+    msg[0] = 0x1;
 
     rs_can_tx_header.DLC = 8;
     return HAL_CAN_AddTxMessage(&hcan1, &rs_can_tx_header, msg, &TxMailbox);
@@ -201,10 +201,6 @@ HAL_StatusTypeDef can_set_motor_can_id(uint8_t id, uint16_t master_id, uint8_t n
     txCanIdEx.mode = 0x7;
     txCanIdEx.id = id; // Target current ID
     txCanIdEx.res = 0;
-
-    // Datasheet Source 658:
-    // Bit 23-16 (High byte of .data): New CAN ID
-    // Bit 15-8  (Low byte of .data): Master ID
     txCanIdEx.data = (new_motor_id << 8) | (master_id & 0xFF);
 
     uint8_t msg[8] = {0};
@@ -223,8 +219,6 @@ HAL_StatusTypeDef can_read_single_param(uint8_t id, uint16_t master_id, uint16_t
     txCanIdEx.res = 0;
 
     uint8_t msg[8] = {0};
-    // Byte 0-1: Index (Little Endian in payload based on usage?)
-    // Datasheet Source 661: "Byte 0-1: index... Byte 4-7: 00"
     msg[0] = index & 0xFF;
     msg[1] = (index >> 8) & 0xFF;
 
@@ -236,8 +230,6 @@ HAL_StatusTypeDef can_unpack_single_param(uint8_t* recv_buf, float* result_val)
 {
     if (rxCanIdEx.mode != 0x11) return HAL_ERROR;
 
-    // Payload Byte 4-7 is data (Low byte first according to Datasheet Source 668)
-    // "Byte 4-7: Param data... Low byte first, High byte last"
     uint32_t raw_val = 0;
     raw_val |= recv_buf[4];
     raw_val |= (uint32_t)recv_buf[5] << 8;
@@ -267,7 +259,7 @@ HAL_StatusTypeDef can_change_motor_mode(uint8_t id, uint16_t master_id, rs_runmo
     msg[0] = reg_idx & 0xff;
     msg[1] = reg_idx >> 8;
 
-    // Data (Byte 4-7). Mode is uint8, so just byte 4.
+    // Data (Byte 4-7)
     msg[4] = rs_runmode & 0xff;
 
     return HAL_CAN_AddTxMessage(&hcan1, &rs_can_tx_header, msg, &TxMailbox);

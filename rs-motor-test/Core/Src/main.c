@@ -86,19 +86,13 @@ void HAL_CAN_RxFifo0MsgPendingCallback(CAN_HandleTypeDef *hcan)
 
     HAL_CAN_GetRxMessage(hcan, CAN_RX_FIFO0, &rs_can_rx_header, rx_data);
 
-    // 1. Cast the Extended ID to your struct to interpret bit fields
-    // NOTE: This assumes Little Endian ordering matches the hardware register layout
     exCanIdInfo *rx_id_info = (exCanIdInfo *)&rs_can_rx_header.ExtId;
 
     uint8_t comm_type = rx_id_info->mode; // Bits 24-28
     uint8_t sender_id = 0;
 
-    // 2. Identify Sender Motor ID
-    // For Rx frames (Type 2, 17, 0), the Sender ID is usually in Bits 8-15
-    // In exCanIdInfo, 'data' covers Bits 8-23, so we mask the lower 8 bits.
     sender_id = (uint8_t)(rx_id_info->data & 0xFF);
 
-    // 3. Dispatch to specific Unpack Function
     if (sender_id > 0 && sender_id <= MAX_MOTOR_COUNT)
     {
         motor_t *target_motor = &motors[sender_id - 1]; // Map ID 1 -> Index 0
@@ -114,9 +108,7 @@ void HAL_CAN_RxFifo0MsgPendingCallback(CAN_HandleTypeDef *hcan)
                 float param_value = 0.0f;
                 // Unpack the float value from the buffer
                 if (can_unpack_single_param(rx_data, &param_value) == HAL_OK) {
-                    // TODO: Assign param_value to specific struct member based on Index?
-                    // The Index is in rx_data[0] and rx_data[1].
-                    // Example: if (rx_data[0] == 0x1E) target_motor->kp = param_value;
+
                 }
                 break;
             }
@@ -198,15 +190,42 @@ int main(void)
 
    motor_chain_init();
 
-   motor_set_spd(1, 2.0f, 10.0f);
-   motor_set_spd(2, 3.0f, 10.0f);
+//   motor_set_spd(1, 2.0f, 10.0f);
+//   motor_set_spd(2, 3.0f, 10.0f);
 
    uint32_t tick_tele = HAL_GetTick();
    uint32_t tick_inc = HAL_GetTick();
+   uint32_t tick_pos_inc = HAL_GetTick();
+   float pos_1 = 0;
+   float pos_2 = 0;
    float spd_1 = 0;
    float spd_2 = 0;
+   float pos_step_1 = 1.2;
+   float pos_step_2 = 1.2;
    float step_1 = 0.2;
    float step_2 = 0.1;
+
+   while(motor_check_angle_dbg(&motors[0], 10, spd_1, 5)!= HAL_OK)
+   {
+	   if(HAL_GetTick() - tick_inc >= 1){
+		   tick_inc = HAL_GetTick();
+		   if (spd_1 <= 10){
+			   spd_1 += 0.1;
+		   }
+	   }
+   }
+   spd_1 = 0.0;
+   while(motor_check_angle_dbg(&motors[0], 0, spd_1, 5)!= HAL_OK)
+   {
+   	   if(HAL_GetTick() - tick_inc >= 1){
+   		   tick_inc = HAL_GetTick();
+   		   if (spd_1 >= -5 ){
+   			   spd_1 -= 0.1;
+   		   }
+   	   }
+      }
+//   while(motor_check_angle_dbg(&motors[0], 0, -4, 5)!= HAL_OK);
+//   while(motor_check_angle_dbg(&motors[0], -10, -5, 5)!= HAL_OK);
 
 
   /* USER CODE END 2 */
@@ -218,10 +237,17 @@ int main(void)
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
-	if(HAL_GetTick() - tick_tele >= 500){
+	if(HAL_GetTick() - tick_tele >= 100){
 		tick_tele = HAL_GetTick();
 		motor_set_spd(1, spd_1, 10.0f);
 		motor_set_spd(2, spd_2, 10.0f);
+//		if (motor_check_angle_dbg(&motors[0], pos_1, spd_1, 10.0f) == HAL_OK){
+//			HAL_UART_Transmit(&huart2, (uint8_t*)"motor 1 reaches the configured angle\n", 38, HAL_MAX_DELAY);
+//		}
+//
+//		if (motor_check_angle_dbg(&motors[1], pos_2, spd_2, 10.0f) == HAL_OK){
+//			HAL_UART_Transmit(&huart2, (uint8_t*)"motor 2 reaches the configured angle\n", 38, HAL_MAX_DELAY);
+//		}
 	}
 
 	if(HAL_GetTick() - tick_inc >= 200){
@@ -230,7 +256,25 @@ int main(void)
 		spd_2 += step_2;
 		if (spd_1 >= 10.0f || spd_1 <= - 10.0f) step_1 *= -1;
 		if (spd_2 >= 10.0f || spd_2 <= - 10.0f) step_2 *= -1;
+
+//		if (spd_1 <= 10.0f && spd_1 >= - 10.0f) spd_1 += step_1;
+//		if (spd_2 <= 10.0f && spd_2 >= - 10.0f) spd_2 += step_2;
+//
+//		if (pos_1 >= 12.0f || pos_1 <= - 12.0f) step_1 *= -1;
+//		if (pos_2 >= 12.0f || pos_2 <= - 12.0f) step_2 *= -1;
 	}
+
+//	if(HAL_GetTick() - tick_pos_inc >= 1000){
+//		tick_pos_inc = HAL_GetTick();
+//		pos_1 += 4 * pos_step_1;
+//		pos_2 += 2 * pos_step_2;
+//
+//		if (pos_1 >= 12.0f || pos_1 <= - 12.0f) pos_step_1 *= -1;
+//		if (pos_2 >= 12.0f || pos_2 <= - 12.0f) pos_step_2 *= -1;
+//	}
+
+
+
   }
   /* USER CODE END 3 */
 }

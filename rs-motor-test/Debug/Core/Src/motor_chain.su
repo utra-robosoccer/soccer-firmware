@@ -2,4 +2,8 @@
 ../Core/Src/motor_chain.c:15:13:get_mode_string	16	static
 ../Core/Src/motor_chain.c:27:13:print_unified_can_response	432	static
 ../Core/Src/motor_chain.c:82:19:motor_chain_init	24	static
-../Core/Src/motor_chain.c:140:19:motor_set_spd	40	static
+../Core/Src/motor_chain.c:140:19:motor_set_spd	32	static
+../Core/Src/motor_chain.c:157:19:motor_set_spd_dbg	40	static
+../Core/Src/motor_chain.c:179:19:motor_set_pos_spd_dbg	40	static
+../Core/Src/motor_chain.c:201:19:motor_check_angle	24	static
+../Core/Src/motor_chain.c:216:19:motor_check_angle_dbg	24	static

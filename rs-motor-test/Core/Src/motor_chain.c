@@ -137,7 +137,52 @@ HAL_StatusTypeDef motor_chain_init()
 	return HAL_OK;
 }
 
+HAL_StatusTypeDef motor_chain_go_zeropos()
+{
+	uint32_t tickstart;
+	can_rx_flag = 0;
+
+	float direction;
+
+	for (int target_id = 1; target_id < MAX_MOTOR_COUNT; id ++){
+		if(motors[target_id - 1].pos > 0){
+			direction = -1;
+		}
+		else if (motors[target_id - 1].pos < 0){
+			direction =1;
+		} else {continue;} //motor is @zero pos
+
+		if (can_mit_control_set(target_id, f, 5.0* direction, 0.0f, 100.0f, 5.0f) == HAL_OK) {
+			tickstart = HAL_GetTick();
+			while (can_rx_flag == 0) {
+				if ((HAL_GetTick() - tickstart) > 100) {
+					return HAL_TIMEOUT;
+				}
+			}
+		}
+	}
+
+	return HAL_OK;
+}
+
 HAL_StatusTypeDef motor_set_spd (uint8_t target_id, float spd, float pd)
+{
+	uint32_t tickstart;
+	can_rx_flag = 0;
+	if (can_mit_control_set(target_id, 0.0f, 0.0f, spd, 0.0f, pd) == HAL_OK) {
+
+		tickstart = HAL_GetTick();
+		while (can_rx_flag == 0) {
+			if ((HAL_GetTick() - tickstart) > 100) {
+				return HAL_TIMEOUT;
+			}
+		}
+	}
+
+	return HAL_OK;
+}
+
+HAL_StatusTypeDef motor_set_spd_dbg (uint8_t target_id, float spd, float pd)
 {
 	uint32_t tickstart;
 	can_rx_flag = 0;
@@ -157,4 +202,56 @@ HAL_StatusTypeDef motor_set_spd (uint8_t target_id, float spd, float pd)
 	}
 
 	return HAL_OK;
+}
+
+HAL_StatusTypeDef motor_set_pos_spd_dbg (uint8_t target_id, float pos, float spd)
+{
+	uint32_t tickstart;
+	can_rx_flag = 0;
+	if (can_mit_control_set(target_id, 0.0f, pos, spd, 100, 5) == HAL_OK) {
+
+		tickstart = HAL_GetTick();
+		while (can_rx_flag == 0) {
+			if ((HAL_GetTick() - tickstart) > 100) {
+				HAL_UART_Transmit(&huart2, (uint8_t*)"Timeout: MIT Control\r\n", 22, 100);
+				break;
+			}
+		}
+
+		if (can_rx_flag) {
+			print_unified_can_response(&huart2, 2, &motors[target_id - 1], rx_data, rs_can_rx_header.ExtId);
+		}
+	}
+
+	return HAL_OK;
+}
+
+HAL_StatusTypeDef motor_check_angle (motor_t *motor, float pos, float spd, float pd)
+{
+	uint32_t tickstart;
+	can_rx_flag = 0;
+
+	if(motor_set_spd(motor->id, spd, pd) == HAL_TIMEOUT) return HAL_TIMEOUT;
+
+	if ((spd < 0 && motor->pos < pos) || (spd > 0 && motor->pos > pos)){
+		motor_set_spd(motor->id, 0, 0); //stop the motor
+		return HAL_OK;
+	}
+
+	return HAL_BUSY;
+}
+
+HAL_StatusTypeDef motor_check_angle_dbg (motor_t *motor, float pos, float spd, float pd)
+{
+	uint32_t tickstart;
+	can_rx_flag = 0;
+
+	if ((spd < 0 && motor->pos < pos) || (spd > 0 && motor->pos > pos)){
+		motor_set_spd_dbg(motor->id, 0, pd); //stop the motor
+		return HAL_OK;
+	}
+
+	if(motor_set_spd_dbg(motor->id, spd, pd) == HAL_TIMEOUT) return HAL_TIMEOUT;
+
+	return HAL_BUSY;
 }
