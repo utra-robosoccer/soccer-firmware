@@ -11,6 +11,8 @@ CAN_TxHeaderTypeDef rs_can_tx_header = {
 
 CAN_RxHeaderTypeDef rs_can_rx_header;
 
+uint32_t TxMailbox;
+
 // Expand the .extid to self defined struct. defined in .h file
 #define txCanIdEx (*((exCanIdInfo*)&(rs_can_tx_header.ExtId)))
 #define rxCanIdEx (*((exCanIdInfo*)&(rs_can_rx_header.ExtId)))
@@ -144,6 +146,8 @@ HAL_StatusTypeDef can_unpack_motor_feedback(motor_t* motor, uint8_t* recv_buf)
 
     return HAL_OK;
 }
+
+
 
 // ============================================================================
 // COMM TYPE 3: Enable Motor

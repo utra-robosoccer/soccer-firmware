@@ -68,65 +68,14 @@ static void MX_CAN1_Init(void);
 
 /* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
-//These are all necessary definitions to use the can bus
-CAN_TxHeaderTypeDef TxHeader;
-CAN_RxHeaderTypeDef RxHeader;
 
-uint32_t TxMailbox;
-
-uint8_t rx_data[8];
 
 char uart_msg[100];
 
-uint8_t can_rx_flag;
 
 
-void HAL_CAN_RxFifo0MsgPendingCallback(CAN_HandleTypeDef *hcan)
-{
-
-    HAL_CAN_GetRxMessage(hcan, CAN_RX_FIFO0, &rs_can_rx_header, rx_data);
-
-    exCanIdInfo *rx_id_info = (exCanIdInfo *)&rs_can_rx_header.ExtId;
-
-    uint8_t comm_type = rx_id_info->mode; // Bits 24-28
-    uint8_t sender_id = 0;
-
-    sender_id = (uint8_t)(rx_id_info->data & 0xFF);
-
-    if (sender_id > 0 && sender_id <= MAX_MOTOR_COUNT)
-    {
-        motor_t *target_motor = &motors[sender_id - 1]; // Map ID 1 -> Index 0
-
-        switch (comm_type)
-        {
-            case 2: // Motor Feedback
-                can_unpack_motor_feedback(target_motor, rx_data);
-                break;
-
-            case 17: // Single Parameter Read
-            {
-                float param_value = 0.0f;
-                // Unpack the float value from the buffer
-                if (can_unpack_single_param(rx_data, &param_value) == HAL_OK) {
-
-                }
-                break;
-            }
-
-            case 0: // Get ID Response
-                can_unpack_get_id(target_motor, rx_data);
-                break;
-
-            default:
-                // Handle unknown types or other responses (e.g. Type 1 response is Type 2)
-                break;
-        }
 
 
-    }
-    can_rx_flag = 1;
-
-}
 
 
 /* USER CODE END 0 */

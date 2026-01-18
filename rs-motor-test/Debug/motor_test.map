@@ -286,10 +286,10 @@ Discarded input sections
  .debug_macro   0x00000000       0x89 ./Core/Src/cubemars.o
  .debug_macro   0x00000000      0x2aa ./Core/Src/cubemars.o
  .debug_macro   0x00000000      0x126 ./Core/Src/cubemars.o
- .debug_macro   0x00000000       0x64 ./Core/Src/cubemars.o
+ .debug_macro   0x00000000       0x58 ./Core/Src/cubemars.o
  .debug_macro   0x00000000       0x58 ./Core/Src/cubemars.o
  .debug_line    0x00000000      0x9c7 ./Core/Src/cubemars.o
- .debug_str     0x00000000    0xc4f95 ./Core/Src/cubemars.o
+ .debug_str     0x00000000    0xc4f70 ./Core/Src/cubemars.o
  .comment       0x00000000       0x44 ./Core/Src/cubemars.o
  .debug_frame   0x00000000      0x1d0 ./Core/Src/cubemars.o
  .ARM.attributes
@@ -358,8 +358,6 @@ Discarded input sections
  .text          0x00000000        0x0 ./Core/Src/main.o
  .data          0x00000000        0x0 ./Core/Src/main.o
  .bss           0x00000000        0x0 ./Core/Src/main.o
- .bss.TxHeader  0x00000000       0x18 ./Core/Src/main.o
- .bss.RxHeader  0x00000000       0x1c ./Core/Src/main.o
  .bss.uart_msg  0x00000000       0x64 ./Core/Src/main.o
  .debug_macro   0x00000000      0xad8 ./Core/Src/main.o
  .debug_macro   0x00000000      0x29b ./Core/Src/main.o
@@ -399,7 +397,7 @@ Discarded input sections
  .debug_macro   0x00000000       0x89 ./Core/Src/main.o
  .debug_macro   0x00000000      0x2aa ./Core/Src/main.o
  .debug_macro   0x00000000      0x126 ./Core/Src/main.o
- .debug_macro   0x00000000       0x64 ./Core/Src/main.o
+ .debug_macro   0x00000000       0x58 ./Core/Src/main.o
  .group         0x00000000        0xc ./Core/Src/motor_chain.o
  .group         0x00000000        0xc ./Core/Src/motor_chain.o
  .group         0x00000000        0xc ./Core/Src/motor_chain.o
@@ -636,7 +634,7 @@ Discarded input sections
  .debug_macro   0x00000000       0x89 ./Core/Src/robostride_test.o
  .debug_macro   0x00000000      0x2aa ./Core/Src/robostride_test.o
  .debug_macro   0x00000000      0x126 ./Core/Src/robostride_test.o
- .debug_macro   0x00000000       0x6a ./Core/Src/robostride_test.o
+ .debug_macro   0x00000000       0x5e ./Core/Src/robostride_test.o
  .debug_macro   0x00000000       0x61 ./Core/Src/robostride_test.o
  .debug_macro   0x00000000       0x2a ./Core/Src/robostride_test.o
  .debug_macro   0x00000000       0x43 ./Core/Src/robostride_test.o
@@ -737,7 +735,7 @@ Discarded input sections
  .debug_macro   0x00000000       0x89 ./Core/Src/stm32f4xx_hal_msp.o
  .debug_macro   0x00000000      0x2aa ./Core/Src/stm32f4xx_hal_msp.o
  .debug_macro   0x00000000      0x126 ./Core/Src/stm32f4xx_hal_msp.o
- .debug_macro   0x00000000       0x64 ./Core/Src/stm32f4xx_hal_msp.o
+ .debug_macro   0x00000000       0x58 ./Core/Src/stm32f4xx_hal_msp.o
  .group         0x00000000        0xc ./Core/Src/stm32f4xx_it.o
  .group         0x00000000        0xc ./Core/Src/stm32f4xx_it.o
  .group         0x00000000        0xc ./Core/Src/stm32f4xx_it.o
@@ -818,7 +816,7 @@ Discarded input sections
  .debug_macro   0x00000000       0x89 ./Core/Src/stm32f4xx_it.o
  .debug_macro   0x00000000      0x2aa ./Core/Src/stm32f4xx_it.o
  .debug_macro   0x00000000      0x126 ./Core/Src/stm32f4xx_it.o
- .debug_macro   0x00000000       0x64 ./Core/Src/stm32f4xx_it.o
+ .debug_macro   0x00000000       0x58 ./Core/Src/stm32f4xx_it.o
  .group         0x00000000        0xc ./Core/Src/syscalls.o
  .group         0x00000000        0xc ./Core/Src/syscalls.o
  .group         0x00000000        0xc ./Core/Src/syscalls.o
@@ -3458,23 +3456,23 @@ LOAD C:/ST/STM32CubeIDE_2.0.0/STM32CubeIDE/plugins/com.st.stm32cube.ide.mcu.exte
                 0x0800105c                __aeabi_idiv0
                 0x0800105c                __aeabi_ldiv0
  *(.text*)
- .text.HAL_CAN_RxFifo0MsgPendingCallback
-                0x08001060       0xb0 ./Core/Src/main.o
-                0x08001060                HAL_CAN_RxFifo0MsgPendingCallback
- .text.main     0x08001110      0x26c ./Core/Src/main.o
-                0x08001110                main
+ .text.main     0x08001060      0x26c ./Core/Src/main.o
+                0x08001060                main
  .text.SystemClock_Config
-                0x0800137c       0xdc ./Core/Src/main.o
-                0x0800137c                SystemClock_Config
+                0x080012cc       0xdc ./Core/Src/main.o
+                0x080012cc                SystemClock_Config
  .text.MX_CAN1_Init
-                0x08001458       0x6c ./Core/Src/main.o
+                0x080013a8       0x6c ./Core/Src/main.o
  .text.MX_USART2_UART_Init
-                0x080014c4       0x54 ./Core/Src/main.o
+                0x08001414       0x54 ./Core/Src/main.o
  .text.MX_GPIO_Init
-                0x08001518       0xdc ./Core/Src/main.o
+                0x08001468       0xdc ./Core/Src/main.o
  .text.Error_Handler
-                0x080015f4        0xc ./Core/Src/main.o
-                0x080015f4                Error_Handler
+                0x08001544        0xc ./Core/Src/main.o
+                0x08001544                Error_Handler
+ .text.HAL_CAN_RxFifo0MsgPendingCallback
+                0x08001550       0xb0 ./Core/Src/motor_chain.o
+                0x08001550                HAL_CAN_RxFifo0MsgPendingCallback
  .text.get_fault_string
                 0x08001600       0x9c ./Core/Src/motor_chain.o
  .text.get_mode_string
@@ -4259,20 +4257,21 @@ LOAD C:/ST/STM32CubeIDE_2.0.0/STM32CubeIDE/plugins/com.st.stm32cube.ide.mcu.exte
                 0x2000020c                hcan1
  .bss.huart2    0x20000234       0x48 ./Core/Src/main.o
                 0x20000234                huart2
- .bss.TxMailbox
-                0x2000027c        0x4 ./Core/Src/main.o
-                0x2000027c                TxMailbox
- .bss.rx_data   0x20000280        0x8 ./Core/Src/main.o
-                0x20000280                rx_data
+ *fill*         0x2000027c        0x4 
+ .bss.motors    0x20000280      0x1e0 ./Core/Src/motor_chain.o
+                0x20000280                motors
  .bss.can_rx_flag
-                0x20000288        0x1 ./Core/Src/main.o
-                0x20000288                can_rx_flag
- *fill*         0x20000289        0x7 
- .bss.motors    0x20000290      0x1e0 ./Core/Src/motor_chain.o
-                0x20000290                motors
+                0x20000460        0x1 ./Core/Src/motor_chain.o
+                0x20000460                can_rx_flag
+ *fill*         0x20000461        0x3 
+ .bss.rx_data   0x20000464        0x8 ./Core/Src/motor_chain.o
+                0x20000464                rx_data
  .bss.rs_can_rx_header
-                0x20000470       0x1c ./Core/Src/robostride_test.o
-                0x20000470                rs_can_rx_header
+                0x2000046c       0x1c ./Core/Src/robostride_test.o
+                0x2000046c                rs_can_rx_header
+ .bss.TxMailbox
+                0x20000488        0x4 ./Core/Src/robostride_test.o
+                0x20000488                TxMailbox
  .bss.__sbrk_heap_end
                 0x2000048c        0x4 ./Core/Src/sysmem.o
  .bss.uwTick    0x20000490        0x4 ./Drivers/STM32F4xx_HAL_Driver/Src/stm32f4xx_hal.o
@@ -4501,47 +4500,47 @@ LOAD C:/ST/STM32CubeIDE_2.0.0/STM32CubeIDE/plugins/com.st.stm32cube.ide.mcu.exte
 LOAD C:/ST/STM32CubeIDE_2.0.0/STM32CubeIDE/plugins/com.st.stm32cube.ide.mcu.externaltools.gnu-tools-for-stm32.13.3.rel1.win32_1.0.100.202509120712/tools/bin/../lib/gcc/arm-none-eabi/13.3.1/../../../../arm-none-eabi/lib/thumb/v7e-m+fp/hard\libm.a
 LOAD C:/ST/STM32CubeIDE_2.0.0/STM32CubeIDE/plugins/com.st.stm32cube.ide.mcu.externaltools.gnu-tools-for-stm32.13.3.rel1.win32_1.0.100.202509120712/tools/bin/../lib/gcc/arm-none-eabi/13.3.1/thumb/v7e-m+fp/hard\libgcc.a
 
-.debug_info     0x00000000     0xc248
- .debug_info    0x00000000     0x1693 ./Core/Src/main.o
- .debug_info    0x00001693      0xd66 ./Core/Src/motor_chain.o
- .debug_info    0x000023f9      0xc57 ./Core/Src/robostride_test.o
- .debug_info    0x00003050     0x102e ./Core/Src/stm32f4xx_hal_msp.o
- .debug_info    0x0000407e      0x504 ./Core/Src/stm32f4xx_it.o
- .debug_info    0x00004582      0x6a3 ./Core/Src/syscalls.o
- .debug_info    0x00004c25      0x168 ./Core/Src/sysmem.o
- .debug_info    0x00004d8d      0x54a ./Core/Src/system_stm32f4xx.o
- .debug_info    0x000052d7       0x30 ./Core/Startup/startup_stm32f446retx.o
- .debug_info    0x00005307      0x99a ./Drivers/STM32F4xx_HAL_Driver/Src/stm32f4xx_hal.o
- .debug_info    0x00005ca1      0xf44 ./Drivers/STM32F4xx_HAL_Driver/Src/stm32f4xx_hal_can.o
- .debug_info    0x00006be5      0xdaa ./Drivers/STM32F4xx_HAL_Driver/Src/stm32f4xx_hal_cortex.o
- .debug_info    0x0000798f      0x70b ./Drivers/STM32F4xx_HAL_Driver/Src/stm32f4xx_hal_gpio.o
- .debug_info    0x0000809a      0x8ff ./Drivers/STM32F4xx_HAL_Driver/Src/stm32f4xx_hal_rcc.o
- .debug_info    0x00008999      0x960 ./Drivers/STM32F4xx_HAL_Driver/Src/stm32f4xx_hal_rcc_ex.o
- .debug_info    0x000092f9     0x2f4f ./Drivers/STM32F4xx_HAL_Driver/Src/stm32f4xx_hal_uart.o
+.debug_info     0x00000000     0xc4e8
+ .debug_info    0x00000000     0x13f7 ./Core/Src/main.o
+ .debug_info    0x000013f7     0x1294 ./Core/Src/motor_chain.o
+ .debug_info    0x0000268b      0xc65 ./Core/Src/robostride_test.o
+ .debug_info    0x000032f0     0x102e ./Core/Src/stm32f4xx_hal_msp.o
+ .debug_info    0x0000431e      0x504 ./Core/Src/stm32f4xx_it.o
+ .debug_info    0x00004822      0x6a3 ./Core/Src/syscalls.o
+ .debug_info    0x00004ec5      0x168 ./Core/Src/sysmem.o
+ .debug_info    0x0000502d      0x54a ./Core/Src/system_stm32f4xx.o
+ .debug_info    0x00005577       0x30 ./Core/Startup/startup_stm32f446retx.o
+ .debug_info    0x000055a7      0x99a ./Drivers/STM32F4xx_HAL_Driver/Src/stm32f4xx_hal.o
+ .debug_info    0x00005f41      0xf44 ./Drivers/STM32F4xx_HAL_Driver/Src/stm32f4xx_hal_can.o
+ .debug_info    0x00006e85      0xdaa ./Drivers/STM32F4xx_HAL_Driver/Src/stm32f4xx_hal_cortex.o
+ .debug_info    0x00007c2f      0x70b ./Drivers/STM32F4xx_HAL_Driver/Src/stm32f4xx_hal_gpio.o
+ .debug_info    0x0000833a      0x8ff ./Drivers/STM32F4xx_HAL_Driver/Src/stm32f4xx_hal_rcc.o
+ .debug_info    0x00008c39      0x960 ./Drivers/STM32F4xx_HAL_Driver/Src/stm32f4xx_hal_rcc_ex.o
+ .debug_info    0x00009599     0x2f4f ./Drivers/STM32F4xx_HAL_Driver/Src/stm32f4xx_hal_uart.o
 
-.debug_abbrev   0x00000000     0x20ca
- .debug_abbrev  0x00000000      0x339 ./Core/Src/main.o
- .debug_abbrev  0x00000339      0x2c3 ./Core/Src/motor_chain.o
- .debug_abbrev  0x000005fc      0x25d ./Core/Src/robostride_test.o
- .debug_abbrev  0x00000859      0x1fc ./Core/Src/stm32f4xx_hal_msp.o
- .debug_abbrev  0x00000a55      0x190 ./Core/Src/stm32f4xx_it.o
- .debug_abbrev  0x00000be5      0x1b6 ./Core/Src/syscalls.o
- .debug_abbrev  0x00000d9b       0xbc ./Core/Src/sysmem.o
- .debug_abbrev  0x00000e57      0x11a ./Core/Src/system_stm32f4xx.o
- .debug_abbrev  0x00000f71       0x24 ./Core/Startup/startup_stm32f446retx.o
- .debug_abbrev  0x00000f95      0x214 ./Drivers/STM32F4xx_HAL_Driver/Src/stm32f4xx_hal.o
- .debug_abbrev  0x000011a9      0x25a ./Drivers/STM32F4xx_HAL_Driver/Src/stm32f4xx_hal_can.o
- .debug_abbrev  0x00001403      0x31d ./Drivers/STM32F4xx_HAL_Driver/Src/stm32f4xx_hal_cortex.o
- .debug_abbrev  0x00001720      0x1d4 ./Drivers/STM32F4xx_HAL_Driver/Src/stm32f4xx_hal_gpio.o
- .debug_abbrev  0x000018f4      0x2b7 ./Drivers/STM32F4xx_HAL_Driver/Src/stm32f4xx_hal_rcc.o
- .debug_abbrev  0x00001bab      0x211 ./Drivers/STM32F4xx_HAL_Driver/Src/stm32f4xx_hal_rcc_ex.o
- .debug_abbrev  0x00001dbc      0x30e ./Drivers/STM32F4xx_HAL_Driver/Src/stm32f4xx_hal_uart.o
+.debug_abbrev   0x00000000     0x20db
+ .debug_abbrev  0x00000000      0x2e3 ./Core/Src/main.o
+ .debug_abbrev  0x000002e3      0x318 ./Core/Src/motor_chain.o
+ .debug_abbrev  0x000005fb      0x26f ./Core/Src/robostride_test.o
+ .debug_abbrev  0x0000086a      0x1fc ./Core/Src/stm32f4xx_hal_msp.o
+ .debug_abbrev  0x00000a66      0x190 ./Core/Src/stm32f4xx_it.o
+ .debug_abbrev  0x00000bf6      0x1b6 ./Core/Src/syscalls.o
+ .debug_abbrev  0x00000dac       0xbc ./Core/Src/sysmem.o
+ .debug_abbrev  0x00000e68      0x11a ./Core/Src/system_stm32f4xx.o
+ .debug_abbrev  0x00000f82       0x24 ./Core/Startup/startup_stm32f446retx.o
+ .debug_abbrev  0x00000fa6      0x214 ./Drivers/STM32F4xx_HAL_Driver/Src/stm32f4xx_hal.o
+ .debug_abbrev  0x000011ba      0x25a ./Drivers/STM32F4xx_HAL_Driver/Src/stm32f4xx_hal_can.o
+ .debug_abbrev  0x00001414      0x31d ./Drivers/STM32F4xx_HAL_Driver/Src/stm32f4xx_hal_cortex.o
+ .debug_abbrev  0x00001731      0x1d4 ./Drivers/STM32F4xx_HAL_Driver/Src/stm32f4xx_hal_gpio.o
+ .debug_abbrev  0x00001905      0x2b7 ./Drivers/STM32F4xx_HAL_Driver/Src/stm32f4xx_hal_rcc.o
+ .debug_abbrev  0x00001bbc      0x211 ./Drivers/STM32F4xx_HAL_Driver/Src/stm32f4xx_hal_rcc_ex.o
+ .debug_abbrev  0x00001dcd      0x30e ./Drivers/STM32F4xx_HAL_Driver/Src/stm32f4xx_hal_uart.o
 
 .debug_aranges  0x00000000      0x9b8
  .debug_aranges
-                0x00000000       0x50 ./Core/Src/main.o
+                0x00000000       0x48 ./Core/Src/main.o
  .debug_aranges
-                0x00000050       0x70 ./Core/Src/motor_chain.o
+                0x00000048       0x78 ./Core/Src/motor_chain.o
  .debug_aranges
                 0x000000c0       0x80 ./Core/Src/robostride_test.o
  .debug_aranges
@@ -4574,9 +4573,9 @@ LOAD C:/ST/STM32CubeIDE_2.0.0/STM32CubeIDE/plugins/com.st.stm32cube.ide.mcu.exte
 .debug_rnglists
                 0x00000000      0x766
  .debug_rnglists
-                0x00000000       0x3b ./Core/Src/main.o
+                0x00000000       0x34 ./Core/Src/main.o
  .debug_rnglists
-                0x0000003b       0x58 ./Core/Src/motor_chain.o
+                0x00000034       0x5f ./Core/Src/motor_chain.o
  .debug_rnglists
                 0x00000093       0x62 ./Core/Src/robostride_test.o
  .debug_rnglists
@@ -4606,7 +4605,7 @@ LOAD C:/ST/STM32CubeIDE_2.0.0/STM32CubeIDE/plugins/com.st.stm32cube.ide.mcu.exte
  .debug_rnglists
                 0x000005aa      0x1bc ./Drivers/STM32F4xx_HAL_Driver/Src/stm32f4xx_hal_uart.o
 
-.debug_macro    0x00000000     0x37c9
+.debug_macro    0x00000000     0x37bd
  .debug_macro   0x00000000      0x306 ./Core/Src/main.o
  .debug_macro   0x00000306       0x61 ./Core/Src/main.o
  .debug_macro   0x00000367       0x2a ./Core/Src/main.o
@@ -4634,100 +4633,100 @@ LOAD C:/ST/STM32CubeIDE_2.0.0/STM32CubeIDE/plugins/com.st.stm32cube.ide.mcu.exte
  .debug_macro   0x00001021       0x9e ./Core/Src/motor_chain.o
  .debug_macro   0x000010bf      0x112 ./Core/Src/motor_chain.o
  .debug_macro   0x000011d1       0x56 ./Core/Src/motor_chain.o
- .debug_macro   0x00001227       0x6a ./Core/Src/motor_chain.o
- .debug_macro   0x00001291      0x2ba ./Core/Src/robostride_test.o
- .debug_macro   0x0000154b       0x10 ./Core/Src/robostride_test.o
- .debug_macro   0x0000155b      0x1d3 ./Core/Src/stm32f4xx_hal_msp.o
- .debug_macro   0x0000172e      0x1dd ./Core/Src/stm32f4xx_it.o
- .debug_macro   0x0000190b      0x274 ./Core/Src/syscalls.o
- .debug_macro   0x00001b7f       0x5b ./Core/Src/syscalls.o
- .debug_macro   0x00001bda       0x94 ./Core/Src/syscalls.o
- .debug_macro   0x00001c6e       0x57 ./Core/Src/syscalls.o
- .debug_macro   0x00001cc5       0x10 ./Core/Src/syscalls.o
- .debug_macro   0x00001cd5       0x10 ./Core/Src/syscalls.o
- .debug_macro   0x00001ce5       0x10 ./Core/Src/syscalls.o
- .debug_macro   0x00001cf5       0x10 ./Core/Src/syscalls.o
- .debug_macro   0x00001d05       0x1c ./Core/Src/syscalls.o
- .debug_macro   0x00001d21       0x52 ./Core/Src/syscalls.o
- .debug_macro   0x00001d73       0x22 ./Core/Src/syscalls.o
- .debug_macro   0x00001d95       0x10 ./Core/Src/syscalls.o
- .debug_macro   0x00001da5       0x52 ./Core/Src/syscalls.o
- .debug_macro   0x00001df7       0xcf ./Core/Src/syscalls.o
- .debug_macro   0x00001ec6       0x1c ./Core/Src/syscalls.o
- .debug_macro   0x00001ee2       0x3d ./Core/Src/syscalls.o
- .debug_macro   0x00001f1f       0x35 ./Core/Src/syscalls.o
- .debug_macro   0x00001f54      0x12c ./Core/Src/syscalls.o
- .debug_macro   0x00002080       0x16 ./Core/Src/syscalls.o
- .debug_macro   0x00002096       0x16 ./Core/Src/syscalls.o
- .debug_macro   0x000020ac       0x29 ./Core/Src/syscalls.o
- .debug_macro   0x000020d5       0x10 ./Core/Src/syscalls.o
- .debug_macro   0x000020e5      0x242 ./Core/Src/syscalls.o
- .debug_macro   0x00002327       0x1c ./Core/Src/syscalls.o
- .debug_macro   0x00002343       0x10 ./Core/Src/syscalls.o
- .debug_macro   0x00002353      0x18a ./Core/Src/syscalls.o
- .debug_macro   0x000024dd       0x16 ./Core/Src/syscalls.o
- .debug_macro   0x000024f3       0xce ./Core/Src/syscalls.o
- .debug_macro   0x000025c1      0x112 ./Core/Src/sysmem.o
- .debug_macro   0x000026d3      0x23c ./Core/Src/sysmem.o
- .debug_macro   0x0000290f      0x1c4 ./Core/Src/system_stm32f4xx.o
- .debug_macro   0x00002ad3      0x224 ./Drivers/STM32F4xx_HAL_Driver/Src/stm32f4xx_hal.o
- .debug_macro   0x00002cf7      0x1d3 ./Drivers/STM32F4xx_HAL_Driver/Src/stm32f4xx_hal_can.o
- .debug_macro   0x00002eca      0x1c4 ./Drivers/STM32F4xx_HAL_Driver/Src/stm32f4xx_hal_cortex.o
- .debug_macro   0x0000308e      0x1ca ./Drivers/STM32F4xx_HAL_Driver/Src/stm32f4xx_hal_gpio.o
- .debug_macro   0x00003258      0x1e8 ./Drivers/STM32F4xx_HAL_Driver/Src/stm32f4xx_hal_rcc.o
- .debug_macro   0x00003440      0x1c4 ./Drivers/STM32F4xx_HAL_Driver/Src/stm32f4xx_hal_rcc_ex.o
- .debug_macro   0x00003604      0x1c5 ./Drivers/STM32F4xx_HAL_Driver/Src/stm32f4xx_hal_uart.o
+ .debug_macro   0x00001227       0x5e ./Core/Src/motor_chain.o
+ .debug_macro   0x00001285      0x2ba ./Core/Src/robostride_test.o
+ .debug_macro   0x0000153f       0x10 ./Core/Src/robostride_test.o
+ .debug_macro   0x0000154f      0x1d3 ./Core/Src/stm32f4xx_hal_msp.o
+ .debug_macro   0x00001722      0x1dd ./Core/Src/stm32f4xx_it.o
+ .debug_macro   0x000018ff      0x274 ./Core/Src/syscalls.o
+ .debug_macro   0x00001b73       0x5b ./Core/Src/syscalls.o
+ .debug_macro   0x00001bce       0x94 ./Core/Src/syscalls.o
+ .debug_macro   0x00001c62       0x57 ./Core/Src/syscalls.o
+ .debug_macro   0x00001cb9       0x10 ./Core/Src/syscalls.o
+ .debug_macro   0x00001cc9       0x10 ./Core/Src/syscalls.o
+ .debug_macro   0x00001cd9       0x10 ./Core/Src/syscalls.o
+ .debug_macro   0x00001ce9       0x10 ./Core/Src/syscalls.o
+ .debug_macro   0x00001cf9       0x1c ./Core/Src/syscalls.o
+ .debug_macro   0x00001d15       0x52 ./Core/Src/syscalls.o
+ .debug_macro   0x00001d67       0x22 ./Core/Src/syscalls.o
+ .debug_macro   0x00001d89       0x10 ./Core/Src/syscalls.o
+ .debug_macro   0x00001d99       0x52 ./Core/Src/syscalls.o
+ .debug_macro   0x00001deb       0xcf ./Core/Src/syscalls.o
+ .debug_macro   0x00001eba       0x1c ./Core/Src/syscalls.o
+ .debug_macro   0x00001ed6       0x3d ./Core/Src/syscalls.o
+ .debug_macro   0x00001f13       0x35 ./Core/Src/syscalls.o
+ .debug_macro   0x00001f48      0x12c ./Core/Src/syscalls.o
+ .debug_macro   0x00002074       0x16 ./Core/Src/syscalls.o
+ .debug_macro   0x0000208a       0x16 ./Core/Src/syscalls.o
+ .debug_macro   0x000020a0       0x29 ./Core/Src/syscalls.o
+ .debug_macro   0x000020c9       0x10 ./Core/Src/syscalls.o
+ .debug_macro   0x000020d9      0x242 ./Core/Src/syscalls.o
+ .debug_macro   0x0000231b       0x1c ./Core/Src/syscalls.o
+ .debug_macro   0x00002337       0x10 ./Core/Src/syscalls.o
+ .debug_macro   0x00002347      0x18a ./Core/Src/syscalls.o
+ .debug_macro   0x000024d1       0x16 ./Core/Src/syscalls.o
+ .debug_macro   0x000024e7       0xce ./Core/Src/syscalls.o
+ .debug_macro   0x000025b5      0x112 ./Core/Src/sysmem.o
+ .debug_macro   0x000026c7      0x23c ./Core/Src/sysmem.o
+ .debug_macro   0x00002903      0x1c4 ./Core/Src/system_stm32f4xx.o
+ .debug_macro   0x00002ac7      0x224 ./Drivers/STM32F4xx_HAL_Driver/Src/stm32f4xx_hal.o
+ .debug_macro   0x00002ceb      0x1d3 ./Drivers/STM32F4xx_HAL_Driver/Src/stm32f4xx_hal_can.o
+ .debug_macro   0x00002ebe      0x1c4 ./Drivers/STM32F4xx_HAL_Driver/Src/stm32f4xx_hal_cortex.o
+ .debug_macro   0x00003082      0x1ca ./Drivers/STM32F4xx_HAL_Driver/Src/stm32f4xx_hal_gpio.o
+ .debug_macro   0x0000324c      0x1e8 ./Drivers/STM32F4xx_HAL_Driver/Src/stm32f4xx_hal_rcc.o
+ .debug_macro   0x00003434      0x1c4 ./Drivers/STM32F4xx_HAL_Driver/Src/stm32f4xx_hal_rcc_ex.o
+ .debug_macro   0x000035f8      0x1c5 ./Drivers/STM32F4xx_HAL_Driver/Src/stm32f4xx_hal_uart.o
 
-.debug_line     0x00000000     0xc8a0
- .debug_line    0x00000000      0xb48 ./Core/Src/main.o
- .debug_line    0x00000b48      0xda0 ./Core/Src/motor_chain.o
- .debug_line    0x000018e8      0xca4 ./Core/Src/robostride_test.o
- .debug_line    0x0000258c      0x7cf ./Core/Src/stm32f4xx_hal_msp.o
- .debug_line    0x00002d5b      0x7f7 ./Core/Src/stm32f4xx_it.o
- .debug_line    0x00003552      0x8b1 ./Core/Src/syscalls.o
- .debug_line    0x00003e03      0x58d ./Core/Src/sysmem.o
- .debug_line    0x00004390      0x7a6 ./Core/Src/system_stm32f4xx.o
- .debug_line    0x00004b36       0x7a ./Core/Startup/startup_stm32f446retx.o
- .debug_line    0x00004bb0      0xa22 ./Drivers/STM32F4xx_HAL_Driver/Src/stm32f4xx_hal.o
- .debug_line    0x000055d2     0x11e1 ./Drivers/STM32F4xx_HAL_Driver/Src/stm32f4xx_hal_can.o
- .debug_line    0x000067b3      0xcf2 ./Drivers/STM32F4xx_HAL_Driver/Src/stm32f4xx_hal_cortex.o
- .debug_line    0x000074a5      0xb66 ./Drivers/STM32F4xx_HAL_Driver/Src/stm32f4xx_hal_gpio.o
- .debug_line    0x0000800b      0xe3d ./Drivers/STM32F4xx_HAL_Driver/Src/stm32f4xx_hal_rcc.o
- .debug_line    0x00008e48     0x14ee ./Drivers/STM32F4xx_HAL_Driver/Src/stm32f4xx_hal_rcc_ex.o
- .debug_line    0x0000a336     0x256a ./Drivers/STM32F4xx_HAL_Driver/Src/stm32f4xx_hal_uart.o
+.debug_line     0x00000000     0xc8a3
+ .debug_line    0x00000000      0xafc ./Core/Src/main.o
+ .debug_line    0x00000afc      0xdef ./Core/Src/motor_chain.o
+ .debug_line    0x000018eb      0xca4 ./Core/Src/robostride_test.o
+ .debug_line    0x0000258f      0x7cf ./Core/Src/stm32f4xx_hal_msp.o
+ .debug_line    0x00002d5e      0x7f7 ./Core/Src/stm32f4xx_it.o
+ .debug_line    0x00003555      0x8b1 ./Core/Src/syscalls.o
+ .debug_line    0x00003e06      0x58d ./Core/Src/sysmem.o
+ .debug_line    0x00004393      0x7a6 ./Core/Src/system_stm32f4xx.o
+ .debug_line    0x00004b39       0x7a ./Core/Startup/startup_stm32f446retx.o
+ .debug_line    0x00004bb3      0xa22 ./Drivers/STM32F4xx_HAL_Driver/Src/stm32f4xx_hal.o
+ .debug_line    0x000055d5     0x11e1 ./Drivers/STM32F4xx_HAL_Driver/Src/stm32f4xx_hal_can.o
+ .debug_line    0x000067b6      0xcf2 ./Drivers/STM32F4xx_HAL_Driver/Src/stm32f4xx_hal_cortex.o
+ .debug_line    0x000074a8      0xb66 ./Drivers/STM32F4xx_HAL_Driver/Src/stm32f4xx_hal_gpio.o
+ .debug_line    0x0000800e      0xe3d ./Drivers/STM32F4xx_HAL_Driver/Src/stm32f4xx_hal_rcc.o
+ .debug_line    0x00008e4b     0x14ee ./Drivers/STM32F4xx_HAL_Driver/Src/stm32f4xx_hal_rcc_ex.o
+ .debug_line    0x0000a339     0x256a ./Drivers/STM32F4xx_HAL_Driver/Src/stm32f4xx_hal_uart.o
 
-.debug_str      0x00000000    0xcd405
- .debug_str     0x00000000    0xcd405 ./Core/Src/main.o
-                              0xc9111 (size before relaxing)
- .debug_str     0x000cd405        0x0 ./Core/Src/motor_chain.o
-                              0xc8a82 (size before relaxing)
- .debug_str     0x000cd405        0x0 ./Core/Src/robostride_test.o
-                              0xc8309 (size before relaxing)
- .debug_str     0x000cd405        0x0 ./Core/Src/stm32f4xx_hal_msp.o
-                              0xc56b7 (size before relaxing)
- .debug_str     0x000cd405        0x0 ./Core/Src/stm32f4xx_it.o
-                              0xc4be0 (size before relaxing)
- .debug_str     0x000cd405        0x0 ./Core/Src/syscalls.o
+.debug_str      0x00000000    0xcd3ce
+ .debug_str     0x00000000    0xcd3ce ./Core/Src/main.o
+                              0xc8f87 (size before relaxing)
+ .debug_str     0x000cd3ce        0x0 ./Core/Src/motor_chain.o
+                              0xc8d8e (size before relaxing)
+ .debug_str     0x000cd3ce        0x0 ./Core/Src/robostride_test.o
+                              0xc82e4 (size before relaxing)
+ .debug_str     0x000cd3ce        0x0 ./Core/Src/stm32f4xx_hal_msp.o
+                              0xc5692 (size before relaxing)
+ .debug_str     0x000cd3ce        0x0 ./Core/Src/stm32f4xx_it.o
+                              0xc4bbb (size before relaxing)
+ .debug_str     0x000cd3ce        0x0 ./Core/Src/syscalls.o
                                0x99d8 (size before relaxing)
- .debug_str     0x000cd405        0x0 ./Core/Src/sysmem.o
+ .debug_str     0x000cd3ce        0x0 ./Core/Src/sysmem.o
                                0x7776 (size before relaxing)
- .debug_str     0x000cd405        0x0 ./Core/Src/system_stm32f4xx.o
+ .debug_str     0x000cd3ce        0x0 ./Core/Src/system_stm32f4xx.o
                               0xc491d (size before relaxing)
- .debug_str     0x000cd405        0x0 ./Core/Startup/startup_stm32f446retx.o
+ .debug_str     0x000cd3ce        0x0 ./Core/Startup/startup_stm32f446retx.o
                                  0x78 (size before relaxing)
- .debug_str     0x000cd405        0x0 ./Drivers/STM32F4xx_HAL_Driver/Src/stm32f4xx_hal.o
+ .debug_str     0x000cd3ce        0x0 ./Drivers/STM32F4xx_HAL_Driver/Src/stm32f4xx_hal.o
                               0xc54e2 (size before relaxing)
- .debug_str     0x000cd405        0x0 ./Drivers/STM32F4xx_HAL_Driver/Src/stm32f4xx_hal_can.o
+ .debug_str     0x000cd3ce        0x0 ./Drivers/STM32F4xx_HAL_Driver/Src/stm32f4xx_hal_can.o
                               0xc4ff2 (size before relaxing)
- .debug_str     0x000cd405        0x0 ./Drivers/STM32F4xx_HAL_Driver/Src/stm32f4xx_hal_cortex.o
+ .debug_str     0x000cd3ce        0x0 ./Drivers/STM32F4xx_HAL_Driver/Src/stm32f4xx_hal_cortex.o
                               0xc5239 (size before relaxing)
- .debug_str     0x000cd405        0x0 ./Drivers/STM32F4xx_HAL_Driver/Src/stm32f4xx_hal_gpio.o
+ .debug_str     0x000cd3ce        0x0 ./Drivers/STM32F4xx_HAL_Driver/Src/stm32f4xx_hal_gpio.o
                               0xc4a98 (size before relaxing)
- .debug_str     0x000cd405        0x0 ./Drivers/STM32F4xx_HAL_Driver/Src/stm32f4xx_hal_rcc.o
+ .debug_str     0x000cd3ce        0x0 ./Drivers/STM32F4xx_HAL_Driver/Src/stm32f4xx_hal_rcc.o
                               0xc4d56 (size before relaxing)
- .debug_str     0x000cd405        0x0 ./Drivers/STM32F4xx_HAL_Driver/Src/stm32f4xx_hal_rcc_ex.o
+ .debug_str     0x000cd3ce        0x0 ./Drivers/STM32F4xx_HAL_Driver/Src/stm32f4xx_hal_rcc_ex.o
                               0xc4d89 (size before relaxing)
- .debug_str     0x000cd405        0x0 ./Drivers/STM32F4xx_HAL_Driver/Src/stm32f4xx_hal_uart.o
+ .debug_str     0x000cd3ce        0x0 ./Drivers/STM32F4xx_HAL_Driver/Src/stm32f4xx_hal_uart.o
                               0xc530d (size before relaxing)
 
 .comment        0x00000000       0x43
@@ -4763,8 +4762,8 @@ LOAD C:/ST/STM32CubeIDE_2.0.0/STM32CubeIDE/plugins/com.st.stm32cube.ide.mcu.exte
                                  0x44 (size before relaxing)
 
 .debug_frame    0x00000000     0x3c44
- .debug_frame   0x00000000       0xf4 ./Core/Src/main.o
- .debug_frame   0x000000f4      0x1c0 ./Core/Src/motor_chain.o
+ .debug_frame   0x00000000       0xd0 ./Core/Src/main.o
+ .debug_frame   0x000000d0      0x1e4 ./Core/Src/motor_chain.o
  .debug_frame   0x000002b4      0x204 ./Core/Src/robostride_test.o
  .debug_frame   0x000004b8       0xc4 ./Core/Src/stm32f4xx_hal_msp.o
  .debug_frame   0x0000057c      0x120 ./Core/Src/stm32f4xx_it.o

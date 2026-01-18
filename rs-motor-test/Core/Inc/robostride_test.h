@@ -88,7 +88,9 @@ typedef struct {
     float torq; // Nm
 } motor_t;
 
+extern uint32_t TxMailbox;
 extern CAN_RxHeaderTypeDef rs_can_rx_header;
+
 
 // --- Function Prototypes ---
 
@@ -101,6 +103,7 @@ HAL_StatusTypeDef can_mit_control_set(uint8_t id, float torque, float MechPositi
 
 // Comm Type 2 (Rx Handling)
 HAL_StatusTypeDef can_unpack_motor_feedback(motor_t* motor, uint8_t* recv_buf);
+
 
 // Comm Type 3
 HAL_StatusTypeDef can_enable_motor(uint8_t id, uint16_t master_id);

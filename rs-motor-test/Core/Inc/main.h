@@ -38,13 +38,8 @@ extern "C" {
 /* USER CODE BEGIN ET */
 extern UART_HandleTypeDef huart2;
 extern CAN_HandleTypeDef hcan1;
-extern uint32_t TxMailbox;
-extern uint8_t can_rx_flag;
-extern uint8_t rx_data[8];
 
 
-#define RS_test_motor_id	1
-#define CAN_master_id		253
 
 /* USER CODE END ET */
 
