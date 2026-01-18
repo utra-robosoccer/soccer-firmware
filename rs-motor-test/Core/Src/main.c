@@ -111,6 +111,7 @@ int main(void)
   MX_USART2_UART_Init();
   MX_CAN1_Init();
   /* USER CODE BEGIN 2 */
+
   if(can_bus_init() != HAL_OK) return 1;
   if(motor_chain_init() != HAL_OK) return 1;
 

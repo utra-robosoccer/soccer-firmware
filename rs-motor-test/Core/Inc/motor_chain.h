@@ -20,7 +20,7 @@ extern motor_t motors[MAX_MOTOR_COUNT];
 extern uint8_t can_rx_flag;
 extern uint8_t rx_data[8];
 
-void HAL_CAN_RxFifo0MsgPendingCallback(CAN_HandleTypeDef *hcan);
+//void HAL_CAN_RxFifo0MsgPendingCallback(CAN_HandleTypeDef *hcan);
 
 HAL_StatusTypeDef motor_chain_init();
 
