@@ -4,7 +4,7 @@
 ../Core/Src/motor_chain.c:81:13:print_unified_can_response	432	static
 ../Core/Src/motor_chain.c:140:19:motor_chain_init	24	static
 ../Core/Src/motor_chain.c:198:19:motor_chain_go_zeropos	24	static
-../Core/Src/motor_chain.c:226:19:motor_chain_go_zeropos_dbg	24	static
+../Core/Src/motor_chain.c:226:19:motor_chain_go_zeropos_dbg	32	static
 ../Core/Src/motor_chain.c:258:19:motor_set_spd	32	static
 ../Core/Src/motor_chain.c:275:19:motor_set_spd_dbg	40	static
 ../Core/Src/motor_chain.c:297:19:motor_set_pos_spd_dbg	40	static

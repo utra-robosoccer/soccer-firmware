@@ -4,7 +4,7 @@
 ../Core/Src/motor_chain.c:81:13:print_unified_can_response	7
 ../Core/Src/motor_chain.c:140:19:motor_chain_init	14
 ../Core/Src/motor_chain.c:198:19:motor_chain_go_zeropos	7
-../Core/Src/motor_chain.c:226:19:motor_chain_go_zeropos_dbg	7
+../Core/Src/motor_chain.c:226:19:motor_chain_go_zeropos_dbg	8
 ../Core/Src/motor_chain.c:258:19:motor_set_spd	4
 ../Core/Src/motor_chain.c:275:19:motor_set_spd_dbg	5
 ../Core/Src/motor_chain.c:297:19:motor_set_pos_spd_dbg	5

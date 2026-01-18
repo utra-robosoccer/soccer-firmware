@@ -217,7 +217,7 @@ HAL_StatusTypeDef motor_chain_go_zeropos ()
 					return HAL_TIMEOUT;
 				}
 			}
-		} {return HAL_ERROR;}
+		} else {return HAL_ERROR;}
 	}
 
 	return HAL_OK;
@@ -245,7 +245,7 @@ HAL_StatusTypeDef motor_chain_go_zeropos_dbg ()
 					return HAL_TIMEOUT;
 				}
 			}
-		} {return HAL_ERROR;}
+		} else {return HAL_ERROR;}
 
 		if (can_rx_flag) {
 			print_unified_can_response(&huart2, 2, &motors[target_id - 1], rx_data, rs_can_rx_header.ExtId);
@@ -267,7 +267,7 @@ HAL_StatusTypeDef motor_set_spd (uint8_t target_id, float spd, float pd)
 				return HAL_TIMEOUT;
 			}
 		}
-	} {return HAL_ERROR;}
+	} else {return HAL_ERROR;}
 
 	return HAL_OK;
 }
@@ -289,7 +289,7 @@ HAL_StatusTypeDef motor_set_spd_dbg (uint8_t target_id, float spd, float pd)
 		if (can_rx_flag) {
 			print_unified_can_response(&huart2, 2, &motors[target_id - 1], rx_data, rs_can_rx_header.ExtId);
 		}
-	} {return HAL_ERROR;}
+	} else {return HAL_ERROR;}
 
 	return HAL_OK;
 }
@@ -311,7 +311,7 @@ HAL_StatusTypeDef motor_set_pos_spd_dbg (uint8_t target_id, float pos, float spd
 		if (can_rx_flag) {
 			print_unified_can_response(&huart2, 2, &motors[target_id - 1], rx_data, rs_can_rx_header.ExtId);
 		}
-	} {return HAL_ERROR;}
+	} else {return HAL_ERROR;}
 
 	return HAL_OK;
 }

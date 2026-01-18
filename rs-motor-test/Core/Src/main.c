@@ -70,12 +70,6 @@ static void MX_CAN1_Init(void);
 /* USER CODE BEGIN 0 */
 char uart_msg[100];
 
-
-
-
-
-
-
 /* USER CODE END 0 */
 
 /**
@@ -148,7 +142,7 @@ int main(void)
    			   spd_1 -= 0.1;
    		   }
    	   }
-      }
+    }
 //   while(motor_check_angle_dbg(&motors[0], 0, -4, 5)!= HAL_OK);
 //   while(motor_check_angle_dbg(&motors[0], -10, -5, 5)!= HAL_OK);
 
