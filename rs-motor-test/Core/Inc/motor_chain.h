@@ -30,7 +30,8 @@ HAL_StatusTypeDef motor_chain_go_zeropos_dbg ();
 HAL_StatusTypeDef motor_set_spd (uint8_t target_id, float spd, float pd);
 HAL_StatusTypeDef motor_set_spd_dbg (uint8_t target_id, float spd, float pd);
 
-HAL_StatusTypeDef motor_set_pos_spd_dbg (uint8_t target_id, float pos, float spd);
+HAL_StatusTypeDef motor_set_mit (uint8_t target_id, float torq, float pos, float spd, float kp, float kd);
+HAL_StatusTypeDef motor_set_mit_dbg (uint8_t target_id, float torq, float pos, float spd, float kp, float kd);
 
 HAL_StatusTypeDef motor_check_angle (motor_t *motor, float pos, float spd, float pd);
 HAL_StatusTypeDef motor_check_angle_dbg (motor_t *motor, float pos, float spd, float pd);

@@ -7,6 +7,7 @@
 ../Core/Src/motor_chain.c:226:19:motor_chain_go_zeropos_dbg	8
 ../Core/Src/motor_chain.c:258:19:motor_set_spd	4
 ../Core/Src/motor_chain.c:275:19:motor_set_spd_dbg	5
-../Core/Src/motor_chain.c:297:19:motor_set_pos_spd_dbg	5
-../Core/Src/motor_chain.c:319:19:motor_check_angle	6
-../Core/Src/motor_chain.c:334:19:motor_check_angle_dbg	6
+../Core/Src/motor_chain.c:297:19:motor_set_mit	4
+../Core/Src/motor_chain.c:316:19:motor_set_mit_dbg	5
+../Core/Src/motor_chain.c:338:19:motor_check_angle	6
+../Core/Src/motor_chain.c:353:19:motor_check_angle_dbg	6

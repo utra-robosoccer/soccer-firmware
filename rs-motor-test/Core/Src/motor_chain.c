@@ -210,7 +210,7 @@ HAL_StatusTypeDef motor_chain_go_zeropos ()
 			direction = 1;
 		} else {continue;} //motor is @zero pos
 
-		if (can_mit_control_set(target_id, 0.0f, 5.0 * direction, 0.0f, 100.0f, 5.0f) == HAL_OK) {
+		if (can_mit_control_set(target_id, 0.0f, 0.0f, 5.0 * direction, 100.0f, 5.0f) == HAL_OK) {
 			tickstart = HAL_GetTick();
 			while (can_rx_flag == 0) {
 				if ((HAL_GetTick() - tickstart) > 100) {
@@ -238,7 +238,7 @@ HAL_StatusTypeDef motor_chain_go_zeropos_dbg ()
 			direction = 1;
 		} else {continue;} //motor is @zero pos
 
-		if (can_mit_control_set(target_id, 0.0f, 5.0 * direction, 0.0f, 100.0f, 5.0f) == HAL_OK) {
+		if (can_mit_control_set(target_id, 0.0f, 0.0f, 5.0 * direction, 100.0f, 5.0f) == HAL_OK) {
 			tickstart = HAL_GetTick();
 			while (can_rx_flag == 0) {
 				if ((HAL_GetTick() - tickstart) > 100) {
@@ -294,11 +294,30 @@ HAL_StatusTypeDef motor_set_spd_dbg (uint8_t target_id, float spd, float pd)
 	return HAL_OK;
 }
 
-HAL_StatusTypeDef motor_set_pos_spd_dbg (uint8_t target_id, float pos, float spd)
+HAL_StatusTypeDef motor_set_mit (uint8_t target_id, float torq, float pos, float spd, float kp, float kd)
 {
 	uint32_t tickstart;
 	can_rx_flag = 0;
-	if (can_mit_control_set(target_id, 0.0f, pos, spd, 100, 5) == HAL_OK) {
+	if (can_mit_control_set(target_id, torq, pos, spd, kp, kd) == HAL_OK) {
+
+		tickstart = HAL_GetTick();
+		while (can_rx_flag == 0) {
+			if ((HAL_GetTick() - tickstart) > 100) {
+				return HAL_TIMEOUT;
+			}
+		}
+
+	} else {return HAL_ERROR;}
+
+	return HAL_OK;
+}
+
+
+HAL_StatusTypeDef motor_set_mit_dbg (uint8_t target_id, float torq, float pos, float spd, float kp, float kd)
+{
+	uint32_t tickstart;
+	can_rx_flag = 0;
+	if (can_mit_control_set(target_id, torq, pos, spd, kp, kd) == HAL_OK) {
 
 		tickstart = HAL_GetTick();
 		while (can_rx_flag == 0) {
