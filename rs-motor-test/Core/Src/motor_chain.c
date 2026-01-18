@@ -3,7 +3,7 @@
 motor_t motors[MAX_MOTOR_COUNT]; //This is the motor chain array
 
 // For FIFO Intr Callback function
-uint8_t can_rx_flag;
+uint8_t can_rx_flag = 0;
 uint8_t rx_data[8];
 
 void HAL_CAN_RxFifo0MsgPendingCallback(CAN_HandleTypeDef *hcan)
@@ -153,7 +153,7 @@ HAL_StatusTypeDef motor_chain_init()
 		        if (can_rx_flag) {
 		            print_unified_can_response(&huart2, 0, &motors[target_id - 1], rx_data, rs_can_rx_header.ExtId);
 		        }
-		    }
+		    } else {return HAL_ERROR;}
 		 HAL_Delay(50);
 
 		 //Set Motor Mode to MIT
@@ -170,7 +170,7 @@ HAL_StatusTypeDef motor_chain_init()
 				 HAL_UART_Transmit(&huart2, (uint8_t*)"Set Mode\r\n", 10, 100);
 				 print_unified_can_response(&huart2, 2, &motors[target_id - 1], rx_data, rs_can_rx_header.ExtId);
 			 }
-		 }
+		 } else {return HAL_ERROR;}
 		 HAL_Delay(50);
 
 		 //Enable Motor
@@ -187,7 +187,7 @@ HAL_StatusTypeDef motor_chain_init()
 				 HAL_UART_Transmit(&huart2, (uint8_t*)"Enable\r\n", 8, 100);
 				 print_unified_can_response(&huart2, 2, &motors[target_id - 1], rx_data, rs_can_rx_header.ExtId);
 			 }
-		 }
+		 } else {return HAL_ERROR;}
 		 HAL_Delay(50);
 
 	}

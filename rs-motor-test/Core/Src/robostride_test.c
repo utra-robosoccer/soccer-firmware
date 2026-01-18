@@ -36,6 +36,41 @@ static float uint_to_float(int x_int, float x_min, float x_max, int bits)
 }
 
 // ============================================================================
+// CAN Bus Init
+// ============================================================================
+HAL_StatusTypeDef can_bus_init()
+{
+	// Config CAN Filter to receive all incoming frames
+	CAN_FilterTypeDef sFilterConfig;
+	sFilterConfig.FilterBank = 0;
+	sFilterConfig.FilterMode = CAN_FILTERMODE_IDMASK;
+	sFilterConfig.FilterScale = CAN_FILTERSCALE_32BIT;
+	sFilterConfig.FilterIdHigh = 0x0000;
+	sFilterConfig.FilterIdLow = 0x0000;
+	sFilterConfig.FilterMaskIdHigh = 0x0000;
+	sFilterConfig.FilterMaskIdLow = 0x0000;
+	sFilterConfig.FilterFIFOAssignment = CAN_RX_FIFO0;
+	sFilterConfig.FilterActivation = ENABLE;
+	sFilterConfig.SlaveStartFilterBank = 14;
+
+	if (HAL_CAN_ConfigFilter(&hcan1, &sFilterConfig) != HAL_OK)
+	{
+	Error_Handler();
+	}
+
+	// Start STM32 CAN Bus
+	if (HAL_CAN_Start(&hcan1) != HAL_OK){
+	 return 1;
+	}
+
+	// Init CAN receive msg FIFO Intr
+	HAL_CAN_ActivateNotification(&hcan1, CAN_IT_RX_FIFO0_MSG_PENDING);
+
+	return HAL_OK;
+}
+
+
+// ============================================================================
 // COMM TYPE 0: Get Device ID
 // ============================================================================
 HAL_StatusTypeDef can_get_motor_id(uint8_t id, uint16_t master_id)
