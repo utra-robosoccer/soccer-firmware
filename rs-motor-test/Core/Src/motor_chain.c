@@ -137,28 +137,60 @@ HAL_StatusTypeDef motor_chain_init()
 	return HAL_OK;
 }
 
-HAL_StatusTypeDef motor_chain_go_zeropos()
+HAL_StatusTypeDef motor_chain_go_zeropos ()
 {
 	uint32_t tickstart;
 	can_rx_flag = 0;
 
 	float direction;
 
-	for (int target_id = 1; target_id < MAX_MOTOR_COUNT; id ++){
+	for (int target_id = 1; target_id < MAX_MOTOR_COUNT; target_id ++){
 		if(motors[target_id - 1].pos > 0){
 			direction = -1;
 		}
 		else if (motors[target_id - 1].pos < 0){
-			direction =1;
+			direction = 1;
 		} else {continue;} //motor is @zero pos
 
-		if (can_mit_control_set(target_id, f, 5.0* direction, 0.0f, 100.0f, 5.0f) == HAL_OK) {
+		if (can_mit_control_set(target_id, 0.0f, 5.0 * direction, 0.0f, 100.0f, 5.0f) == HAL_OK) {
 			tickstart = HAL_GetTick();
 			while (can_rx_flag == 0) {
 				if ((HAL_GetTick() - tickstart) > 100) {
 					return HAL_TIMEOUT;
 				}
 			}
+		}
+	}
+
+	return HAL_OK;
+}
+
+HAL_StatusTypeDef motor_chain_go_zeropos_dbg ()
+{
+	uint32_t tickstart;
+	can_rx_flag = 0;
+
+	float direction;
+
+	for (int target_id = 1; target_id < MAX_MOTOR_COUNT; target_id ++){
+		if(motors[target_id - 1].pos > 0){
+			direction = -1;
+		}
+		else if (motors[target_id - 1].pos < 0){
+			direction = 1;
+		} else {continue;} //motor is @zero pos
+
+		if (can_mit_control_set(target_id, 0.0f, 5.0 * direction, 0.0f, 100.0f, 5.0f) == HAL_OK) {
+			tickstart = HAL_GetTick();
+			while (can_rx_flag == 0) {
+				if ((HAL_GetTick() - tickstart) > 100) {
+					return HAL_TIMEOUT;
+				}
+			}
+		}
+
+		if (can_rx_flag) {
+			print_unified_can_response(&huart2, 2, &motors[target_id - 1], rx_data, rs_can_rx_header.ExtId);
 		}
 	}
 
