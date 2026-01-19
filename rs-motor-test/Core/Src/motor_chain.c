@@ -220,6 +220,7 @@ HAL_StatusTypeDef motor_chain_go_zeropos ()
 		} else {return HAL_ERROR;}
 	}
 
+	HAL_Delay(500); //Letting all the motors react
 	return HAL_OK;
 }
 
@@ -252,6 +253,7 @@ HAL_StatusTypeDef motor_chain_go_zeropos_dbg ()
 		}
 	}
 
+	HAL_Delay(500); //Letting all the motors react
 	return HAL_OK;
 }
 

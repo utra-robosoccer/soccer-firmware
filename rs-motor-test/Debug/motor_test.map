@@ -464,9 +464,9 @@ Discarded input sections
  .data          0x00000000        0x0 ./Core/Src/motor_chain.o
  .bss           0x00000000        0x0 ./Core/Src/motor_chain.o
  .text.motor_chain_go_zeropos
-                0x00000000       0xe4 ./Core/Src/motor_chain.o
+                0x00000000       0xec ./Core/Src/motor_chain.o
  .text.motor_chain_go_zeropos_dbg
-                0x00000000      0x118 ./Core/Src/motor_chain.o
+                0x00000000      0x120 ./Core/Src/motor_chain.o
  .text.motor_set_mit
                 0x00000000       0x7c ./Core/Src/motor_chain.o
  .text.motor_set_mit_dbg
@@ -4683,23 +4683,23 @@ LOAD C:/ST/STM32CubeIDE_2.0.0/STM32CubeIDE/plugins/com.st.stm32cube.ide.mcu.exte
  .debug_macro   0x00003434      0x1c4 ./Drivers/STM32F4xx_HAL_Driver/Src/stm32f4xx_hal_rcc_ex.o
  .debug_macro   0x000035f8      0x1c5 ./Drivers/STM32F4xx_HAL_Driver/Src/stm32f4xx_hal_uart.o
 
-.debug_line     0x00000000     0xc93d
+.debug_line     0x00000000     0xc943
  .debug_line    0x00000000      0xaea ./Core/Src/main.o
- .debug_line    0x00000aea      0xe49 ./Core/Src/motor_chain.o
- .debug_line    0x00001933      0xcf6 ./Core/Src/robostride_test.o
- .debug_line    0x00002629      0x7cf ./Core/Src/stm32f4xx_hal_msp.o
- .debug_line    0x00002df8      0x7f7 ./Core/Src/stm32f4xx_it.o
- .debug_line    0x000035ef      0x8b1 ./Core/Src/syscalls.o
- .debug_line    0x00003ea0      0x58d ./Core/Src/sysmem.o
- .debug_line    0x0000442d      0x7a6 ./Core/Src/system_stm32f4xx.o
- .debug_line    0x00004bd3       0x7a ./Core/Startup/startup_stm32f446retx.o
- .debug_line    0x00004c4d      0xa22 ./Drivers/STM32F4xx_HAL_Driver/Src/stm32f4xx_hal.o
- .debug_line    0x0000566f     0x11e1 ./Drivers/STM32F4xx_HAL_Driver/Src/stm32f4xx_hal_can.o
- .debug_line    0x00006850      0xcf2 ./Drivers/STM32F4xx_HAL_Driver/Src/stm32f4xx_hal_cortex.o
- .debug_line    0x00007542      0xb66 ./Drivers/STM32F4xx_HAL_Driver/Src/stm32f4xx_hal_gpio.o
- .debug_line    0x000080a8      0xe3d ./Drivers/STM32F4xx_HAL_Driver/Src/stm32f4xx_hal_rcc.o
- .debug_line    0x00008ee5     0x14ee ./Drivers/STM32F4xx_HAL_Driver/Src/stm32f4xx_hal_rcc_ex.o
- .debug_line    0x0000a3d3     0x256a ./Drivers/STM32F4xx_HAL_Driver/Src/stm32f4xx_hal_uart.o
+ .debug_line    0x00000aea      0xe4f ./Core/Src/motor_chain.o
+ .debug_line    0x00001939      0xcf6 ./Core/Src/robostride_test.o
+ .debug_line    0x0000262f      0x7cf ./Core/Src/stm32f4xx_hal_msp.o
+ .debug_line    0x00002dfe      0x7f7 ./Core/Src/stm32f4xx_it.o
+ .debug_line    0x000035f5      0x8b1 ./Core/Src/syscalls.o
+ .debug_line    0x00003ea6      0x58d ./Core/Src/sysmem.o
+ .debug_line    0x00004433      0x7a6 ./Core/Src/system_stm32f4xx.o
+ .debug_line    0x00004bd9       0x7a ./Core/Startup/startup_stm32f446retx.o
+ .debug_line    0x00004c53      0xa22 ./Drivers/STM32F4xx_HAL_Driver/Src/stm32f4xx_hal.o
+ .debug_line    0x00005675     0x11e1 ./Drivers/STM32F4xx_HAL_Driver/Src/stm32f4xx_hal_can.o
+ .debug_line    0x00006856      0xcf2 ./Drivers/STM32F4xx_HAL_Driver/Src/stm32f4xx_hal_cortex.o
+ .debug_line    0x00007548      0xb66 ./Drivers/STM32F4xx_HAL_Driver/Src/stm32f4xx_hal_gpio.o
+ .debug_line    0x000080ae      0xe3d ./Drivers/STM32F4xx_HAL_Driver/Src/stm32f4xx_hal_rcc.o
+ .debug_line    0x00008eeb     0x14ee ./Drivers/STM32F4xx_HAL_Driver/Src/stm32f4xx_hal_rcc_ex.o
+ .debug_line    0x0000a3d9     0x256a ./Drivers/STM32F4xx_HAL_Driver/Src/stm32f4xx_hal_uart.o
 
 .debug_str      0x00000000    0xcd3e5
  .debug_str     0x00000000    0xcd3e5 ./Core/Src/main.o
