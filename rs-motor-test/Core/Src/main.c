@@ -223,7 +223,7 @@ int main(void)
    			   spd_1 -= 0.1;
    		   }
    	   }
-      }
+    }
 //   while(motor_check_angle_dbg(&motors[0], 0, -4, 5)!= HAL_OK);
 //   while(motor_check_angle_dbg(&motors[0], -10, -5, 5)!= HAL_OK);
 
