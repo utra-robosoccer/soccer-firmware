@@ -51,6 +51,10 @@
 /* Private variables ---------------------------------------------------------*/
 CAN_HandleTypeDef hcan1;
 
+SPI_HandleTypeDef hspi2;
+DMA_HandleTypeDef hdma_spi2_rx;
+DMA_HandleTypeDef hdma_spi2_tx;
+
 UART_HandleTypeDef huart2;
 
 /* USER CODE BEGIN PV */
@@ -60,8 +64,10 @@ UART_HandleTypeDef huart2;
 /* Private function prototypes -----------------------------------------------*/
 void SystemClock_Config(void);
 static void MX_GPIO_Init(void);
+static void MX_DMA_Init(void);
 static void MX_USART2_UART_Init(void);
 static void MX_CAN1_Init(void);
+static void MX_SPI2_Init(void);
 /* USER CODE BEGIN PFP */
 
 /* USER CODE END PFP */
@@ -69,6 +75,46 @@ static void MX_CAN1_Init(void);
 /* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
 char uart_msg[100];
+
+#define PAYLOAD_LENGTH 8
+
+// TX & RX buffer declaration in MEM
+uint8_t RxBuffer_A[PAYLOAD_LENGTH];
+uint8_t RxBuffer_B[PAYLOAD_LENGTH];
+
+uint8_t TxBuffer_A[PAYLOAD_LENGTH];
+uint8_t TxBuffer_B[PAYLOAD_LENGTH];
+
+// SPI DMA TX & RX Memory addr (swapping)
+uint8_t* CurTxBuf;
+uint8_t* CurRxBuf;
+
+// CAN Bus motor update mem addr (swapping, should always be different from the SPI TX RX mem addr)
+uint8_t* motor_update_buf; //This belongs to the Rx side
+uint8_t* motor_tele_buf; //This belongs to the Tx side
+
+volatile uint8_t data_receive_flag = 0;
+volatile uint8_t data_tx_ready_flag = 0;
+
+void HAL_SPI_TxRxCpltCallback(SPI_HandleTypeDef *hspi)
+{
+	//Handling RX Double buffer
+	if (CurRxBuf == RxBuffer_A){
+		CurRxBuf = RxBuffer_B;
+		motor_update_buf = RxBuffer_A;
+	}
+	else {
+		CurRxBuf = RxBuffer_A;
+		motor_update_buf = RxBuffer_B;
+	}
+
+	data_receive_flag = 1;
+
+	//Handling TX Double buffer
+	if (data_tx_ready_flag){
+		//Main loop signals a complete motor chain telemetry
+	}
+}
 
 /* USER CODE END 0 */
 
@@ -102,12 +148,21 @@ int main(void)
 
   /* Initialize all configured peripherals */
   MX_GPIO_Init();
+  MX_DMA_Init();
   MX_USART2_UART_Init();
   MX_CAN1_Init();
+  MX_SPI2_Init();
   /* USER CODE BEGIN 2 */
 
   if(can_bus_init() != HAL_OK) return 1;
   if(motor_chain_init() != HAL_OK) return 1;
+
+  if (HAL_SPI_TransmitReceive_DMA(&hspi2, CurTxBuf, CurRxBuf, PAYLOAD_LENGTH) != HAL_OK){
+	  //Set up DMA here, ready to receive
+	  Error_Handler();
+  }
+
+
 
 //   motor_set_spd(1, 2.0f, 10.0f);
 //   motor_set_spd(2, 3.0f, 10.0f);
@@ -123,26 +178,26 @@ int main(void)
    float pos_step_2 = 1.2;
    float step_1 = 0.2;
    float step_2 = 0.1;
-
-   while(motor_check_angle_dbg(&motors[0], 10, spd_1, 5)!= HAL_OK)
-   {
-	   if(HAL_GetTick() - tick_inc >= 1){
-		   tick_inc = HAL_GetTick();
-		   if (spd_1 <= 10){
-			   spd_1 += 0.1;
-		   }
-	   }
-   }
-   spd_1 = 0.0;
-   while(motor_check_angle_dbg(&motors[0], 0, spd_1, 5)!= HAL_OK)
-   {
-   	   if(HAL_GetTick() - tick_inc >= 1){
-   		   tick_inc = HAL_GetTick();
-   		   if (spd_1 >= -5 ){
-   			   spd_1 -= 0.1;
-   		   }
-   	   }
-    }
+//
+//   while(motor_check_angle_dbg(&motors[0], 10, spd_1, 5)!= HAL_OK)
+//   {
+//	   if(HAL_GetTick() - tick_inc >= 1){
+//		   tick_inc = HAL_GetTick();
+//		   if (spd_1 <= 10){
+//			   spd_1 += 0.1;
+//		   }
+//	   }
+//   }
+//   spd_1 = 0.0;
+//   while(motor_check_angle_dbg(&motors[0], 0, spd_1, 5)!= HAL_OK)
+//   {
+//   	   if(HAL_GetTick() - tick_inc >= 1){
+//   		   tick_inc = HAL_GetTick();
+//   		   if (spd_1 >= -5 ){
+//   			   spd_1 -= 0.1;
+//   		   }
+//   	   }
+//    }
 //   while(motor_check_angle_dbg(&motors[0], 0, -4, 5)!= HAL_OK);
 //   while(motor_check_angle_dbg(&motors[0], -10, -5, 5)!= HAL_OK);
 
@@ -156,7 +211,7 @@ int main(void)
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
-	if(HAL_GetTick() - tick_tele >= 100){
+	if(HAL_GetTick() - tick_tele >= 1){
 		tick_tele = HAL_GetTick();
 		motor_set_spd(1, spd_1, 10.0f);
 		motor_set_spd(2, spd_2, 10.0f);
@@ -283,6 +338,43 @@ static void MX_CAN1_Init(void)
 }
 
 /**
+  * @brief SPI2 Initialization Function
+  * @param None
+  * @retval None
+  */
+static void MX_SPI2_Init(void)
+{
+
+  /* USER CODE BEGIN SPI2_Init 0 */
+
+  /* USER CODE END SPI2_Init 0 */
+
+  /* USER CODE BEGIN SPI2_Init 1 */
+
+  /* USER CODE END SPI2_Init 1 */
+  /* SPI2 parameter configuration*/
+  hspi2.Instance = SPI2;
+  hspi2.Init.Mode = SPI_MODE_SLAVE;
+  hspi2.Init.Direction = SPI_DIRECTION_2LINES;
+  hspi2.Init.DataSize = SPI_DATASIZE_8BIT;
+  hspi2.Init.CLKPolarity = SPI_POLARITY_LOW;
+  hspi2.Init.CLKPhase = SPI_PHASE_1EDGE;
+  hspi2.Init.NSS = SPI_NSS_HARD_INPUT;
+  hspi2.Init.FirstBit = SPI_FIRSTBIT_MSB;
+  hspi2.Init.TIMode = SPI_TIMODE_DISABLE;
+  hspi2.Init.CRCCalculation = SPI_CRCCALCULATION_DISABLE;
+  hspi2.Init.CRCPolynomial = 10;
+  if (HAL_SPI_Init(&hspi2) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  /* USER CODE BEGIN SPI2_Init 2 */
+
+  /* USER CODE END SPI2_Init 2 */
+
+}
+
+/**
   * @brief USART2 Initialization Function
   * @param None
   * @retval None
@@ -312,6 +404,25 @@ static void MX_USART2_UART_Init(void)
   /* USER CODE BEGIN USART2_Init 2 */
 
   /* USER CODE END USART2_Init 2 */
+
+}
+
+/**
+  * Enable DMA controller clock
+  */
+static void MX_DMA_Init(void)
+{
+
+  /* DMA controller clock enable */
+  __HAL_RCC_DMA1_CLK_ENABLE();
+
+  /* DMA interrupt init */
+  /* DMA1_Stream3_IRQn interrupt configuration */
+  HAL_NVIC_SetPriority(DMA1_Stream3_IRQn, 0, 0);
+  HAL_NVIC_EnableIRQ(DMA1_Stream3_IRQn);
+  /* DMA1_Stream4_IRQn interrupt configuration */
+  HAL_NVIC_SetPriority(DMA1_Stream4_IRQn, 0, 0);
+  HAL_NVIC_EnableIRQ(DMA1_Stream4_IRQn);
 
 }
 
