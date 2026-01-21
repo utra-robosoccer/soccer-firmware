@@ -39,7 +39,10 @@ extern "C" {
 extern UART_HandleTypeDef huart2;
 extern CAN_HandleTypeDef hcan1;
 
-
+extern uint8_t* motor_update_buf; //This belongs to the Rx side
+extern uint8_t* motor_tele_buf; //This belongs to the Tx side
+extern volatile uint8_t data_receive_flag;
+extern volatile uint8_t data_tx_ready_flag;
 
 /* USER CODE END ET */
 

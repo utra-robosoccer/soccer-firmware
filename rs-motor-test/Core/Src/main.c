@@ -113,7 +113,20 @@ void HAL_SPI_TxRxCpltCallback(SPI_HandleTypeDef *hspi)
 	//Handling TX Double buffer
 	if (data_tx_ready_flag){
 		//Main loop signals a complete motor chain telemetry
+		data_tx_ready_flag = 0;
+		//***The Tx ready flag is set in the CAN receive intr service routine***
+		if(CurTxBuf == TxBuffer_A){
+			CurTxBuf = TxBuffer_B;
+			motor_tele_buf = TxBuffer_A;
+		}
+		else {
+			CurTxBuf = TxBuffer_A;
+			motor_tele_buf = TxBuffer_B;
+		}
 	}
+
+	HAL_GPIO_TogglePin(LD2_GPIO_Port, LD2_Pin); //toggle a LED if this callback is triggered
+	HAL_SPI_TransmitReceive_DMA(&hspi2, CurTxBuf, CurRxBuf, PAYLOAD_LENGTH); //rearm DMA
 }
 
 /* USER CODE END 0 */
@@ -157,12 +170,22 @@ int main(void)
   if(can_bus_init() != HAL_OK) return 1;
   if(motor_chain_init() != HAL_OK) return 1;
 
+  //Critical txbuf and rxbuf init
+  CurTxBuf = TxBuffer_A;
+  motor_tele_buf = TxBuffer_B;
+
+  CurRxBuf = RxBuffer_A;
+  motor_update_buf = RxBuffer_B;
+
+  memset(RxBuffer_A, 0, PAYLOAD_LENGTH);
+  memset(RxBuffer_B, 0, PAYLOAD_LENGTH);
+  memset(TxBuffer_A, 0, PAYLOAD_LENGTH);
+  memset(TxBuffer_B, 0, PAYLOAD_LENGTH);
+
   if (HAL_SPI_TransmitReceive_DMA(&hspi2, CurTxBuf, CurRxBuf, PAYLOAD_LENGTH) != HAL_OK){
 	  //Set up DMA here, ready to receive
 	  Error_Handler();
   }
-
-
 
 //   motor_set_spd(1, 2.0f, 10.0f);
 //   motor_set_spd(2, 3.0f, 10.0f);
@@ -230,6 +253,11 @@ int main(void)
 		spd_2 += step_2;
 		if (spd_1 >= 10.0f || spd_1 <= - 10.0f) step_1 *= -1;
 		if (spd_2 >= 10.0f || spd_2 <= - 10.0f) step_2 *= -1;
+
+		if (data_receive_flag){
+			HAL_UART_Transmit(&huart2, motor_update_buf, PAYLOAD_LENGTH, HAL_MAX_DELAY);
+			data_receive_flag = 0;
+		}
 
 //		if (spd_1 <= 10.0f && spd_1 >= - 10.0f) spd_1 += step_1;
 //		if (spd_2 <= 10.0f && spd_2 >= - 10.0f) spd_2 += step_2;

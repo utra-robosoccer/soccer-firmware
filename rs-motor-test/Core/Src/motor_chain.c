@@ -47,7 +47,8 @@ void HAL_CAN_RxFifo0MsgPendingCallback(CAN_HandleTypeDef *hcan)
                 break;
         }
 
-
+        memcpy(motor_tele_buf, rx_data, sizeof(rx_data));
+        data_tx_ready_flag = 1;
     }
     can_rx_flag = 1;
 
