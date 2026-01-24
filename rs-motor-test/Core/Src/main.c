@@ -108,6 +108,7 @@ int main(void)
 
   if(can_bus_init() != HAL_OK) return 1;
   if(motor_chain_init() != HAL_OK) return 1;
+  if(motor_chain_go_zeropos_dbg() != HAL_OK) return 1;
 
 //   motor_set_spd(1, 2.0f, 10.0f);
 //   motor_set_spd(2, 3.0f, 10.0f);
@@ -124,25 +125,25 @@ int main(void)
    float step_1 = 0.2;
    float step_2 = 0.1;
 
-   while(motor_check_angle_dbg(&motors[0], 10, spd_1, 5)!= HAL_OK)
-   {
-	   if(HAL_GetTick() - tick_inc >= 1){
-		   tick_inc = HAL_GetTick();
-		   if (spd_1 <= 10){
-			   spd_1 += 0.1;
-		   }
-	   }
-   }
-   spd_1 = 0.0;
-   while(motor_check_angle_dbg(&motors[0], 0, spd_1, 5)!= HAL_OK)
-   {
-   	   if(HAL_GetTick() - tick_inc >= 1){
-   		   tick_inc = HAL_GetTick();
-   		   if (spd_1 >= -5 ){
-   			   spd_1 -= 0.1;
-   		   }
-   	   }
-    }
+//   while(motor_check_angle_dbg(&motors[0], 10, spd_1, 5)!= HAL_OK)
+//   {
+//	   if(HAL_GetTick() - tick_inc >= 1){
+//		   tick_inc = HAL_GetTick();
+//		   if (spd_1 <= 10){
+//			   spd_1 += 0.1;
+//		   }
+//	   }
+//   }
+//   spd_1 = 0.0;
+//   while(motor_check_angle_dbg(&motors[0], 0, spd_1, 5)!= HAL_OK)
+//   {
+//   	   if(HAL_GetTick() - tick_inc >= 1){
+//   		   tick_inc = HAL_GetTick();
+//   		   if (spd_1 >= -5 ){
+//   			   spd_1 -= 0.1;
+//   		   }
+//   	   }
+//    }
 //   while(motor_check_angle_dbg(&motors[0], 0, -4, 5)!= HAL_OK);
 //   while(motor_check_angle_dbg(&motors[0], -10, -5, 5)!= HAL_OK);
 
