@@ -283,7 +283,7 @@ HAL_StatusTypeDef motor_set_spd_dbg (uint8_t target_id, float spd, float pd)
 
 		tickstart = HAL_GetTick();
 		while (can_rx_flag == 0) {
-			if ((HAL_GetTick() - tickstart) > 100) {
+			if ((HAL_GetTick() - tickstart) > 10) {
 				HAL_UART_Transmit(&huart2, (uint8_t*)"Timeout: MIT Control\r\n", 22, 100);
 				break;
 			}

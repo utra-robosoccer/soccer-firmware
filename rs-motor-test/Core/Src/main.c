@@ -82,8 +82,8 @@ char uart_msg[100];
 uint8_t RxBuffer_A[PAYLOAD_LENGTH];
 uint8_t RxBuffer_B[PAYLOAD_LENGTH];
 
-uint8_t TxBuffer_A[PAYLOAD_LENGTH];
-uint8_t TxBuffer_B[PAYLOAD_LENGTH];
+uint8_t TxBuffer_A[PAYLOAD_LENGTH] = {0xff, 0xff, 0xff, 0xff, 0, 0,0,0};
+uint8_t TxBuffer_B[PAYLOAD_LENGTH] = {0,0,0,0, 0xff,0xff,0xff,0xff};
 
 // SPI DMA TX & RX Memory addr (swapping)
 uint8_t* CurTxBuf;
@@ -95,6 +95,9 @@ uint8_t* motor_tele_buf; //This belongs to the Tx side
 
 volatile uint8_t data_receive_flag = 0;
 volatile uint8_t data_tx_ready_flag = 0;
+
+float spd_dbg = 1.0f;
+uint16_t random_count = 0;
 
 void HAL_SPI_TxRxCpltCallback(SPI_HandleTypeDef *hspi)
 {
@@ -123,6 +126,12 @@ void HAL_SPI_TxRxCpltCallback(SPI_HandleTypeDef *hspi)
 			CurTxBuf = TxBuffer_A;
 			motor_tele_buf = TxBuffer_B;
 		}
+	}
+	random_count ++;
+	if (random_count == 15){
+		random_count = 0;
+		spd_dbg *= -1;
+
 	}
 
 	HAL_GPIO_TogglePin(LD2_GPIO_Port, LD2_Pin); //toggle a LED if this callback is triggered
@@ -234,27 +243,28 @@ int main(void)
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
-	if(HAL_GetTick() - tick_tele >= 1){
-		tick_tele = HAL_GetTick();
-		motor_set_spd(1, spd_1, 10.0f);
-		motor_set_spd(2, spd_2, 10.0f);
-//		if (motor_check_angle_dbg(&motors[0], pos_1, spd_1, 10.0f) == HAL_OK){
-//			HAL_UART_Transmit(&huart2, (uint8_t*)"motor 1 reaches the configured angle\n", 38, HAL_MAX_DELAY);
-//		}
+//	if(HAL_GetTick() - tick_tele >= 1){
+//		tick_tele = HAL_GetTick();
+//		motor_set_spd(1, spd_1, 10.0f);
+//		motor_set_spd(2, spd_2, 10.0f);
+////		if (motor_check_angle_dbg(&motors[0], pos_1, spd_1, 10.0f) == HAL_OK){
+////			HAL_UART_Transmit(&huart2, (uint8_t*)"motor 1 reaches the configured angle\n", 38, HAL_MAX_DELAY);
+////		}
+////
+////		if (motor_check_angle_dbg(&motors[1], pos_2, spd_2, 10.0f) == HAL_OK){
+////			HAL_UART_Transmit(&huart2, (uint8_t*)"motor 2 reaches the configured angle\n", 38, HAL_MAX_DELAY);
+////		}
+//	}
 //
-//		if (motor_check_angle_dbg(&motors[1], pos_2, spd_2, 10.0f) == HAL_OK){
-//			HAL_UART_Transmit(&huart2, (uint8_t*)"motor 2 reaches the configured angle\n", 38, HAL_MAX_DELAY);
-//		}
-	}
-
-	if(HAL_GetTick() - tick_inc >= 200){
-		tick_inc = HAL_GetTick();
-		spd_1 += step_1;
-		spd_2 += step_2;
-		if (spd_1 >= 10.0f || spd_1 <= - 10.0f) step_1 *= -1;
-		if (spd_2 >= 10.0f || spd_2 <= - 10.0f) step_2 *= -1;
-
+//	if(HAL_GetTick() - tick_inc >= 200){
+//		tick_inc = HAL_GetTick();
+//		spd_1 += step_1;
+//		spd_2 += step_2;
+//		if (spd_1 >= 10.0f || spd_1 <= - 10.0f) step_1 *= -1;
+//		if (spd_2 >= 10.0f || spd_2 <= - 10.0f) step_2 *= -1;
+//
 		if (data_receive_flag){
+			motor_set_spd_dbg(1, spd_dbg, 10.0f);
 			HAL_UART_Transmit(&huart2, motor_update_buf, PAYLOAD_LENGTH, HAL_MAX_DELAY);
 			data_receive_flag = 0;
 		}
@@ -264,7 +274,7 @@ int main(void)
 //
 //		if (pos_1 >= 12.0f || pos_1 <= - 12.0f) step_1 *= -1;
 //		if (pos_2 >= 12.0f || pos_2 <= - 12.0f) step_2 *= -1;
-	}
+//	}
 
 //	if(HAL_GetTick() - tick_pos_inc >= 1000){
 //		tick_pos_inc = HAL_GetTick();
