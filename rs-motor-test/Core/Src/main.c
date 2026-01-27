@@ -138,11 +138,13 @@ void HAL_SPI_TxRxCpltCallback(SPI_HandleTypeDef *hspi)
 	HAL_SPI_TransmitReceive_DMA(&hspi2, CurTxBuf, CurRxBuf, PAYLOAD_LENGTH); //rearm DMA
 }
 
+volatile uint8_t spi_error_flag = 0;
 void HAL_SPI_ErrorCallback(SPI_HandleTypeDef *hspi)
 {
 	if (hspi->Instance == SPI2)
 	{
 		//if we detected error, we restart dma, since the isr handler has already cleared all flags for us
+		spi_error_flag = 1;
 		HAL_SPI_TransmitReceive_DMA(&hspi2, CurTxBuf, CurRxBuf, PAYLOAD_LENGTH);
 	}
 }
@@ -276,6 +278,11 @@ int main(void)
 			motor_set_spd_dbg(1, spd_dbg, 10.0f);
 			HAL_UART_Transmit(&huart2, motor_update_buf, PAYLOAD_LENGTH, HAL_MAX_DELAY);
 			data_receive_flag = 0;
+		}
+
+		if(spi_error_flag){
+			HAL_UART_Transmit(&huart2, (const uint8_t*)"SPI Error handler triggered. SPI restarted\r\n", 100, HAL_MAX_DELAY);
+			spi_error_flag = 0;
 		}
 
 //		if (spd_1 <= 10.0f && spd_1 >= - 10.0f) spd_1 += step_1;
