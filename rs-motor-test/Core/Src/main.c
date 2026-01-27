@@ -138,6 +138,15 @@ void HAL_SPI_TxRxCpltCallback(SPI_HandleTypeDef *hspi)
 	HAL_SPI_TransmitReceive_DMA(&hspi2, CurTxBuf, CurRxBuf, PAYLOAD_LENGTH); //rearm DMA
 }
 
+void HAL_SPI_ErrorCallback(SPI_HandleTypeDef *hspi)
+{
+	if (hspi->Instance == SPI2)
+	{
+		//if we detected error, we restart dma, since the isr handler has already cleared all flags for us
+		HAL_SPI_TransmitReceive_DMA(&hspi2, CurTxBuf, CurRxBuf, PAYLOAD_LENGTH);
+	}
+}
+
 /* USER CODE END 0 */
 
 /**
