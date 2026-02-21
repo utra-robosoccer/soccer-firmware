@@ -77,27 +77,28 @@ static void MX_SPI2_Init(void);
 char uart_msg[100];
 
 #define PAYLOAD_LENGTH 8
+#define BUFFER_SIZE 32
 
 // TX & RX buffer declaration in MEM
-uint8_t RxBuffer_A[PAYLOAD_LENGTH];
-uint8_t RxBuffer_B[PAYLOAD_LENGTH];
+uint8_t RxBuffer_A[BUFFER_SIZE] = {0x0};
+uint8_t RxBuffer_B[BUFFER_SIZE] = {0x0};
 
-uint8_t TxBuffer_A[PAYLOAD_LENGTH] = {0xff, 0xff, 0xff, 0xff, 0, 0,0,0};
-uint8_t TxBuffer_B[PAYLOAD_LENGTH] = {0,0,0,0, 0xff,0xff,0xff,0xff};
+uint8_t TxBuffer_A[BUFFER_SIZE] = {0xff, 0xff, 0xff, 0xff, 0, 0,0,0, 0xDE, 0xAD, 0xBE, 0xEF};
+uint8_t TxBuffer_B[BUFFER_SIZE] = {0,0,0,0, 0xff,0xff,0xff,0xff, 0xDE, 0xAD, 0xBE, 0xEF};
 
 // SPI DMA TX & RX Memory addr (swapping)
-uint8_t* CurTxBuf;
-uint8_t* CurRxBuf;
+uint8_t* volatile CurTxBuf;
+uint8_t* volatile CurRxBuf;
 
 // CAN Bus motor update mem addr (swapping, should always be different from the SPI TX RX mem addr)
-uint8_t* motor_update_buf; //This belongs to the Rx side
-uint8_t* motor_tele_buf; //This belongs to the Tx side
+uint8_t* volatile motor_update_buf; //This belongs to the Rx side
+uint8_t* volatile motor_tele_buf; //This belongs to the Tx side
 
 volatile uint8_t data_receive_flag = 0;
 volatile uint8_t data_tx_ready_flag = 0;
 
 float spd_dbg = 1.0f;
-uint16_t random_count = 0;
+uint8_t random_count = 'A';
 
 void HAL_SPI_TxRxCpltCallback(SPI_HandleTypeDef *hspi)
 {
@@ -114,7 +115,7 @@ void HAL_SPI_TxRxCpltCallback(SPI_HandleTypeDef *hspi)
 	data_receive_flag = 1;
 
 	//Handling TX Double buffer
-	if (data_tx_ready_flag){
+	if (1){
 		//Main loop signals a complete motor chain telemetry
 		data_tx_ready_flag = 0;
 		//***The Tx ready flag is set in the CAN receive intr service routine***
@@ -128,14 +129,17 @@ void HAL_SPI_TxRxCpltCallback(SPI_HandleTypeDef *hspi)
 		}
 	}
 	random_count ++;
-	if (random_count == 15){
-		random_count = 0;
-		spd_dbg *= -1;
-
+//	if (random_count == 15){
+//		random_count = 0;
+//		spd_dbg *= -1;
+//
+//	}
+	if (random_count > 0xFF){
+		random_count = 1;
 	}
 
 	HAL_GPIO_TogglePin(LD2_GPIO_Port, LD2_Pin); //toggle a LED if this callback is triggered
-	HAL_SPI_TransmitReceive_DMA(&hspi2, CurTxBuf, CurRxBuf, PAYLOAD_LENGTH); //rearm DMA
+//	HAL_SPI_TransmitReceive_DMA(&hspi2, CurTxBuf, CurRxBuf, PAYLOAD_LENGTH); //rearm DMA
 }
 
 volatile uint8_t spi_error_flag = 0;
@@ -186,9 +190,9 @@ int main(void)
   MX_CAN1_Init();
   MX_SPI2_Init();
   /* USER CODE BEGIN 2 */
-
-  if(can_bus_init() != HAL_OK) return 1;
-  if(motor_chain_init() != HAL_OK) return 1;
+//  SCB_DisableDCache();
+//  if(can_bus_init() != HAL_OK) return 1;
+//  if(motor_chain_init() != HAL_OK) return 1;
 
   //Critical txbuf and rxbuf init
   CurTxBuf = TxBuffer_A;
@@ -197,10 +201,10 @@ int main(void)
   CurRxBuf = RxBuffer_A;
   motor_update_buf = RxBuffer_B;
 
-  memset(RxBuffer_A, 0, PAYLOAD_LENGTH);
-  memset(RxBuffer_B, 0, PAYLOAD_LENGTH);
-  memset(TxBuffer_A, 0, PAYLOAD_LENGTH);
-  memset(TxBuffer_B, 0, PAYLOAD_LENGTH);
+//  memset(RxBuffer_A, 0, PAYLOAD_LENGTH);
+//  memset(RxBuffer_B, 0, PAYLOAD_LENGTH);
+//  memset(TxBuffer_A, 0, PAYLOAD_LENGTH);
+//  memset(TxBuffer_B, 0, PAYLOAD_LENGTH);
 
   if (HAL_SPI_TransmitReceive_DMA(&hspi2, CurTxBuf, CurRxBuf, PAYLOAD_LENGTH) != HAL_OK){
 	  //Set up DMA here, ready to receive
@@ -221,6 +225,15 @@ int main(void)
    float pos_step_2 = 1.2;
    float step_1 = 0.2;
    float step_2 = 0.1;
+
+   static const char HEX_TABLE[] = "0123456789ABCDEF";
+
+   uint8_t my_val = random_count;
+
+   char hex_char_l = HEX_TABLE[my_val & 0x0F];
+   char hex_char_h = HEX_TABLE[(my_val >> 4) & 0x0F];
+
+
 //
 //   while(motor_check_angle_dbg(&motors[0], 10, spd_1, 5)!= HAL_OK)
 //   {
@@ -275,13 +288,43 @@ int main(void)
 //		if (spd_2 >= 10.0f || spd_2 <= - 10.0f) step_2 *= -1;
 //
 		if (data_receive_flag){
-			motor_set_spd_dbg(1, spd_dbg, 10.0f);
-			HAL_UART_Transmit(&huart2, motor_update_buf, PAYLOAD_LENGTH, HAL_MAX_DELAY);
+//			motor_set_spd_dbg(1, spd_dbg, 10.0f);
+			motor_tele_buf[0] = 0xFF;
+			motor_tele_buf[1] = 0xFF;
+			motor_tele_buf[2] = random_count;
+			motor_tele_buf[3] = 0;
+			motor_tele_buf[4] = random_count + 1;
+			motor_tele_buf[5] = 0;
+			motor_tele_buf[6] = 0;
+			motor_tele_buf[7] = 0xff;
+			SCB_CleanDCache_by_Addr(motor_tele_buf, PAYLOAD_LENGTH);
+//			HAL_Delay(10);
+			// 1. Force the reset (Assert)
+			__HAL_RCC_SPI2_FORCE_RESET();
+
+			// 2. Release the reset (De-assert)
+			__HAL_RCC_SPI2_RELEASE_RESET();
+			HAL_SPI_DeInit(&hspi2);
+			MX_SPI2_Init();
+//			hspi2.Instance -> CR1 |= 0x1 << 3; //set baud rate to fpclk / 64
+			HAL_SPI_TransmitReceive_DMA(&hspi2, CurTxBuf, CurRxBuf, PAYLOAD_LENGTH);
+			data_tx_ready_flag = 1;
+			my_val = CurTxBuf[0] & 0xff;
+		   hex_char_l = HEX_TABLE[my_val & 0x0F];
+		   hex_char_h = HEX_TABLE[(my_val >> 4) & 0x0F];
+			HAL_UART_Transmit(&huart2, "RX:", 3, 10);
+			HAL_UART_Transmit(&huart2, motor_update_buf, PAYLOAD_LENGTH, 100);
+			HAL_UART_Transmit(&huart2, "\n", 1, 10);
+			HAL_UART_Transmit(&huart2, CurTxBuf, PAYLOAD_LENGTH, 100);
+//			HAL_UART_Transmit(&huart2, "NEXT:", 5, 10);
+//			HAL_UART_Transmit(&huart2, &hex_char_h, 1, 10);
+//			HAL_UART_Transmit(&huart2, &hex_char_l, 1, 10);
+			HAL_UART_Transmit(&huart2, "\n", 1, 10);
 			data_receive_flag = 0;
 		}
 
 		if(spi_error_flag){
-			HAL_UART_Transmit(&huart2, (const uint8_t*)"SPI Error handler triggered. SPI restarted\r\n", 100, HAL_MAX_DELAY);
+			HAL_UART_Transmit(&huart2, (const uint8_t*)"SPI Error handler triggered. SPI restarted\r\n", 48, HAL_MAX_DELAY);
 			spi_error_flag = 0;
 		}
 
@@ -344,11 +387,11 @@ void SystemClock_Config(void)
   RCC_ClkInitStruct.ClockType = RCC_CLOCKTYPE_HCLK|RCC_CLOCKTYPE_SYSCLK
                               |RCC_CLOCKTYPE_PCLK1|RCC_CLOCKTYPE_PCLK2;
   RCC_ClkInitStruct.SYSCLKSource = RCC_SYSCLKSOURCE_PLLCLK;
-  RCC_ClkInitStruct.AHBCLKDivider = RCC_SYSCLK_DIV1;
+  RCC_ClkInitStruct.AHBCLKDivider = RCC_SYSCLK_DIV4;
   RCC_ClkInitStruct.APB1CLKDivider = RCC_HCLK_DIV2;
   RCC_ClkInitStruct.APB2CLKDivider = RCC_HCLK_DIV1;
 
-  if (HAL_RCC_ClockConfig(&RCC_ClkInitStruct, FLASH_LATENCY_2) != HAL_OK)
+  if (HAL_RCC_ClockConfig(&RCC_ClkInitStruct, FLASH_LATENCY_0) != HAL_OK)
   {
     Error_Handler();
   }

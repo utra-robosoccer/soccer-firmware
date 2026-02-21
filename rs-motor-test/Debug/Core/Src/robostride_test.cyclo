@@ -1,5 +1,5 @@
-../Core/Src/robostride_test.c:21:12:float_to_uint	3
-../Core/Src/robostride_test.c:30:14:uint_to_float	1
+../Core/Src/robostride_test.c:21:5:float_to_uint	3
+../Core/Src/robostride_test.c:30:7:uint_to_float	1
 ../Core/Src/robostride_test.c:41:19:can_bus_init	3
 ../Core/Src/robostride_test.c:76:19:can_get_motor_id	1
 ../Core/Src/robostride_test.c:89:19:can_unpack_get_id	4

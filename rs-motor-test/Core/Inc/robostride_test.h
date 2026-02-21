@@ -93,6 +93,8 @@ extern CAN_RxHeaderTypeDef rs_can_rx_header;
 
 
 // --- Function Prototypes ---
+int float_to_uint(float x, float x_min, float x_max, unsigned int bits);
+float uint_to_float(int x_int, float x_min, float x_max, int bits);
 
 // CAN Bus Start
 HAL_StatusTypeDef can_bus_init();

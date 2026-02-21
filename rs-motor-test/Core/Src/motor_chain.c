@@ -47,8 +47,6 @@ void HAL_CAN_RxFifo0MsgPendingCallback(CAN_HandleTypeDef *hcan)
                 break;
         }
 
-        memcpy(motor_tele_buf, rx_data, sizeof(rx_data));
-        data_tx_ready_flag = 1;
     }
     can_rx_flag = 1;
 
@@ -290,6 +288,15 @@ HAL_StatusTypeDef motor_set_spd_dbg (uint8_t target_id, float spd, float pd)
 		}
 
 		if (can_rx_flag) {
+			motor_tele_buf[0] = motor_update_buf[0];
+			motor_tele_buf[1] = motor_update_buf[1];
+			motor_tele_buf[2] = motor_update_buf[2];
+			motor_tele_buf[3] = motor_update_buf[3];
+			motor_tele_buf[4] = motor_update_buf[4];
+			motor_tele_buf[5] = motor_update_buf[5];
+			motor_tele_buf[6] = motor_update_buf[6];
+			motor_tele_buf[7] = motor_update_buf[7];
+			data_tx_ready_flag = 1;
 			print_unified_can_response(&huart2, 2, &motors[target_id - 1], rx_data, rs_can_rx_header.ExtId);
 		}
 	} else {return HAL_ERROR;}

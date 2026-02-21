@@ -18,7 +18,7 @@ uint32_t TxMailbox;
 #define rxCanIdEx (*((exCanIdInfo*)&(rs_can_rx_header.ExtId)))
 
 // --- Helper Functions ---
-static int float_to_uint(float x, float x_min, float x_max, unsigned int bits)
+int float_to_uint(float x, float x_min, float x_max, unsigned int bits)
 {  
     /// Converts a float to an int, given range and number of bits ///
     float span = x_max - x_min;  
@@ -27,7 +27,7 @@ static int float_to_uint(float x, float x_min, float x_max, unsigned int bits)
     return (int) ((x - x_min) * ((float)((1 << bits) / span)));
 } 
 
-static float uint_to_float(int x_int, float x_min, float x_max, int bits)
+float uint_to_float(int x_int, float x_min, float x_max, int bits)
 {
     /// converts unsigned int to float, given range and number of bits ///
     float span = x_max - x_min;
