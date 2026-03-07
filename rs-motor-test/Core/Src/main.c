@@ -139,7 +139,7 @@ void HAL_SPI_TxRxCpltCallback(SPI_HandleTypeDef *hspi)
 	}
 
 	HAL_GPIO_TogglePin(LD2_GPIO_Port, LD2_Pin); //toggle a LED if this callback is triggered
-//	HAL_SPI_TransmitReceive_DMA(&hspi2, CurTxBuf, CurRxBuf, PAYLOAD_LENGTH); //rearm DMA
+	HAL_SPI_TransmitReceive_DMA(&hspi2, CurTxBuf, CurRxBuf, PAYLOAD_LENGTH); //rearm DMA
 }
 
 volatile uint8_t spi_error_flag = 0;
@@ -290,24 +290,32 @@ int main(void)
 		if (data_receive_flag){
 //			motor_set_spd_dbg(1, spd_dbg, 10.0f);
 			motor_tele_buf[0] = 0xFF;
-			motor_tele_buf[1] = 0xFF;
+			motor_tele_buf[1] = random_count;
 			motor_tele_buf[2] = random_count;
-			motor_tele_buf[3] = 0;
-			motor_tele_buf[4] = random_count + 1;
-			motor_tele_buf[5] = 0;
-			motor_tele_buf[6] = 0;
+			motor_tele_buf[3] = 0xFF;
+			motor_tele_buf[4] = 0xFF;
+			motor_tele_buf[5] = random_count + 1;
+			motor_tele_buf[6] = random_count + 1;
 			motor_tele_buf[7] = 0xff;
+//			motor_tele_buf[0] = 0xaa;
+//			motor_tele_buf[1] = 0xaa;
+//			motor_tele_buf[2] = 0xaa;
+//			motor_tele_buf[3] = 0xaa;
+//			motor_tele_buf[4] = 0xaa;
+//			motor_tele_buf[5] = 0xaa;
+//			motor_tele_buf[6] = 0xaa;
+//			motor_tele_buf[7] = 0xaa;
 			SCB_CleanDCache_by_Addr(motor_tele_buf, PAYLOAD_LENGTH);
 //			HAL_Delay(10);
 			// 1. Force the reset (Assert)
-			__HAL_RCC_SPI2_FORCE_RESET();
-
-			// 2. Release the reset (De-assert)
-			__HAL_RCC_SPI2_RELEASE_RESET();
-			HAL_SPI_DeInit(&hspi2);
-			MX_SPI2_Init();
+//			__HAL_RCC_SPI2_FORCE_RESET();
+//
+//			// 2. Release the reset (De-assert)
+//			__HAL_RCC_SPI2_RELEASE_RESET();
+//			HAL_SPI_DeInit(&hspi2);
+//			MX_SPI2_Init();
 //			hspi2.Instance -> CR1 |= 0x1 << 3; //set baud rate to fpclk / 64
-			HAL_SPI_TransmitReceive_DMA(&hspi2, CurTxBuf, CurRxBuf, PAYLOAD_LENGTH);
+//			HAL_SPI_TransmitReceive_DMA(&hspi2, CurTxBuf, CurRxBuf, PAYLOAD_LENGTH);
 			data_tx_ready_flag = 1;
 			my_val = CurTxBuf[0] & 0xff;
 		   hex_char_l = HEX_TABLE[my_val & 0x0F];
@@ -387,11 +395,11 @@ void SystemClock_Config(void)
   RCC_ClkInitStruct.ClockType = RCC_CLOCKTYPE_HCLK|RCC_CLOCKTYPE_SYSCLK
                               |RCC_CLOCKTYPE_PCLK1|RCC_CLOCKTYPE_PCLK2;
   RCC_ClkInitStruct.SYSCLKSource = RCC_SYSCLKSOURCE_PLLCLK;
-  RCC_ClkInitStruct.AHBCLKDivider = RCC_SYSCLK_DIV4;
+  RCC_ClkInitStruct.AHBCLKDivider = RCC_SYSCLK_DIV1;
   RCC_ClkInitStruct.APB1CLKDivider = RCC_HCLK_DIV2;
   RCC_ClkInitStruct.APB2CLKDivider = RCC_HCLK_DIV1;
 
-  if (HAL_RCC_ClockConfig(&RCC_ClkInitStruct, FLASH_LATENCY_0) != HAL_OK)
+  if (HAL_RCC_ClockConfig(&RCC_ClkInitStruct, FLASH_LATENCY_2) != HAL_OK)
   {
     Error_Handler();
   }
