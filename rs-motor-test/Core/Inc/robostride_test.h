@@ -86,6 +86,13 @@ typedef struct {
     float kp;
     float kd;
     float torq; // Nm
+
+    // Motor set point
+    float set_pos;
+    float set_rpm;
+    float set_kp;
+    float set_kd;
+    float set_torq;
 } motor_t;
 
 extern uint32_t TxMailbox;

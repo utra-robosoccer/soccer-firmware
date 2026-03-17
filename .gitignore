@@ -18,3 +18,7 @@ build/
 # IDE specific files (optional, but recommended)
 .mxproject
 *.launch
+
+# Eclipse workspace and settings
+.metadata/
+.settings/

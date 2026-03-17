@@ -45,6 +45,7 @@
 
 #include "slave_spi.h"
 #include "string.h"
+#include "cachel1_armv7.h"
 
 // TX & RX buffer declaration in MEM
 uint8_t RxBuffer_A[BUFFER_SIZE] = {0x0};
@@ -67,6 +68,8 @@ volatile uint8_t data_tx_ready_flag = 0;
 float spd_dbg = 1.0f;
 uint8_t random_count = 'A';
 volatile uint8_t spi_error_flag = 0;
+
+uint16_t motor_temp_tele_buf[MAX_MOTOR_COUNT * 2] = {0};
 
 //Callback functions redefinitions
 void spi_dbg_helper()
@@ -141,6 +144,88 @@ void spi_write_next_tx_buf(const uint8_t* motor_new_data_buf, uint8_t* motor_tel
 	SCB_CleanDCache_by_Addr(motor_tele_buf, PAYLOAD_LENGTH);
 	data_tx_ready_flag = 1; //signal -> ok to send motor_tele in the next frame
 }
+
+// --- Helper Functions ---
+static int float_to_uint(float x, float x_min, float x_max, unsigned int bits)
+{
+    /// Converts a float to an int, given range and number of bits ///
+    float span = x_max - x_min;
+    if(x < x_min) x = x_min;
+    else if(x > x_max) x = x_max;
+    return (int) ((x - x_min) * ((float)((1 << bits) / span)));
+}
+
+static float uint_to_float(int x_int, float x_min, float x_max, int bits)
+{
+    /// converts unsigned int to float, given range and number of bits ///
+    float span = x_max - x_min;
+    float offset = x_min;
+    return ((float)x_int) * span / ((float)((1 << bits) - 1)) + offset;
+}
+
+HAL_StatusTypeDef spi_update_all_motors()
+{
+	//This function updates all the motors inside the motor chain
+	//update all motor using motor update buf, wait for feedback, and write feedback to a temper
+
+	//using little endian to read from the motor update buffer
+	/*
+	 * Buffer is arranged as following:
+	 *
+	 * Motor chain id = 1, idx = 0
+	 * 0x0  LSB POS
+	 * 0x1  MSB POS
+	 * 0x2  LSB SPD
+	 * 0x3  MSB SPD
+	 *
+	 * Motor chain id = 2, idx = 1
+	 * 0x4  LSB POS
+	 * 0x5  MSB POS
+	 * 0x6  LSB SPD
+	 * 0x7  MSB SPD
+	 *
+	 * .
+	 * .
+	 * .
+	 *
+	 * Last motor id = MAX_MOTOR_COUNT, idx = MAX_MOTOR_COUNT - 1
+	 * 0x<idx * 4>      LSB POS
+	 * 0x<idx * 4 + 1>	MSB POS
+	 * 0x<idx * 4 + 2> 	LSB SPD
+	 * 0x<idx * 4 + 3>  MSB SPD
+	 *
+	 *
+	 */
+
+	for (int i = 0; i < MAX_MOTOR_COUNT; i ++){
+		int16_t raw_new_pos =  motor_update_buf[4*i + 1] << 8 | motor_update_buf[4*i];
+		int16_t raw_new_spd =  motor_update_buf[4*i + 3] << 8 | motor_update_buf[4*i + 2];
+
+		float new_pos = uint_to_float(raw_new_pos, P_MIN, P_MAX, 16);
+		float new_spd = uint_to_float(raw_new_spd, V_MIN, V_MAX, 16);
+		motors[i].set_pos = new_pos;
+		motors[i].set_rpm = new_spd;
+
+		//for the rest we leave it as fixed, tbc later
+		motors[i].set_kd = 5.0f;
+		motors[i].set_kp = 100.0f;
+		motors[i].set_torq = 0.0f;
+		if(motor_set_mit(motors[i].id,
+		                 motors[i].set_torq,
+		                 motors[i].set_pos,
+		                 motors[i].set_rpm,
+		                 motors[i].set_kp,
+		                 motors[i].set_kd) != HAL_OK) return HAL_ERROR;
+		//Should correctly update the motor
+
+		motor_temp_tele_buf[2*i] = float_to_uint(motors[i].pos, P_MIN, P_MAX, 16);
+		motor_temp_tele_buf[2*i + 1] = float_to_uint(motors[i].rpm, V_MIN, V_MAX, 16);
+	}
+
+	spi_write_next_tx_buf((uint8_t*)motor_temp_tele_buf, motor_tele_buf);
+	return HAL_OK;
+}
+
 
 
 

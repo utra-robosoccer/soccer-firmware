@@ -15,7 +15,7 @@
 #include "robostride_test.h"
 #include "main.h"
 
-#define MAX_MOTOR_COUNT 10 //This macro changes depending on the total number of motors connected to the CAN BUS
+#define MAX_MOTOR_COUNT 5 //This macro changes depending on the total number of motors connected to the CAN BUS
 extern motor_t motors[MAX_MOTOR_COUNT];
 extern uint8_t can_rx_flag;
 extern uint8_t rx_data[8];

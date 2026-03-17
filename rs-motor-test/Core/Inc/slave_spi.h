@@ -9,9 +9,10 @@
 #define INC_SLAVE_SPI_H_
 
 #include "stm32f4xx_hal.h"
+#include "motor_chain.h"
 #include "main.h"
 
-#define PAYLOAD_LENGTH 8
+#define PAYLOAD_LENGTH MAX_MOTOR_COUNT * 4 //each motor sends an int16_t angle and an int16_t position
 #define BUFFER_SIZE 32
 
 extern uint8_t* volatile  motor_update_buf; //This belongs to the Rx side
@@ -25,6 +26,7 @@ extern uint8_t random_count; // just for spi dbg
 
 void spi_dma_init(SPI_HandleTypeDef *hspi);
 void spi_write_next_tx_buf(const uint8_t* motor_new_data_buf, uint8_t* motor_tele_buf);
+HAL_StatusTypeDef spi_update_all_motors();
 
 
 
