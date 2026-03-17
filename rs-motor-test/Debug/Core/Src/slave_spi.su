@@ -1,5 +1,0 @@
-../Core/Src/slave_spi.c:72:6:spi_dbg_helper	4	static
-../Core/Src/slave_spi.c:80:6:HAL_SPI_TxRxCpltCallback	16	static
-../Core/Src/slave_spi.c:114:6:HAL_SPI_ErrorCallback	16	static
-../Core/Src/slave_spi.c:122:6:spi_dma_init	16	static
-../Core/Src/slave_spi.c:138:6:spi_write_next_tx_buf	16	static

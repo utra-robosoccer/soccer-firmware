@@ -1,0 +1,20 @@
+# Build directories
+Debug/
+Release/
+build/
+
+# Object files
+*.o
+*.d
+*.su
+
+# Executables and binaries
+*.elf
+*.bin
+*.hex
+*.map
+*.list
+
+# IDE specific files (optional, but recommended)
+.mxproject
+*.launch
