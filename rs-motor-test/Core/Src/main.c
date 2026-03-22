@@ -119,6 +119,7 @@ int main(void)
 //  SCB_DisableDCache();
 //  if(can_bus_init() != HAL_OK) return 1;
 //  if(motor_chain_init() != HAL_OK) return 1;
+  spi_dma_init(&hspi2);
 
 
 
@@ -239,15 +240,15 @@ int main(void)
 //			my_val = CurTxBuf[0] & 0xff;
 //		    hex_char_l = HEX_TABLE[my_val & 0x0F];
 //		    hex_char_h = HEX_TABLE[(my_val >> 4) & 0x0F];
-//			HAL_UART_Transmit(&huart2, "RX:", 3, 10);
-//			HAL_UART_Transmit(&huart2, motor_update_buf, PAYLOAD_LENGTH, 100);
-//			HAL_UART_Transmit(&huart2, "\n", 1, 10);
+			HAL_UART_Transmit(&huart2, "RX:", 3, 10);
+			HAL_UART_Transmit(&huart2, motor_update_buf, PAYLOAD_LENGTH, 100);
+			HAL_UART_Transmit(&huart2, "\n", 1, 10);
 //			HAL_UART_Transmit(&huart2, CurTxBuf, PAYLOAD_LENGTH, 100);
-////			HAL_UART_Transmit(&huart2, "NEXT:", 5, 10);
-////			HAL_UART_Transmit(&huart2, &hex_char_h, 1, 10);
-////			HAL_UART_Transmit(&huart2, &hex_char_l, 1, 10);
+//			HAL_UART_Transmit(&huart2, "NEXT:", 5, 10);
+//			HAL_UART_Transmit(&huart2, &hex_char_h, 1, 10);
+//			HAL_UART_Transmit(&huart2, &hex_char_l, 1, 10);
 //			HAL_UART_Transmit(&huart2, "\n", 1, 10);
-//			data_receive_flag = 0;
+			data_receive_flag = 0;
 		}
 
 		if(spi_error_flag){
