@@ -121,9 +121,6 @@ int main(void)
   spi_dma_init(&hspi2);
 
 
-//   motor_set_spd(1, 2.0f, 10.0f);
-//   motor_set_spd(2, 3.0f, 10.0f);
-
    uint32_t tick_tele = HAL_GetTick();
    uint32_t tick_inc = HAL_GetTick();
    uint32_t tick_pos_inc = HAL_GetTick();
@@ -136,28 +133,6 @@ int main(void)
    float step_1 = 0.2;
    float step_2 = 0.1;
 
-//   while(motor_check_angle_dbg(&motors[0], 10, spd_1, 5)!= HAL_OK)
-//   {
-//	   if(HAL_GetTick() - tick_inc >= 1){
-//		   tick_inc = HAL_GetTick();
-//		   if (spd_1 <= 10){
-//			   spd_1 += 0.1;
-//		   }
-//	   }
-//   }
-//   spd_1 = 0.0;
-//   while(motor_check_angle_dbg(&motors[0], 0, spd_1, 5)!= HAL_OK)
-//   {
-//   	   if(HAL_GetTick() - tick_inc >= 1){
-//   		   tick_inc = HAL_GetTick();
-//   		   if (spd_1 >= -5 ){
-//   			   spd_1 -= 0.1;
-//   		   }
-//   	   }
-//    }
-//   while(motor_check_angle_dbg(&motors[0], 0, -4, 5)!= HAL_OK);
-//   while(motor_check_angle_dbg(&motors[0], -10, -5, 5)!= HAL_OK);
-
 
   /* USER CODE END 2 */
 
@@ -168,40 +143,27 @@ int main(void)
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
-	if(HAL_GetTick() - tick_tele >= 100){
-		tick_tele = HAL_GetTick();
-		motor_set_spd(1, spd_1, 10.0f);
-		motor_set_spd(2, spd_2, 10.0f);
-//		if (motor_check_angle_dbg(&motors[0], pos_1, spd_1, 10.0f) == HAL_OK){
-//			HAL_UART_Transmit(&huart2, (uint8_t*)"motor 1 reaches the configured angle\n", 38, HAL_MAX_DELAY);
-//		}
-//
-//		if (motor_check_angle_dbg(&motors[1], pos_2, spd_2, 10.0f) == HAL_OK){
-//			HAL_UART_Transmit(&huart2, (uint8_t*)"motor 2 reaches the configured angle\n", 38, HAL_MAX_DELAY);
-//		}
+	if (data_receive_flag){
+		spi_update_all_motors();
+		data_receive_flag = 0;
+		HAL_GPIO_TogglePin(LD2_GPIO_Port, LD2_Pin);
 	}
 
-	if(HAL_GetTick() - tick_inc >= 200){
-		tick_inc = HAL_GetTick();
-		spd_1 += step_1;
-		spd_2 += step_2;
-		if (spd_1 >= 10.0f || spd_1 <= - 10.0f) step_1 *= -1;
-		if (spd_2 >= 10.0f || spd_2 <= - 10.0f) step_2 *= -1;
 
-//		if (spd_1 <= 10.0f && spd_1 >= - 10.0f) spd_1 += step_1;
-//		if (spd_2 <= 10.0f && spd_2 >= - 10.0f) spd_2 += step_2;
-//
-//		if (pos_1 >= 12.0f || pos_1 <= - 12.0f) step_1 *= -1;
-//		if (pos_2 >= 12.0f || pos_2 <= - 12.0f) step_2 *= -1;
-	}
 
-//	if(HAL_GetTick() - tick_pos_inc >= 1000){
-//		tick_pos_inc = HAL_GetTick();
-//		pos_1 += 4 * pos_step_1;
-//		pos_2 += 2 * pos_step_2;
+//	if(HAL_GetTick() - tick_tele >= 100){
+//		tick_tele = HAL_GetTick();
+//		motor_set_spd(1, spd_1, 10.0f);
+//		motor_set_spd(2, spd_2, 10.0f);
 //
-//		if (pos_1 >= 12.0f || pos_1 <= - 12.0f) pos_step_1 *= -1;
-//		if (pos_2 >= 12.0f || pos_2 <= - 12.0f) pos_step_2 *= -1;
+//	}
+//
+//	if(HAL_GetTick() - tick_inc >= 200){
+//		tick_inc = HAL_GetTick();
+//		spd_1 += step_1;
+//		spd_2 += step_2;
+//		if (spd_1 >= 10.0f || spd_1 <= - 10.0f) step_1 *= -1;
+//		if (spd_2 >= 10.0f || spd_2 <= - 10.0f) step_2 *= -1;
 //	}
 
 

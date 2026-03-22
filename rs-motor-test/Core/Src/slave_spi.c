@@ -1,4 +1,5 @@
-/*
+ /*
+
  * slave_spi.c
  *
  *  Created on: 2026年1月21日
@@ -163,40 +164,36 @@ static float uint_to_float(int x_int, float x_min, float x_max, int bits)
     return ((float)x_int) * span / ((float)((1 << bits) - 1)) + offset;
 }
 
+//This function updates all the motors inside the motor chain
+//update all motor using motor update buf, wait for feedback, and write feedback to a temper
+//using little endian to read from the motor update buffer
+/*Buffer is arranged as following:
+ *
+ * Motor chain id = 1, idx = 0
+ * 0x0  LSB POS
+ * 0x1  MSB POS
+ * 0x2  LSB SPD
+ * 0x3  MSB SPD
+ *
+ * Motor chain id = 2, idx = 1
+ * 0x4  LSB POS
+ * 0x5  MSB POS
+ * 0x6  LSB SPD
+ * 0x7  MSB SPD
+ *
+ * .
+ * .
+ * .
+ *
+ * Last motor id = MAX_MOTOR_COUNT, idx = MAX_MOTOR_COUNT - 1
+ * 0x<idx * 4>      LSB POS
+ * 0x<idx * 4 + 1>	MSB POS
+ * 0x<idx * 4 + 2> 	LSB SPD
+ * 0x<idx * 4 + 3>  MSB SPD
+ *
+ */
 HAL_StatusTypeDef spi_update_all_motors()
 {
-	//This function updates all the motors inside the motor chain
-	//update all motor using motor update buf, wait for feedback, and write feedback to a temper
-
-	//using little endian to read from the motor update buffer
-	/*
-	 * Buffer is arranged as following:
-	 *
-	 * Motor chain id = 1, idx = 0
-	 * 0x0  LSB POS
-	 * 0x1  MSB POS
-	 * 0x2  LSB SPD
-	 * 0x3  MSB SPD
-	 *
-	 * Motor chain id = 2, idx = 1
-	 * 0x4  LSB POS
-	 * 0x5  MSB POS
-	 * 0x6  LSB SPD
-	 * 0x7  MSB SPD
-	 *
-	 * .
-	 * .
-	 * .
-	 *
-	 * Last motor id = MAX_MOTOR_COUNT, idx = MAX_MOTOR_COUNT - 1
-	 * 0x<idx * 4>      LSB POS
-	 * 0x<idx * 4 + 1>	MSB POS
-	 * 0x<idx * 4 + 2> 	LSB SPD
-	 * 0x<idx * 4 + 3>  MSB SPD
-	 *
-	 *
-	 */
-
 	for (int i = 0; i < MAX_MOTOR_COUNT; i ++){
 		int16_t raw_new_pos =  motor_update_buf[4*i + 1] << 8 | motor_update_buf[4*i];
 		int16_t raw_new_spd =  motor_update_buf[4*i + 3] << 8 | motor_update_buf[4*i + 2];
@@ -210,7 +207,7 @@ HAL_StatusTypeDef spi_update_all_motors()
 		motors[i].set_kd = 5.0f;
 		motors[i].set_kp = 100.0f;
 		motors[i].set_torq = 0.0f;
-		if(motor_set_mit(motors[i].id,
+		if(motor_set_mit_dbg(motors[i].id,
 		                 motors[i].set_torq,
 		                 motors[i].set_pos,
 		                 motors[i].set_rpm,
