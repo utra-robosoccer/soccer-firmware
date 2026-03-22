@@ -55,7 +55,7 @@ uint8_t RxBuffer_B[BUFFER_SIZE] = {0x0};
 uint8_t TxBuffer_A[BUFFER_SIZE] = {0xff, 0xff, 0xff, 0xff, 0, 0,0,0, 0xDE, 0xAD, 0xBE, 0xEF};
 uint8_t TxBuffer_B[BUFFER_SIZE] = {0,0,0,0, 0xff,0xff,0xff,0xff, 0xDE, 0xAD, 0xBE, 0xEF};
 
-// SPI DMA TX & RX Memory addr (swapping)
+// SPI DMA TX & RX Memory addrsng)
 uint8_t* volatile CurTxBuf;
 uint8_t* volatile CurRxBuf;
 
@@ -195,11 +195,15 @@ static float uint_to_float(int x_int, float x_min, float x_max, int bits)
 HAL_StatusTypeDef spi_update_all_motors()
 {
 	for (int i = 0; i < MAX_MOTOR_COUNT; i ++){
-		int16_t raw_new_pos =  motor_update_buf[4*i + 1] << 8 | motor_update_buf[4*i];
-		int16_t raw_new_spd =  motor_update_buf[4*i + 3] << 8 | motor_update_buf[4*i + 2];
+		uint16_t raw_new_pos =  motor_update_buf[4*i + 1] << 8 | motor_update_buf[4*i];
+		uint16_t raw_new_spd =  motor_update_buf[4*i + 3] << 8 | motor_update_buf[4*i + 2];
+		char uart_msg[100];
+		sprintf(uart_msg,"raw new pos = %X | raw new rpm = %X\r\n", (uint16_t)raw_new_pos, (uint16_t)raw_new_spd);
+		HAL_UART_Transmit(&huart2, uart_msg, strlen(uart_msg), 10000);
 
 		float new_pos = uint_to_float(raw_new_pos, P_MIN, P_MAX, 16);
 		float new_spd = uint_to_float(raw_new_spd, V_MIN, V_MAX, 16);
+
 		motors[i].set_pos = new_pos;
 		motors[i].set_rpm = new_spd;
 

@@ -147,6 +147,8 @@ int main(void)
 		spi_update_all_motors();
 		data_receive_flag = 0;
 		HAL_GPIO_TogglePin(LD2_GPIO_Port, LD2_Pin);
+		sprintf(uart_msg,"received parameter: pos -> (%f), rpm -> (%f)\r\n", motors[0].set_pos,motors[0].set_rpm);
+		HAL_UART_Transmit(&huart2, uart_msg, strlen(uart_msg), 10000);
 	}
 
 
