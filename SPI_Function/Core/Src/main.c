@@ -21,6 +21,7 @@
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
+#include <stdint.h>
 #include <string.h>
 #include <stdio.h>
 #include <stdarg.h>
@@ -39,6 +40,21 @@ typedef enum {
     DEV3 = 3,   // PE5
     DEV4 = 4    // PE6
 } SpiDevId;
+
+typedef struct {
+  uint8_t found;
+  uint8_t slave_index;
+  SpiDevId dev;
+} MotorRoute;
+
+typedef struct {
+  uint8_t valid;
+  uint8_t motor_id;
+  uint8_t slave_index;
+  float position;
+  float speed;
+  uint32_t tick;
+} MotorCommSnapshot;
 /* USER CODE END PTD */
 
 /* Private define ------------------------------------------------------------*/
@@ -60,6 +76,41 @@ typedef enum {
 #define T_MIN   -60.0f
 #define T_MAX    60.0f
 
+typedef struct {
+  uint8_t motor_count_per_slave[NUM_SLAVES];
+  uint8_t motor_ids[NUM_SLAVES][MAX_TOTAL_MOTORS];
+} SlaveRoutingConfig;
+
+typedef struct {
+  uint8_t enabled;
+  uint8_t max_consecutive_spi_errors;
+  uint32_t control_loop_period_ms;
+  uint32_t command_cache_timeout_ms;
+} SafetyTuneConfig;
+
+typedef struct {
+  uint32_t phase_period_ms;
+  uint8_t test_motor_count;
+  uint8_t test_motor_ids[MAX_TOTAL_MOTORS];
+  float single_step_position;
+  float single_step_speed;
+  float alternating_low_position;
+  float alternating_high_position;
+  float alternating_speed_base;
+  float alternating_speed_step;
+  float sweep_start_position;
+  float sweep_position_step;
+  float sweep_speed_start;
+  float sweep_speed_step;
+  float sweep_direction_limit;
+} DebugTuneConfig;
+
+typedef struct {
+  SlaveRoutingConfig routing;
+  SafetyTuneConfig safety;
+  DebugTuneConfig debug;
+} MasterTuneConfig;
+
 /* USER CODE END PD */
 
 /* Private macro -------------------------------------------------------------*/
@@ -76,12 +127,41 @@ UART_HandleTypeDef huart3;
 PCD_HandleTypeDef hpcd_USB_OTG_FS;
 
 /* USER CODE BEGIN PV */
-/* Configure how many motors belong to each slave.
-   Example:
-   {1,1,1,1} => DEV1 gets motor0, DEV2 gets motor1, DEV3 gets motor2, DEV4 gets motor3
-   {2,1,0,1} => DEV1 gets motor0-1, DEV2 gets motor2, DEV3 gets none, DEV4 gets motor3
-*/
-static const uint8_t motors_per_slave[NUM_SLAVES] = {1, 1, 1, 1};
+/* All tunable parameters live here.
+   Change this block only when adjusting motor routing, safety, or debug test behavior. */
+static const MasterTuneConfig g_master_config = {
+  .routing = {
+    .motor_count_per_slave = {2U, 1U, 0U, 1U},  /* Recommended: match your real wiring per slave */
+    .motor_ids = {
+      {2U, 5U},  /* DEV1 motors: recommended logical IDs for this slave */
+      {9U},      /* DEV2 motors: recommended logical IDs for this slave */
+      {0U},      /* DEV3 unused: keep zeroed if no motors are attached */
+      {15U}      /* DEV4 motors: recommended logical IDs for this slave */
+    }
+  },
+  .safety = {
+    .enabled = 1U,                    /* Recommended: 1U for normal operation, 0U only for bring-up */
+    .max_consecutive_spi_errors = 3U, /* Recommended: 3U */
+    .control_loop_period_ms = 1U,     /* Recommended: 1U for fast control loop */
+    .command_cache_timeout_ms = 100U  /* Recommended: 100U, increase if host updates slowly */
+  },
+  .debug = {
+    .phase_period_ms = 600U,          /* Recommended: 600U for visible test transitions */
+    .test_motor_count = 4U,           /* Recommended: match the number of motors you want to exercise */
+    .test_motor_ids = {2U, 5U, 9U, 15U}, /* Recommended: list the logical motor IDs used by test cases */
+    .single_step_position = 6.0f,     /* Recommended: 6.0f */
+    .single_step_speed = 4.0f,        /* Recommended: 4.0f */
+    .alternating_low_position = -4.0f,/* Recommended: -4.0f */
+    .alternating_high_position = 4.0f,/* Recommended: 4.0f */
+    .alternating_speed_base = 2.0f,   /* Recommended: 2.0f */
+    .alternating_speed_step = 0.5f,   /* Recommended: 0.5f */
+    .sweep_start_position = -10.0f,   /* Recommended: -10.0f */
+    .sweep_position_step = 1.5f,      /* Recommended: 1.5f */
+    .sweep_speed_start = 1.0f,        /* Recommended: 1.0f */
+    .sweep_speed_step = 0.25f,        /* Recommended: 0.25f */
+    .sweep_direction_limit = 10.0f    /* Recommended: 10.0f */
+  }
+};
 
 typedef enum {
   MASTER_MODE_DEBUG = 0,
@@ -116,6 +196,7 @@ typedef struct {
   uint32_t last_error_tick;
   uint32_t estop_latch_count;
   char last_error_reason[32];
+  MotorCommSnapshot motor_comm_snapshot[MAX_TOTAL_MOTORS];
   MotorCmd command_cache[MAX_TOTAL_MOTORS];
 } MasterSafetyControl;
 
@@ -136,6 +217,7 @@ static MasterSafetyControl g_master_safety = {
   .last_error_tick = 0U,
   .estop_latch_count = 0U,
   .last_error_reason = "none",
+  .motor_comm_snapshot = {0},
   .command_cache = {0}
 };
 
@@ -180,19 +262,35 @@ static uint16_t build_slave_buf(uint8_t slave_index, uint8_t *tx_buf, const Moto
 static HAL_StatusTypeDef spi_send_to_one_slave(SpiDevId dev, uint8_t slave_index, const MotorCmd *all_motor_cmd);
 static HAL_StatusTypeDef spi_update_all_slaves_param(const MotorCmd *all_motor_cmd);
 static void uart_print_one_motor_rx(uint16_t motor_index, const uint8_t *rx);
+/* Resolve a logical motor ID to its slave and slot position. */
+static uint8_t find_motor_route_by_id(uint8_t motor_id, MotorRoute *route);
+/* Get the logical motor ID stored in one slave slot. */
+static uint8_t get_motor_id_by_route(uint8_t slave_index, uint8_t motor_index_in_slave);
+/* Get the logical motor ID using the configured global order. */
+static uint8_t get_motor_id_by_global_slot(uint16_t global_slot);
+/* Get the logical motor ID used by test cases. */
+static uint8_t get_debug_test_motor_id(uint8_t test_slot);
+/* Apply one received host command and transmit only the target slave. */
+static HAL_StatusTypeDef submit_host_command_by_motor_id(uint8_t motor_id, float displacement, float speed);
+/* Write a host command directly into the logical motor-ID slot. */
+static uint8_t set_host_command_by_motor_id(uint8_t motor_id, float position, float speed);
 /* Copy host command table into the bounded/safe cache. */
 static void publish_command_cache(const MotorCmd *source);
 static void set_command_source(CommandSource source);
 static const MotorCmd* get_active_command_source(void);
 static void copy_command_table(MotorCmd *target, const MotorCmd *source);
 static void set_last_error_reason(const char *reason);
+/* Record the latest communication state for one motor. */
+static void update_motor_comm_snapshot(uint8_t motor_id, uint8_t slave_index, float position, float speed);
+/* Dump the motor communication snapshot table over UART. */
+static void dump_motor_comm_snapshots(void);
 /* Build a safe fallback command (all motors stop). */
 static void build_safe_stop_commands(MotorCmd *target);
 /* Latch ESTOP once a safety condition is violated. */
 static void latch_emergency_stop(const char *reason);
 static void clear_emergency_stop_manual(void);
 /* Debug mode test cases runner. */
-static void run_debug_test_cycle(float *dir, float *step, uint32_t *phase_tick, uint8_t *phase, uint8_t *motor_index);
+static void run_debug_test_cycle(float *dir, uint32_t *phase_tick, uint8_t *phase, uint8_t *motor_index);
 /* Real mode loop: send cached commands + enforce safety checks. */
 static void run_real_master_cycle(void);
 /* USER CODE END PFP */
@@ -277,7 +375,7 @@ static uint16_t get_total_configured_motors(void)
 {
     uint16_t total = 0;
     for (int i = 0; i < NUM_SLAVES; i++) {
-        total += motors_per_slave[i];
+    total += g_master_config.routing.motor_count_per_slave[i];
     }
     return total;
 }
@@ -345,18 +443,166 @@ static uint16_t build_slave_buf(uint8_t slave_index,
                                 uint8_t *tx_buf,
                                 const MotorCmd *all_motor_cmd)
 {
-    uint16_t motor_start = 0;
-    uint16_t motor_count = motors_per_slave[slave_index];
-
-    for (int i = 0; i < slave_index; i++) {
-        motor_start += motors_per_slave[i];
-    }
+  uint16_t motor_count = g_master_config.routing.motor_count_per_slave[slave_index];
 
     for (uint16_t m = 0; m < motor_count; m++) {
-        pack_one_motor(&tx_buf[m * BYTES_PER_MOTOR], &all_motor_cmd[motor_start + m]);
+    uint8_t motor_id = get_motor_id_by_route(slave_index, (uint8_t)m);
+
+    if (motor_id < MAX_TOTAL_MOTORS) {
+      pack_one_motor(&tx_buf[m * BYTES_PER_MOTOR], &all_motor_cmd[motor_id]);
+    } else {
+      MotorCmd safe_cmd = {0.0f, 0.0f};
+      pack_one_motor(&tx_buf[m * BYTES_PER_MOTOR], &safe_cmd);
+    }
     }
 
     return motor_count * BYTES_PER_MOTOR;
+}
+
+static uint8_t get_motor_id_by_route(uint8_t slave_index, uint8_t motor_index_in_slave)
+{
+  if (slave_index >= NUM_SLAVES) {
+    return MAX_TOTAL_MOTORS;
+  }
+
+  if (motor_index_in_slave >= g_master_config.routing.motor_count_per_slave[slave_index]) {
+    return MAX_TOTAL_MOTORS;
+  }
+
+  return g_master_config.routing.motor_ids[slave_index][motor_index_in_slave];
+}
+
+static uint8_t get_motor_id_by_global_slot(uint16_t global_slot)
+{
+  uint16_t cursor = 0U;
+
+  for (uint8_t slave_index = 0U; slave_index < NUM_SLAVES; slave_index++) {
+    for (uint8_t motor_index_in_slave = 0U; motor_index_in_slave < g_master_config.routing.motor_count_per_slave[slave_index]; motor_index_in_slave++) {
+      if (cursor == global_slot) {
+        return get_motor_id_by_route(slave_index, motor_index_in_slave);
+      }
+      cursor++;
+    }
+  }
+
+  return MAX_TOTAL_MOTORS;
+}
+
+static uint8_t get_debug_test_motor_id(uint8_t test_slot)
+{
+  if (test_slot >= g_master_config.debug.test_motor_count) {
+    return MAX_TOTAL_MOTORS;
+  }
+
+  return g_master_config.debug.test_motor_ids[test_slot];
+}
+
+static uint8_t find_motor_route_by_id(uint8_t motor_id, MotorRoute *route)
+{
+  if (route == NULL) {
+    return 0U;
+  }
+
+  memset(route, 0, sizeof(*route));
+
+  for (uint8_t slave_index = 0U; slave_index < NUM_SLAVES; slave_index++) {
+    for (uint8_t motor_index_in_slave = 0U; motor_index_in_slave < g_master_config.routing.motor_count_per_slave[slave_index]; motor_index_in_slave++) {
+      if (g_master_config.routing.motor_ids[slave_index][motor_index_in_slave] == motor_id) {
+        route->found = 1U;
+        route->slave_index = slave_index;
+        route->dev = (SpiDevId)(DEV1 + slave_index);
+        return 1U;
+      }
+    }
+  }
+
+  return 0U;
+}
+
+static uint8_t set_host_command_by_motor_id(uint8_t motor_id, float position, float speed)
+{
+  MotorRoute route;
+
+  if (motor_id >= MAX_TOTAL_MOTORS) {
+    return 0U;
+  }
+
+  if (find_motor_route_by_id(motor_id, &route) == 0U) {
+    return 0U;
+  }
+
+  g_host_cmd[motor_id].position = clamp_float(position, P_MIN, P_MAX);
+  g_host_cmd[motor_id].speed = clamp_float(speed, V_MIN, V_MAX);
+
+  return 1U;
+}
+
+static void update_motor_comm_snapshot(uint8_t motor_id,
+                                      uint8_t slave_index,
+                                      float position,
+                                      float speed)
+{
+  if (motor_id >= MAX_TOTAL_MOTORS) {
+    return;
+  }
+
+  g_master_safety.motor_comm_snapshot[motor_id].valid = 1U;
+  g_master_safety.motor_comm_snapshot[motor_id].motor_id = motor_id;
+  g_master_safety.motor_comm_snapshot[motor_id].slave_index = slave_index;
+  g_master_safety.motor_comm_snapshot[motor_id].position = position;
+  g_master_safety.motor_comm_snapshot[motor_id].speed = speed;
+  g_master_safety.motor_comm_snapshot[motor_id].tick = HAL_GetTick();
+}
+
+static void dump_motor_comm_snapshots(void)
+{
+  uart_printf("\r\n=== Motor Comm Snapshot Dump ===\r\n");
+
+  for (uint8_t motor_id = 0U; motor_id < MAX_TOTAL_MOTORS; motor_id++) {
+    const MotorCommSnapshot *snapshot = &g_master_safety.motor_comm_snapshot[motor_id];
+
+    if (snapshot->valid == 0U) {
+      continue;
+    }
+
+    uart_printf("motor=%u slave=%u pos=%.3f speed=%.3f tick=%lu\r\n",
+                (unsigned int)snapshot->motor_id,
+                (unsigned int)(snapshot->slave_index + 1U),
+                snapshot->position,
+                snapshot->speed,
+                (unsigned long)snapshot->tick);
+  }
+
+  uart_printf("=== End Snapshot Dump ===\r\n");
+}
+
+static HAL_StatusTypeDef submit_host_command_by_motor_id(uint8_t motor_id, float displacement, float speed)
+{
+  MotorRoute route;
+
+  if (find_motor_route_by_id(motor_id, &route) == 0U) {
+    uart_printf("[HOST CMD] unknown motor id=%u\r\n", (unsigned int)motor_id);
+    return HAL_ERROR;
+  }
+
+  if (set_host_command_by_motor_id(motor_id, displacement, speed) == 0U) {
+    return HAL_ERROR;
+  }
+
+  set_command_source(CMD_SOURCE_HOST);
+  publish_command_cache(g_host_cmd);
+  update_motor_comm_snapshot(motor_id,
+                             route.slave_index,
+                             g_master_safety.command_cache[motor_id].position,
+                             g_master_safety.command_cache[motor_id].speed);
+
+  uart_printf("[HOST CMD] id=%u -> DEV%u, displacement=%.2f speed=%.2f\r\n",
+              (unsigned int)motor_id,
+              (unsigned int)(route.slave_index + 1U),
+              g_master_safety.command_cache[motor_id].position,
+              g_master_safety.command_cache[motor_id].speed);
+
+  return spi_send_to_one_slave(route.dev, route.slave_index, g_master_safety.command_cache);
 }
 
 /* Transaction helper for one slave: build, transmit, receive, and print. */
@@ -378,16 +624,16 @@ static HAL_StatusTypeDef spi_send_to_one_slave(SpiDevId dev,
 
     uart_printf("[SPI] start dev=%d, motors=%d, bytes=%d\r\n",
                 (int)dev,
-                (int)motors_per_slave[slave_index],
+                (int)g_master_config.routing.motor_count_per_slave[slave_index],
                 (int)tx_len);
 
-    uint16_t motor_start = 0;
-    for (int i = 0; i < slave_index; i++) {
-        motor_start += motors_per_slave[i];
-    }
-
-    for (uint16_t m = 0; m < motors_per_slave[slave_index]; m++) {
-        uart_print_one_motor_encoding(motor_start + m, &all_motor_cmd[motor_start + m]);
+    for (uint16_t m = 0; m < g_master_config.routing.motor_count_per_slave[slave_index]; m++) {
+        uint8_t motor_id = get_motor_id_by_route(slave_index, (uint8_t)m);
+      update_motor_comm_snapshot(motor_id,
+                                 slave_index,
+                                 all_motor_cmd[motor_id].position,
+                                 all_motor_cmd[motor_id].speed);
+        uart_print_one_motor_encoding(motor_id, &all_motor_cmd[motor_id]);
     }
 
     uart_dump_bytes("[SPI] TX:", tx_buf, tx_len);
@@ -403,13 +649,13 @@ static HAL_StatusTypeDef spi_send_to_one_slave(SpiDevId dev,
     if (st == HAL_OK) {
         uart_dump_bytes("[SPI] RX:", rx_buf, tx_len);
 
-        uint16_t motor_start = 0;
-        for (int i = 0; i < slave_index; i++) {
-            motor_start += motors_per_slave[i];
-        }
-
-        for (uint16_t m = 0; m < motors_per_slave[slave_index]; m++) {
-            uart_print_one_motor_rx(motor_start + m, &rx_buf[m * BYTES_PER_MOTOR]);
+        for (uint16_t m = 0; m < g_master_config.routing.motor_count_per_slave[slave_index]; m++) {
+            uint8_t motor_id = get_motor_id_by_route(slave_index, (uint8_t)m);
+          update_motor_comm_snapshot(motor_id,
+                                     slave_index,
+                                     all_motor_cmd[motor_id].position,
+                                     all_motor_cmd[motor_id].speed);
+            uart_print_one_motor_rx(motor_id, &rx_buf[m * BYTES_PER_MOTOR]);
         }
 
         HAL_GPIO_TogglePin(LD1_GPIO_Port, LD1_Pin);
@@ -443,8 +689,7 @@ static HAL_StatusTypeDef spi_update_all_slaves_param(const MotorCmd *all_motor_c
 
 static void copy_command_table(MotorCmd *target, const MotorCmd *source)
 {
-  uint16_t total_motors = get_total_configured_motors();
-  for (uint16_t i = 0; i < total_motors; i++) {
+  for (uint16_t i = 0; i < MAX_TOTAL_MOTORS; i++) {
     target[i] = source[i];
   }
 }
@@ -470,8 +715,7 @@ static const MotorCmd* get_active_command_source(void)
 
 static void build_safe_stop_commands(MotorCmd *target)
 {
-  uint16_t total_motors = get_total_configured_motors();
-  for (uint16_t i = 0; i < total_motors; i++) {
+  for (uint16_t i = 0; i < MAX_TOTAL_MOTORS; i++) {
     target[i].position = 0.0f;
     target[i].speed = 0.0f;
   }
@@ -479,9 +723,7 @@ static void build_safe_stop_commands(MotorCmd *target)
 
 static void publish_command_cache(const MotorCmd *source)
 {
-  uint16_t total_motors = get_total_configured_motors();
-
-  for (uint16_t i = 0; i < total_motors; i++) {
+  for (uint16_t i = 0; i < MAX_TOTAL_MOTORS; i++) {
     g_master_safety.command_cache[i].position = clamp_float(source[i].position, P_MIN, P_MAX);
     g_master_safety.command_cache[i].speed = clamp_float(source[i].speed, V_MIN, V_MAX);
   }
@@ -515,13 +757,13 @@ static void clear_emergency_stop_manual(void)
   uart_printf("[SAFETY] ESTOP manually cleared\r\n");
 }
 
-static void run_debug_test_cycle(float *dir, float *step, uint32_t *phase_tick, uint8_t *phase, uint8_t *motor_index)
+static void run_debug_test_cycle(float *dir, uint32_t *phase_tick, uint8_t *phase, uint8_t *motor_index)
 {
-  const uint32_t phase_period_ms = 600;
-  const uint16_t total_motors = get_total_configured_motors();
+  const uint32_t phase_period_ms = g_master_config.debug.phase_period_ms;
+  const uint8_t test_motor_count = g_master_config.debug.test_motor_count;
 
-  if (total_motors == 0) {
-    uart_printf("[TEST] no motors configured\r\n");
+  if (test_motor_count == 0U) {
+    uart_printf("[TEST] no debug test motors configured\r\n");
     HAL_Delay(100);
     return;
   }
@@ -529,12 +771,7 @@ static void run_debug_test_cycle(float *dir, float *step, uint32_t *phase_tick, 
   if (HAL_GetTick() - *phase_tick >= phase_period_ms) {
     *phase_tick = HAL_GetTick();
     *phase = (uint8_t)((*phase + 1U) % 4U);
-    *motor_index = (uint8_t)((*motor_index + 1U) % total_motors);
-  }
-
-  for (uint16_t i = 0; i < total_motors; i++) {
-    g_test_cmd[i].position = 0.0f;
-    g_test_cmd[i].speed = 0.0f;
+    *motor_index = (uint8_t)((*motor_index + 1U) % test_motor_count);
   }
 
   switch (*phase) {
@@ -545,36 +782,53 @@ static void run_debug_test_cycle(float *dir, float *step, uint32_t *phase_tick, 
 
     case 1:
       build_safe_stop_commands(g_test_cmd);
-      g_test_cmd[*motor_index].position = 6.0f * (*dir) * (*step) * 10.0f;
-      g_test_cmd[*motor_index].speed = 4.0f;
-      uart_printf("[TEST] phase 1: single motor step test on %u\r\n", (unsigned int)(*motor_index));
+      {
+        uint8_t motor_id = get_debug_test_motor_id(*motor_index);
+        if (motor_id < MAX_TOTAL_MOTORS) {
+          g_test_cmd[motor_id].position = g_master_config.debug.single_step_position * (*dir);
+          g_test_cmd[motor_id].speed = g_master_config.debug.single_step_speed;
+          uart_printf("[TEST] phase 1: single motor step test on ID %u\r\n", (unsigned int)motor_id);
+        }
+      }
       break;
 
     case 2:
-      for (uint16_t i = 0; i < total_motors; i++) {
-        g_test_cmd[i].position = (i & 1U) ? -4.0f : 4.0f;
-        g_test_cmd[i].speed = 2.0f + (float)i * 0.5f;
+      for (uint8_t i = 0; i < test_motor_count; i++) {
+        uint8_t motor_id = get_debug_test_motor_id(i);
+        if (motor_id < MAX_TOTAL_MOTORS) {
+          g_test_cmd[motor_id].position = (i & 1U) ? g_master_config.debug.alternating_low_position : g_master_config.debug.alternating_high_position;
+          g_test_cmd[motor_id].speed = g_master_config.debug.alternating_speed_base + ((float)i * g_master_config.debug.alternating_speed_step);
+        }
       }
       uart_printf("[TEST] phase 2: alternating multi-motor pattern\r\n");
       break;
 
     default:
-      for (uint16_t i = 0; i < total_motors; i++) {
-        g_test_cmd[i].position = -10.0f + (1.5f * (float)i);
-        g_test_cmd[i].speed = 1.0f + ((float)i * 0.25f);
+      for (uint8_t i = 0; i < test_motor_count; i++) {
+        uint8_t motor_id = get_debug_test_motor_id(i);
+        if (motor_id < MAX_TOTAL_MOTORS) {
+          g_test_cmd[motor_id].position = g_master_config.debug.sweep_start_position + (g_master_config.debug.sweep_position_step * (float)i);
+          g_test_cmd[motor_id].speed = g_master_config.debug.sweep_speed_start + ((float)i * g_master_config.debug.sweep_speed_step);
+        }
       }
       uart_printf("[TEST] phase 3: boundary sweep pattern\r\n");
       break;
   }
 
-  if (g_test_cmd[*motor_index].position >= 10.0f || g_test_cmd[*motor_index].position <= -10.0f) {
-    *dir = -*dir;
-  }
+  {
+    uint8_t motor_id = get_debug_test_motor_id(*motor_index);
+    if (motor_id < MAX_TOTAL_MOTORS) {
+      if (g_test_cmd[motor_id].position >= g_master_config.debug.sweep_direction_limit ||
+          g_test_cmd[motor_id].position <= -g_master_config.debug.sweep_direction_limit) {
+        *dir = -*dir;
+      }
 
-  uart_printf("[TEST] motor %u cmd: pos=%.2f spd=%.2f\r\n",
-        (unsigned int)(*motor_index),
-        g_test_cmd[*motor_index].position,
-        g_test_cmd[*motor_index].speed);
+      uart_printf("[TEST] motor ID %u cmd: pos=%.2f spd=%.2f\r\n",
+            (unsigned int)motor_id,
+            g_test_cmd[motor_id].position,
+            g_test_cmd[motor_id].speed);
+    }
+  }
 
   set_command_source(CMD_SOURCE_TEST);
   publish_command_cache(g_test_cmd);
@@ -663,16 +917,23 @@ int main(void)
   if (get_total_configured_motors() > MAX_TOTAL_MOTORS) {
     Error_Handler();
   }
+
+  g_master_safety.enabled = g_master_config.safety.enabled;
+  g_master_safety.max_consecutive_spi_errors = g_master_config.safety.max_consecutive_spi_errors;
+  g_master_safety.control_loop_period_ms = g_master_config.safety.control_loop_period_ms;
+  g_master_safety.command_cache_timeout_ms = g_master_config.safety.command_cache_timeout_ms;
+
   set_command_source(CMD_SOURCE_TEST);
   copy_command_table(g_host_cmd, g_motor_cmd);
   copy_command_table(g_test_cmd, g_motor_cmd);
   publish_command_cache(get_active_command_source());
   float dir = 1.0;
-  float step = 0.1;
   uint32_t phase_tick = HAL_GetTick();
   uint8_t test_phase = 0;
   uint8_t test_motor_index = 0;
   uint8_t prev_user_btn = 0U;
+  uint32_t user_btn_press_tick = 0U;
+  uint8_t user_btn_long_dumped = 0U;
   /* USER CODE END 2 */
 
   /* Infinite loop */
@@ -685,7 +946,14 @@ int main(void)
 
     uint8_t user_btn = (HAL_GPIO_ReadPin(USER_Btn_GPIO_Port, USER_Btn_Pin) == GPIO_PIN_SET) ? 1U : 0U;
     if ((user_btn != 0U) && (prev_user_btn == 0U)) {
+      user_btn_press_tick = HAL_GetTick();
+      user_btn_long_dumped = 0U;
       clear_emergency_stop_manual();
+    }
+    if ((user_btn != 0U) && (user_btn_long_dumped == 0U) &&
+        ((HAL_GetTick() - user_btn_press_tick) >= 1500U)) {
+      dump_motor_comm_snapshots();
+      user_btn_long_dumped = 1U;
     }
     prev_user_btn = user_btn;
 
@@ -694,7 +962,7 @@ int main(void)
        - REAL mode : send current command cache with safety policy. */
     if (g_master_mode == MASTER_MODE_DEBUG)
     {
-      run_debug_test_cycle(&dir, &step, &phase_tick, &test_phase, &test_motor_index);
+      run_debug_test_cycle(&dir, &phase_tick, &test_phase, &test_motor_index);
     }
     else
     {
