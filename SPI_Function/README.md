@@ -86,6 +86,43 @@ USART3 prints:
 
 Use a serial terminal on the board virtual COM port to observe logs.
 
+## Quick Reminders (How To Use)
+
+Main control entry is in `Core/Src/main.c`.
+
+1. Mode switch
+- `g_master_mode = MASTER_MODE_DEBUG`: runs built-in test cases.
+- `g_master_mode = MASTER_MODE_REAL`: runs real loop and sends command cache.
+
+2. Where to set motor targets
+- Write desired targets into `g_motor_cmd[]` (position + speed).
+- Real mode sends the cached safe copy, not raw values directly.
+
+3. Safety structure (single place to tune)
+- `g_master_safety.enabled`: `1` = safety checks on, `0` = checks off.
+- `g_master_safety.command_cache_timeout_ms`: command cache timeout threshold.
+- `g_master_safety.max_consecutive_spi_errors`: SPI error threshold before ESTOP.
+- `g_master_safety.control_loop_period_ms`: loop delay in real mode.
+
+4. Safety behavior reminder
+- If ESTOP is latched, master sends safe-stop command cache (all zero targets).
+- To clear ESTOP, update code logic explicitly (currently latch is sticky by design).
+
+5. Key helper functions
+- `publish_command_cache(...)`: bounds and publishes outgoing cache.
+- `run_debug_test_cycle(...)`: debug test patterns.
+- `run_real_master_cycle(...)`: real control path with safety checks.
+
+6. Function map (quick lookup)
+- `float_to_uint(...)` / `uint_to_float(...)`: value encode/decode helpers.
+- `pack_one_motor(...)`: pack one motor command into 4 bytes.
+- `build_slave_buf(...)`: build one slave packet from global commands.
+- `spi_send_to_one_slave(...)`: one slave transaction + debug print.
+- `spi_update_all_slaves_param(...)`: send one cycle to all slaves.
+- `build_safe_stop_commands(...)`: build all-zero safe command table.
+- `latch_emergency_stop(...)`: latch safety stop state.
+- `CS_SELECT(...)` / `CS_ALL_HIGH(...)`: chip-select control helpers.
+
 ## Notes
 
 - Keep user custom code inside `USER CODE BEGIN/END` blocks to survive CubeMX re-generation.

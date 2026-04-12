@@ -83,11 +83,46 @@ PCD_HandleTypeDef hpcd_USB_OTG_FS;
 */
 static const uint8_t motors_per_slave[NUM_SLAVES] = {1, 1, 1, 1};
 
+typedef enum {
+  MASTER_MODE_DEBUG = 0,
+  MASTER_MODE_REAL = 1
+} MasterMode;
+
+static volatile MasterMode g_master_mode = MASTER_MODE_DEBUG;
+
+/* Master-side safety reminder:
+   - Tune all safety knobs here.
+   - Turn safety checks on/off with enabled.
+   - command_cache is what real mode actually sends. */
+typedef struct {
+  uint8_t enabled;
+  uint8_t estop_latched;
+  uint8_t command_cache_valid;
+  uint8_t consecutive_spi_errors;
+  uint8_t max_consecutive_spi_errors;
+  uint32_t control_loop_period_ms;
+  uint32_t command_cache_timeout_ms;
+  uint32_t command_cache_tick;
+  MotorCmd command_cache[MAX_TOTAL_MOTORS];
+} MasterSafetyControl;
+
+static MasterSafetyControl g_master_safety = {
+  .enabled = 1U,
+  .estop_latched = 0U,
+  .command_cache_valid = 0U,
+  .consecutive_spi_errors = 0U,
+  .max_consecutive_spi_errors = 3U,
+  .control_loop_period_ms = 1U,
+  .command_cache_timeout_ms = 100U,
+  .command_cache_tick = 0U,
+  .command_cache = {0}
+};
+
 static MotorCmd g_motor_cmd[MAX_TOTAL_MOTORS] = {
-    {0.0f, 1.0f},
     {0.0f, 0.0f},
-    {0.0f, 3.0f},
-    {0.0f, 4.0f}
+    {0.0f, 0.0f},
+    {0.0f, 0.0f},
+    {0.0f, 0.0f}
 };
 /* USER CODE END PV */
 
@@ -103,17 +138,29 @@ static void uart_printf(const char *fmt, ...);
 static void uart_dump_bytes(const char *tag, const uint8_t *buf, int n);
 static inline void CS_ALL_HIGH(void);
 static inline void CS_SELECT(SpiDevId dev);
+static float clamp_float(float value, float min_value, float max_value);
 static uint16_t get_total_configured_motors(void);
 static void pack_one_motor(uint8_t *out, const MotorCmd *cmd);
 static uint16_t build_slave_buf(uint8_t slave_index, uint8_t *tx_buf, const MotorCmd *all_motor_cmd);
 static HAL_StatusTypeDef spi_send_to_one_slave(SpiDevId dev, uint8_t slave_index, const MotorCmd *all_motor_cmd);
 static HAL_StatusTypeDef spi_update_all_slaves_param(const MotorCmd *all_motor_cmd);
 static void uart_print_one_motor_rx(uint16_t motor_index, const uint8_t *rx);
+/* Copy host command table into the bounded/safe cache. */
+static void publish_command_cache(const MotorCmd *source);
+/* Build a safe fallback command (all motors stop). */
+static void build_safe_stop_commands(MotorCmd *target);
+/* Latch ESTOP once a safety condition is violated. */
+static void latch_emergency_stop(const char *reason);
+/* Debug mode test cases runner. */
+static void run_debug_test_cycle(float *dir, float *step, uint32_t *phase_tick, uint8_t *phase, uint8_t *motor_index);
+/* Real mode loop: send cached commands + enforce safety checks. */
+static void run_real_master_cycle(void);
 /* USER CODE END PFP */
 
 /* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
 
+/* Convert float command to bounded integer field for protocol packing. */
 static int float_to_uint(float x, float x_min, float x_max, unsigned int bits)
 {
     float span = x_max - x_min;
@@ -122,6 +169,7 @@ static int float_to_uint(float x, float x_min, float x_max, unsigned int bits)
     return (int)((x - x_min) * ((float)((1U << bits) - 1U) / span));
 }
 
+/* Decode integer field back to float for debug visibility. */
 static float uint_to_float(int x_int, float x_min, float x_max, int bits)
 {
     float span = x_max - x_min;
@@ -129,6 +177,18 @@ static float uint_to_float(int x_int, float x_min, float x_max, int bits)
     return ((float)x_int) * span / ((float)((1U << bits) - 1U)) + offset;
 }
 
+static float clamp_float(float value, float min_value, float max_value)
+{
+  if (value < min_value) {
+    return min_value;
+  }
+  if (value > max_value) {
+    return max_value;
+  }
+  return value;
+}
+
+/* UART helper for quick runtime reminders and debug traces. */
 static void uart_printf(const char *fmt, ...)
 {
     char buf[128];
@@ -143,6 +203,7 @@ static void uart_printf(const char *fmt, ...)
     HAL_UART_Transmit(&huart3, (uint8_t*)buf, (uint16_t)strlen(buf), 100);
 }
 
+/* Dump packet bytes in hex format. */
 static void uart_dump_bytes(const char *tag, const uint8_t *buf, int n)
 {
     uart_printf("%s", tag);
@@ -152,11 +213,13 @@ static void uart_dump_bytes(const char *tag, const uint8_t *buf, int n)
     uart_printf("\r\n");
 }
 
+/* Deassert all slave chip-select lines. */
 static inline void CS_ALL_HIGH(void)
 {
     HAL_GPIO_WritePin(GPIOE, GPIO_PIN_2 | GPIO_PIN_4 | GPIO_PIN_5 | GPIO_PIN_6, GPIO_PIN_SET);
 }
 
+/* Assert one slave CS at a time for targeted transfer. */
 static inline void CS_SELECT(SpiDevId dev)
 {
     CS_ALL_HIGH();
@@ -169,6 +232,7 @@ static inline void CS_SELECT(SpiDevId dev)
     }
 }
 
+/* Sum current motor allocation across all slaves. */
 static uint16_t get_total_configured_motors(void)
 {
     uint16_t total = 0;
@@ -178,6 +242,7 @@ static uint16_t get_total_configured_motors(void)
     return total;
 }
 
+/* Build one 4-byte motor command payload (position + speed). */
 static void pack_one_motor(uint8_t *out, const MotorCmd *cmd)
 {
     uint16_t pos_u16 = (uint16_t)float_to_uint(cmd->position, P_MIN, P_MAX, 16);
@@ -235,6 +300,7 @@ static void uart_print_one_motor_rx(uint16_t motor_index, const uint8_t *rx)
                 spd_f);
 }
 
+/* Build per-slave TX payload from the global motor command table. */
 static uint16_t build_slave_buf(uint8_t slave_index,
                                 uint8_t *tx_buf,
                                 const MotorCmd *all_motor_cmd)
@@ -253,6 +319,7 @@ static uint16_t build_slave_buf(uint8_t slave_index,
     return motor_count * BYTES_PER_MOTOR;
 }
 
+/* Transaction helper for one slave: build, transmit, receive, and print. */
 static HAL_StatusTypeDef spi_send_to_one_slave(SpiDevId dev,
                                                uint8_t slave_index,
                                                const MotorCmd *all_motor_cmd)
@@ -314,6 +381,7 @@ static HAL_StatusTypeDef spi_send_to_one_slave(SpiDevId dev,
     return st;
 }
 
+/* Master scheduler entry: push one control cycle to all configured slaves. */
 static HAL_StatusTypeDef spi_update_all_slaves_param(const MotorCmd *all_motor_cmd)
 {
     HAL_StatusTypeDef st;
@@ -331,6 +399,140 @@ static HAL_StatusTypeDef spi_update_all_slaves_param(const MotorCmd *all_motor_c
     if (st != HAL_OK) return st;
 
     return HAL_OK;
+}
+
+static void build_safe_stop_commands(MotorCmd *target)
+{
+  uint16_t total_motors = get_total_configured_motors();
+  for (uint16_t i = 0; i < total_motors; i++) {
+    target[i].position = 0.0f;
+    target[i].speed = 0.0f;
+  }
+}
+
+static void publish_command_cache(const MotorCmd *source)
+{
+  uint16_t total_motors = get_total_configured_motors();
+
+  for (uint16_t i = 0; i < total_motors; i++) {
+    g_master_safety.command_cache[i].position = clamp_float(source[i].position, P_MIN, P_MAX);
+    g_master_safety.command_cache[i].speed = clamp_float(source[i].speed, V_MIN, V_MAX);
+  }
+
+  g_master_safety.command_cache_valid = 1U;
+  g_master_safety.command_cache_tick = HAL_GetTick();
+}
+
+static void latch_emergency_stop(const char *reason)
+{
+  if (!g_master_safety.estop_latched) {
+    uart_printf("[SAFETY] ESTOP latched: %s\r\n", reason);
+  }
+
+  g_master_safety.estop_latched = 1U;
+  g_master_safety.consecutive_spi_errors = 0U;
+  build_safe_stop_commands(g_master_safety.command_cache);
+  g_master_safety.command_cache_valid = 1U;
+  g_master_safety.command_cache_tick = HAL_GetTick();
+}
+
+static void run_debug_test_cycle(float *dir, float *step, uint32_t *phase_tick, uint8_t *phase, uint8_t *motor_index)
+{
+  const uint32_t phase_period_ms = 600;
+  const uint16_t total_motors = get_total_configured_motors();
+
+  if (total_motors == 0) {
+    uart_printf("[TEST] no motors configured\r\n");
+    HAL_Delay(100);
+    return;
+  }
+
+  if (HAL_GetTick() - *phase_tick >= phase_period_ms) {
+    *phase_tick = HAL_GetTick();
+    *phase = (uint8_t)((*phase + 1U) % 4U);
+    *motor_index = (uint8_t)((*motor_index + 1U) % total_motors);
+  }
+
+  for (uint16_t i = 0; i < total_motors; i++) {
+    g_motor_cmd[i].position = 0.0f;
+    g_motor_cmd[i].speed = 0.0f;
+  }
+
+  switch (*phase) {
+    case 0:
+      build_safe_stop_commands(g_motor_cmd);
+      uart_printf("[TEST] phase 0: all motors idle\r\n");
+      break;
+
+    case 1:
+      build_safe_stop_commands(g_motor_cmd);
+      g_motor_cmd[*motor_index].position = 6.0f * (*dir) * (*step) * 10.0f;
+      g_motor_cmd[*motor_index].speed = 4.0f;
+      uart_printf("[TEST] phase 1: single motor step test on %u\r\n", (unsigned int)(*motor_index));
+      break;
+
+    case 2:
+      for (uint16_t i = 0; i < total_motors; i++) {
+        g_motor_cmd[i].position = (i & 1U) ? -4.0f : 4.0f;
+        g_motor_cmd[i].speed = 2.0f + (float)i * 0.5f;
+      }
+      uart_printf("[TEST] phase 2: alternating multi-motor pattern\r\n");
+      break;
+
+    default:
+      for (uint16_t i = 0; i < total_motors; i++) {
+        g_motor_cmd[i].position = -10.0f + (1.5f * (float)i);
+        g_motor_cmd[i].speed = 1.0f + ((float)i * 0.25f);
+      }
+      uart_printf("[TEST] phase 3: boundary sweep pattern\r\n");
+      break;
+  }
+
+  if (g_motor_cmd[*motor_index].position >= 10.0f || g_motor_cmd[*motor_index].position <= -10.0f) {
+    *dir = -*dir;
+  }
+
+  uart_printf("[TEST] motor %u cmd: pos=%.2f spd=%.2f\r\n",
+        (unsigned int)(*motor_index),
+        g_motor_cmd[*motor_index].position,
+        g_motor_cmd[*motor_index].speed);
+
+  publish_command_cache(g_motor_cmd);
+  spi_update_all_slaves_param(g_master_safety.command_cache);
+  HAL_Delay(1);
+}
+
+static void run_real_master_cycle(void)
+{
+  const uint32_t now = HAL_GetTick();
+
+  if (!g_master_safety.command_cache_valid) {
+    publish_command_cache(g_motor_cmd);
+  }
+
+  /* If safety is enabled, timeout and SPI error checks can latch ESTOP.
+     If safety is disabled, commands are still sent but checks are bypassed. */
+  if (g_master_safety.enabled != 0U) {
+    if (g_master_safety.estop_latched != 0U) {
+      build_safe_stop_commands(g_master_safety.command_cache);
+    } else if ((now - g_master_safety.command_cache_tick) > g_master_safety.command_cache_timeout_ms) {
+      latch_emergency_stop("command cache timeout");
+    }
+  }
+
+  if (spi_update_all_slaves_param(g_master_safety.command_cache) == HAL_OK) {
+    g_master_safety.consecutive_spi_errors = 0U;
+  } else {
+    if (g_master_safety.consecutive_spi_errors < 255U) {
+      g_master_safety.consecutive_spi_errors++;
+    }
+    if ((g_master_safety.enabled != 0U) &&
+        (g_master_safety.consecutive_spi_errors >= g_master_safety.max_consecutive_spi_errors)) {
+      latch_emergency_stop("too many SPI errors");
+    }
+  }
+
+  HAL_Delay(g_master_safety.control_loop_period_ms);
 }
 /* USER CODE END 0 */
 
@@ -370,8 +572,15 @@ int main(void)
   /* USER CODE BEGIN 2 */
   uart_printf("\r\n=== SPI parameterized motor demo ===\r\n");
   uart_printf("Configured motors total = %d\r\n", (int)get_total_configured_motors());
+  if (get_total_configured_motors() > MAX_TOTAL_MOTORS) {
+    Error_Handler();
+  }
+  publish_command_cache(g_motor_cmd);
   float dir = 1.0;
   float step = 0.1;
+  uint32_t phase_tick = HAL_GetTick();
+  uint8_t test_phase = 0;
+  uint8_t test_motor_index = 0;
   /* USER CODE END 2 */
 
   /* Infinite loop */
@@ -381,31 +590,18 @@ int main(void)
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
-    g_motor_cmd[0].position += step * dir;
-    g_motor_cmd[0].speed    = 5.0f;
 
-    if((g_motor_cmd[0].position >= 12.0f)||(g_motor_cmd[0].position <= -12.0f)){
-    	dir *= -1.0f;
+    /* Reminder:
+       - DEBUG mode: built-in test patterns to validate path/endpoints.
+       - REAL mode : send current command cache with safety policy. */
+    if (g_master_mode == MASTER_MODE_DEBUG)
+    {
+      run_debug_test_cycle(&dir, &step, &phase_tick, &test_phase, &test_motor_index);
     }
-
-
-//    g_motor_cmd[1].position += 0.00f;
-//    g_motor_cmd[1].speed     = 0.0f;
-//
-//    g_motor_cmd[2].position += 0.30f;
-//    g_motor_cmd[2].speed     = 3.0f;
-//
-//    g_motor_cmd[3].position += 0.40f;
-//    g_motor_cmd[3].speed     = 4.0f;
-
-    uart_printf("[CMD] M0 pos=%.2f spd=%.2f\r\n", g_motor_cmd[0].position, g_motor_cmd[0].speed);
-//    uart_printf("[CMD] M1 pos=%.2f spd=%.2f\r\n", g_motor_cmd[1].position, g_motor_cmd[1].speed);
-//    uart_printf("[CMD] M2 pos=%.2f spd=%.2f\r\n", g_motor_cmd[2].position, g_motor_cmd[2].speed);
-//    uart_printf("[CMD] M3 pos=%.2f spd=%.2f\r\n", g_motor_cmd[3].position, g_motor_cmd[3].speed);
-
-    spi_send_to_one_slave(DEV1, 0, g_motor_cmd);
-
-    HAL_Delay(1);
+    else
+    {
+      run_real_master_cycle();
+    }
   }
   /* USER CODE END 3 */
 }
