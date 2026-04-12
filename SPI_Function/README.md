@@ -103,15 +103,26 @@ Main control entry is in `Core/Src/main.c`.
 - `g_master_safety.command_cache_timeout_ms`: command cache timeout threshold.
 - `g_master_safety.max_consecutive_spi_errors`: SPI error threshold before ESTOP.
 - `g_master_safety.control_loop_period_ms`: loop delay in real mode.
+- Runtime stats in same struct:
+  - `tx_total_count`, `tx_success_count`, `tx_fail_count`
+  - `last_success_tick`, `last_error_tick`, `last_error_reason`
+  - `estop_latch_count`
 
-4. Safety behavior reminder
+4. Command source management (avoid overwrite)
+- `CMD_SOURCE_TEST`: debug test generator writes commands into `g_test_cmd[]`.
+- `CMD_SOURCE_HOST`: host-side logic should write commands into `g_host_cmd[]`.
+- Active source is selected through `g_master_safety.active_command_source`.
+- Real mode sends the active source cache only.
+
+5. Safety behavior reminder
 - If ESTOP is latched, master sends safe-stop command cache (all zero targets).
-- To clear ESTOP, update code logic explicitly (currently latch is sticky by design).
+- Manual clear entry is implemented: press USER button to clear ESTOP latch.
 
-5. Key helper functions
+6. Key helper functions
 - `publish_command_cache(...)`: bounds and publishes outgoing cache.
 - `run_debug_test_cycle(...)`: debug test patterns.
 - `run_real_master_cycle(...)`: real control path with safety checks.
+- `clear_emergency_stop_manual(...)`: explicit ESTOP clear function.
 
 6. Function map (quick lookup)
 - `float_to_uint(...)` / `uint_to_float(...)`: value encode/decode helpers.
