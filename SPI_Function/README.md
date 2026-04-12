@@ -3,7 +3,7 @@
 STM32F446ZETx firmware project for multi-slave SPI motor command exchange.
 
 This project is generated with STM32CubeIDE/CubeMX and extended in user code to:
-- Pack motor position/speed commands into 4-byte frames
+- Pack motor id/position/speed commands into 5-byte frames
 - Send frames to up to 4 SPI slaves (selected by GPIO chip-select)
 - Receive SPI feedback and decode it back to float values
 - Print debug logs over USART3
@@ -42,9 +42,23 @@ This project is generated with STM32CubeIDE/CubeMX and extended in user code to:
 
 ## Motor Data Format
 
-Each motor command is 4 bytes:
-- Byte0-1: position (uint16, little-endian)
-- Byte2-3: speed (uint16, little-endian)
+Each motor command is 5 bytes:
+- Byte0: motor id
+- Byte1-2: position (uint16, little-endian)
+- Byte3-4: speed (uint16, little-endian)
+
+## SPI Interface For Slave Side
+
+This is the contract the master firmware expects the slave firmware to follow.
+
+- The master always sends one frame per motor slot.
+- The motor id in Byte0 is the logical key used to route commands and store feedback.
+- The slave should not rely on motor order alone; it should read Byte0 and map that id to the correct local motor.
+- On RX, the slave should return the same frame layout: motor id, then feedback position, then feedback speed.
+- Position and speed fields are little-endian `uint16` values encoded with the same min/max scaling used by the master.
+- If a slave has no motor for a slot, the master sends a zero-id fallback frame.
+- Feedback snapshots on the master side are updated from the received motor id and payload.
+- Any future slave implementation must keep the 5-byte frame layout stable so the master can keep routing by id.
 
 Float values are clamped/scaled in `main.c` with:
 - Position range: `P_MIN=-12.57`, `P_MAX=12.57`
@@ -126,7 +140,7 @@ Main control entry is in `Core/Src/main.c`.
 
 6. Function map (quick lookup)
 - `float_to_uint(...)` / `uint_to_float(...)`: value encode/decode helpers.
-- `pack_one_motor(...)`: pack one motor command into 4 bytes.
+- `pack_one_motor(...)`: pack one motor command into 5 bytes with motor id.
 - `build_slave_buf(...)`: build one slave packet from global commands.
 - `spi_send_to_one_slave(...)`: one slave transaction + debug print.
 - `spi_update_all_slaves_param(...)`: send one cycle to all slaves.
