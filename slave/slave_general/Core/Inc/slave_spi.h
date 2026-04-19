@@ -12,7 +12,7 @@
 #include "motor_chain.h"
 #include "main.h"
 
-#define PAYLOAD_LENGTH MAX_MOTOR_COUNT * 4 //each motor sends an int16_t angle and an int16_t position
+#define PAYLOAD_LENGTH MAX_MOTOR_COUNT * 5 //Motor id + each motor sends an int16_t angle and an int16_t position
 #define BUFFER_SIZE 32
 
 extern uint8_t* volatile  motor_update_buf; //This belongs to the Rx side

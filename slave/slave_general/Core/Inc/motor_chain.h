@@ -21,7 +21,7 @@ extern uint8_t can_rx_flag;
 extern uint8_t rx_data[8];
 
 //void HAL_CAN_RxFifo0MsgPendingCallback(CAN_HandleTypeDef *hcan);
-
+motor_t* get_motor_by_id(uint8_t id);
 HAL_StatusTypeDef motor_chain_init(void);
 HAL_StatusTypeDef motor_chain_init_dbg(UART_HandleTypeDef *huart);
 

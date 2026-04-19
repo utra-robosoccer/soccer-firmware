@@ -11,7 +11,8 @@ uint8_t rx_data[8];
 // ---------------------------------------------------------
 // Helper: Get Motor Pointer by ID using LUT
 // ---------------------------------------------------------
-static motor_t* get_motor_by_id(uint8_t id) {
+motor_t* get_motor_by_id(uint8_t id)
+{
     for (int i = 0; i < MAX_MOTOR_COUNT; i++) {
         if (motorID_lut[i] == id) {
             return &motors[i];
