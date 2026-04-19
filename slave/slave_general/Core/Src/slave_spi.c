@@ -192,6 +192,9 @@ HAL_StatusTypeDef spi_update_all_motors()
 {
 	for (int i = 0; i < MAX_MOTOR_COUNT; i ++){
 		motor_t* target_motor = get_motor_by_id(motor_update_buf[5 * i]);
+		if (target_motor == NULL) {
+			continue;
+		}
 		uint16_t raw_new_pos =  motor_update_buf[5 * i + 2] << 8 | motor_update_buf[5 * i + 1];
 		uint16_t raw_new_spd =  motor_update_buf[5 * i + 4] << 8 | motor_update_buf[5 * i + 3];
 		char uart_msg[100];

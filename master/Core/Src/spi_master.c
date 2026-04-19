@@ -109,9 +109,9 @@ static volatile MasterMode_t g_master_mode = MASTER_MODE_DEBUG;
 static const MasterTuneConfig g_master_config = {
     .routing = {
         .uart_print_enabled = 1U,
-        .motor_count_per_slave = {4U, 0U, 0U, 1U},
+        .motor_count_per_slave = {3U, 0U, 0U, 1U},
         .motor_ids = {
-            {2U, 3U, 4U, 5U},
+            {2U, 4U, 5U},
             {9U},
             {0U},
             {15U}
