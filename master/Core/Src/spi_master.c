@@ -125,8 +125,8 @@ static const MasterTuneConfig g_master_config = {
     },
     .debug = {
         .phase_period_ms = 600U,
-        .test_motor_count = 4U,
-        .test_motor_ids = {2U, 3U, 4U, 5U},
+        .test_motor_count = 3U,
+        .test_motor_ids = {2U, 4U, 5U},
         .single_step_position = 6.0f,
         .single_step_speed = 4.0f,
         .alternating_low_position = -4.0f,
