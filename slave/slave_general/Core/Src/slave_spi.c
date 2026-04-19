@@ -46,7 +46,7 @@
 
 #include "slave_spi.h"
 #include "string.h"
-#include "cachel1_armv7.h"
+//#include "cachel1_armv7.h"
 
 // TX & RX buffer declaration in MEM
 uint8_t RxBuffer_A[BUFFER_SIZE] = {0x0};
@@ -142,7 +142,7 @@ void spi_dma_init(SPI_HandleTypeDef *hspi)
 void spi_write_next_tx_buf(const uint8_t* motor_new_data_buf, uint8_t* motor_tele_buf)
 {
 	memcpy(motor_tele_buf, motor_new_data_buf, PAYLOAD_LENGTH);
-	SCB_CleanDCache_by_Addr(motor_tele_buf, PAYLOAD_LENGTH);
+//	SCB_CleanDCache_by_Addr(motor_tele_buf, PAYLOAD_LENGTH);
 	data_tx_ready_flag = 1; //signal -> ok to send motor_tele in the next frame
 }
 

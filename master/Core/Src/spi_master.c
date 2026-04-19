@@ -225,20 +225,19 @@ static void uart_dump_bytes(const char *tag, const uint8_t *buf, int n) {
 }
 
 static inline void CS_ALL_HIGH(void) {
-    HAL_GPIO_WritePin(GPIOE, GPIO_PIN_2 | GPIO_PIN_4 | GPIO_PIN_5 | GPIO_PIN_6, GPIO_PIN_SET);
+    HAL_GPIO_WritePin(GPIOC, SLAVE_CS_0_Pin | SLAVE_CS_1_Pin | SLAVE_CS_2_Pin | SLAVE_CS_3_Pin, GPIO_PIN_SET);
 }
 
 static inline void CS_SELECT(SpiDevId dev) {
     CS_ALL_HIGH();
     switch (dev) {
-        case DEV1: HAL_GPIO_WritePin(GPIOE, GPIO_PIN_2, GPIO_PIN_RESET); break;
-        case DEV2: HAL_GPIO_WritePin(GPIOE, GPIO_PIN_4, GPIO_PIN_RESET); break;
-        case DEV3: HAL_GPIO_WritePin(GPIOE, GPIO_PIN_5, GPIO_PIN_RESET); break;
-        case DEV4: HAL_GPIO_WritePin(GPIOE, GPIO_PIN_6, GPIO_PIN_RESET); break;
+        case DEV1: HAL_GPIO_WritePin(GPIOC, SLAVE_CS_0_Pin, GPIO_PIN_RESET); break;
+        case DEV2: HAL_GPIO_WritePin(GPIOC, SLAVE_CS_1_Pin, GPIO_PIN_RESET); break;
+        case DEV3: HAL_GPIO_WritePin(GPIOC, SLAVE_CS_2_Pin, GPIO_PIN_RESET); break;
+        case DEV4: HAL_GPIO_WritePin(GPIOC, SLAVE_CS_3_Pin, GPIO_PIN_RESET); break;
         default: break;
     }
 }
-
 static void pack_one_motor(uint8_t motor_id, uint8_t *out, const MotorCmd *cmd) {
     out[0] = motor_id;
     uint16_t pos_u16 = (uint16_t)float_to_uint(cmd->position, P_MIN, P_MAX, 16);
