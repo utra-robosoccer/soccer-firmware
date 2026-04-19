@@ -21,6 +21,15 @@
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
+#include "stm32f4xx_hal.h"
+#include "stm32f4xx_hal_def.h"
+#include "stm32f4xx_hal_uart.h"
+#include <stdint.h>
+#include <stdio.h>
+#include <string.h>
+#include "robostride.h"
+#include "motor_chain.h"
+#include "slave_spi.h"
 
 /* USER CODE END Includes */
 
@@ -46,6 +55,8 @@ SPI_HandleTypeDef hspi1;
 DMA_HandleTypeDef hdma_spi1_rx;
 DMA_HandleTypeDef hdma_spi1_tx;
 
+UART_HandleTypeDef huart4;
+
 /* USER CODE BEGIN PV */
 
 /* USER CODE END PV */
@@ -56,12 +67,14 @@ static void MX_GPIO_Init(void);
 static void MX_DMA_Init(void);
 static void MX_CAN1_Init(void);
 static void MX_SPI1_Init(void);
+static void MX_UART4_Init(void);
 /* USER CODE BEGIN PFP */
 
 /* USER CODE END PFP */
 
 /* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
+char uart_msg[100];
 
 /* USER CODE END 0 */
 
@@ -82,6 +95,7 @@ int main(void)
   HAL_Init();
 
   /* USER CODE BEGIN Init */
+  can_rx_flag = 0;
 
   /* USER CODE END Init */
 
@@ -97,7 +111,13 @@ int main(void)
   MX_DMA_Init();
   MX_CAN1_Init();
   MX_SPI1_Init();
+  MX_UART4_Init();
   /* USER CODE BEGIN 2 */
+
+  if(can_bus_init() != HAL_OK) return 1;
+  if(motor_chain_init() != HAL_OK) return 1;
+  if(motor_chain_go_zeropos() != HAL_OK) return 1;
+  spi_dma_init(&hspi1);
 
   /* USER CODE END 2 */
 
@@ -108,6 +128,13 @@ int main(void)
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
+	if (data_receive_flag){
+		spi_update_all_motors();
+		data_receive_flag = 0;
+
+		sprintf(uart_msg,"received parameter: pos -> (%f), rpm -> (%f)\r\n", motors[0].set_pos,motors[0].set_rpm);
+
+	}
   }
   /* USER CODE END 3 */
 }
@@ -229,6 +256,39 @@ static void MX_SPI1_Init(void)
   /* USER CODE BEGIN SPI1_Init 2 */
 
   /* USER CODE END SPI1_Init 2 */
+
+}
+
+/**
+  * @brief UART4 Initialization Function
+  * @param None
+  * @retval None
+  */
+static void MX_UART4_Init(void)
+{
+
+  /* USER CODE BEGIN UART4_Init 0 */
+
+  /* USER CODE END UART4_Init 0 */
+
+  /* USER CODE BEGIN UART4_Init 1 */
+
+  /* USER CODE END UART4_Init 1 */
+  huart4.Instance = UART4;
+  huart4.Init.BaudRate = 115200;
+  huart4.Init.WordLength = UART_WORDLENGTH_8B;
+  huart4.Init.StopBits = UART_STOPBITS_1;
+  huart4.Init.Parity = UART_PARITY_NONE;
+  huart4.Init.Mode = UART_MODE_TX_RX;
+  huart4.Init.HwFlowCtl = UART_HWCONTROL_NONE;
+  huart4.Init.OverSampling = UART_OVERSAMPLING_16;
+  if (HAL_UART_Init(&huart4) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  /* USER CODE BEGIN UART4_Init 2 */
+
+  /* USER CODE END UART4_Init 2 */
 
 }
 
