@@ -70,7 +70,7 @@ float spd_dbg = 1.0f;
 uint8_t random_count = 'A';
 volatile uint8_t spi_error_flag = 0;
 
-uint8_t motor_temp_tele_buf[MAX_MOTOR_COUNT * 2] = {0};
+uint8_t motor_temp_tele_buf[PAYLOAD_LENGTH] = {0};
 
 //Callback functions redefinitions
 void spi_dbg_helper()
@@ -205,8 +205,8 @@ HAL_StatusTypeDef spi_update_all_motors()
 		target_motor -> set_rpm = new_spd;
 
 		//for the rest we leave it as fixed, tbc later
-		target_motor -> set_kd = 5.0f;
-		target_motor -> set_kp = 100.0f;
+		target_motor -> set_kd = 1.0f;
+		target_motor -> set_kp = 15.0f;
 		target_motor -> set_torq = 0.0f;
 		if(motor_set_mit(target_motor -> id,
 						target_motor -> set_torq,
