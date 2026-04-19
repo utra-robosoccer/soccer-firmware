@@ -109,9 +109,9 @@ static volatile MasterMode_t g_master_mode = MASTER_MODE_DEBUG;
 static const MasterTuneConfig g_master_config = {
     .routing = {
         .uart_print_enabled = 1U,
-        .motor_count_per_slave = {2U, 1U, 0U, 1U},
+        .motor_count_per_slave = {4U, 0U, 0U, 1U},
         .motor_ids = {
-            {2U, 5U},
+            {2U, 3U, 4U, 5U},
             {9U},
             {0U},
             {15U}
@@ -126,7 +126,7 @@ static const MasterTuneConfig g_master_config = {
     .debug = {
         .phase_period_ms = 600U,
         .test_motor_count = 4U,
-        .test_motor_ids = {2U, 5U, 9U, 15U},
+        .test_motor_ids = {2U, 3U, 4U, 5U},
         .single_step_position = 6.0f,
         .single_step_speed = 4.0f,
         .alternating_low_position = -4.0f,
