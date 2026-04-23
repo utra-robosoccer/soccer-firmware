@@ -14,8 +14,8 @@ static UART_HandleTypeDef *master_huart = NULL;
 // Buffers for the current 1-to-1 test (1 Slave, up to MAX_MOTORS_PER_SLAVE)
 static MotorCmd g_motor_cmds[MAX_MOTORS_PER_SLAVE] = {0};
 static MotorFeedback g_motor_feedbacks[MAX_MOTORS_PER_SLAVE] = {0};
-static uint8_t g_active_motor_count = 1; // Testing with 3 motors on DEV1
-uint8_t motorID_lut[MAX_MOTORS_PER_SLAVE] = {3};
+static uint8_t g_active_motor_count = 4; // Testing with 3 motors on DEV1
+uint8_t motorID_lut[MAX_MOTORS_PER_SLAVE] = {3,2,5,4};
 
 // Sweep test variables
 static float sweep_pos = 0.0f;
@@ -208,5 +208,5 @@ void MotorMaster_ProcessLoop(void) {
                     g_motor_feedbacks[2].position);
     }
 
-    HAL_Delay(100);
+    HAL_Delay(1);
 }

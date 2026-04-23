@@ -17,7 +17,7 @@
 #define V_MIN   -20.0f
 #define V_MAX    20.0f
 
-#define MAX_MOTORS_PER_SLAVE  3
+#define MAX_MOTORS_PER_SLAVE  4
 #define BYTES_PER_MOTOR       5
 
 typedef enum {
