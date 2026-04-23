@@ -104,6 +104,8 @@ extern CAN_RxHeaderTypeDef rs_can_rx_header;
 // CAN Bus Start
 HAL_StatusTypeDef can_bus_init();
 
+HAL_StatusTypeDef motor_enable_one_motor(uint8_t m_id);
+
 // Comm Type 0
 HAL_StatusTypeDef can_get_motor_id(uint8_t id, uint16_t master_id);
 HAL_StatusTypeDef can_unpack_get_id(motor_t* motor, uint8_t* recv_buf);

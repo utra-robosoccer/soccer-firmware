@@ -57,14 +57,14 @@ void Error_Handler(void);
 /* USER CODE END EFP */
 
 /* Private defines -----------------------------------------------------------*/
-#define SLAVE_CS_0_Pin GPIO_PIN_0
-#define SLAVE_CS_0_GPIO_Port GPIOC
-#define SLAVE_CS_1_Pin GPIO_PIN_1
-#define SLAVE_CS_1_GPIO_Port GPIOC
-#define SLAVE_CS_2_Pin GPIO_PIN_2
-#define SLAVE_CS_2_GPIO_Port GPIOC
-#define SLAVE_CS_3_Pin GPIO_PIN_3
+#define SLAVE_CS_3_Pin GPIO_PIN_6
 #define SLAVE_CS_3_GPIO_Port GPIOC
+#define SLAVE_CS_2_Pin GPIO_PIN_7
+#define SLAVE_CS_2_GPIO_Port GPIOC
+#define SLAVE_CS_1_Pin GPIO_PIN_8
+#define SLAVE_CS_1_GPIO_Port GPIOC
+#define SLAVE_CS_0_Pin GPIO_PIN_9
+#define SLAVE_CS_0_GPIO_Port GPIOC
 #define GREEN_LED_Pin GPIO_PIN_15
 #define GREEN_LED_GPIO_Port GPIOA
 

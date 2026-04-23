@@ -74,7 +74,20 @@ static void MX_UART4_Init(void);
 
 /* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
-char uart_msg[100];
+//char uart_msg[100];
+//
+//int __io_putchar(int ch) {
+//    ITM_SendChar(ch);
+//    return ch;
+//}
+//
+//int _write(int file, char *ptr, int len) {
+//    int i;
+//    for (i = 0; i < len; i++) {
+//        ITM_SendChar((*ptr++));
+//    }
+//    return len;
+//}
 
 /* USER CODE END 0 */
 
@@ -96,13 +109,14 @@ int main(void)
 
   /* USER CODE BEGIN Init */
   can_rx_flag = 0;
-
   /* USER CODE END Init */
 
   /* Configure the system clock */
   SystemClock_Config();
 
   /* USER CODE BEGIN SysInit */
+  HAL_Delay(1000);
+  SCnSCB->ACTLR |= SCnSCB_ACTLR_DISDEFWBUF_Msk ;
 
   /* USER CODE END SysInit */
 
@@ -115,8 +129,12 @@ int main(void)
   /* USER CODE BEGIN 2 */
 
   if(can_bus_init() != HAL_OK) return 1;
+//  printf("Can bus init successful\r\n");
   if(motor_chain_init() != HAL_OK) return 1;
+  HAL_Delay(500);
+//  motor_enable_one_motor(2);
   if(motor_chain_go_zeropos() != HAL_OK) return 1;
+  HAL_Delay(500);
   spi_dma_init(&hspi1);
 
   /* USER CODE END 2 */
@@ -129,10 +147,11 @@ int main(void)
 
     /* USER CODE BEGIN 3 */
 	if (data_receive_flag){
+//		motor_enable_one_motor(2);
 		spi_update_all_motors();
 		data_receive_flag = 0;
 
-		sprintf(uart_msg,"received parameter: pos -> (%f), rpm -> (%f)\r\n", motors[0].set_pos,motors[0].set_rpm);
+//		sprintf(uart_msg,"received parameter: pos -> (%f), rpm -> (%f)\r\n", motors[0].set_pos,motors[0].set_rpm);
 
 	}
   }

@@ -18,7 +18,7 @@
 /* USER CODE END Header */
 /* Includes ------------------------------------------------------------------*/
 #include "main.h"
-#include "spi_master.h"
+#include "usb_device.h"
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
@@ -49,8 +49,6 @@ DMA_HandleTypeDef hdma_spi1_tx;
 
 UART_HandleTypeDef huart4;
 
-PCD_HandleTypeDef hpcd_USB_OTG_FS;
-
 /* USER CODE BEGIN PV */
 
 /* USER CODE END PV */
@@ -61,7 +59,6 @@ static void MX_GPIO_Init(void);
 static void MX_DMA_Init(void);
 static void MX_I2C1_Init(void);
 static void MX_SPI1_Init(void);
-static void MX_USB_OTG_FS_PCD_Init(void);
 static void MX_UART4_Init(void);
 /* USER CODE BEGIN PFP */
 
@@ -104,12 +101,17 @@ int main(void)
   MX_DMA_Init();
   MX_I2C1_Init();
   MX_SPI1_Init();
-  MX_USB_OTG_FS_PCD_Init();
   MX_UART4_Init();
+  MX_USB_DEVICE_Init();
   /* USER CODE BEGIN 2 */
 
   MotorMaster_Init(&hspi1, &huart4);
-  uint8_t prev_user_btn = 0U;
+  usb_printf("USB Test/r/n");
+  HAL_GPIO_WritePin(GREEN_LED_GPIO_Port, GREEN_LED_Pin, GPIO_PIN_SET);
+  HAL_Delay(3000);
+  HAL_GPIO_WritePin(GREEN_LED_GPIO_Port, GREEN_LED_Pin, GPIO_PIN_RESET);
+
+
 
   /* USER CODE END 2 */
 
@@ -120,13 +122,6 @@ int main(void)
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
-//	uint8_t user_btn = (HAL_GPIO_ReadPin(USER_Btn_GPIO_Port, USER_Btn_Pin) == GPIO_PIN_SET) ? 1U : 0U;
-
-//	if ((user_btn != 0U) && (prev_user_btn == 0U)) { //rising edge trigger
-//		MotorMaster_ClearEStop();
-//	}
-
-//	prev_user_btn = user_btn;
 
 	MotorMaster_ProcessLoop();
   }
@@ -236,7 +231,7 @@ static void MX_SPI1_Init(void)
   hspi1.Init.CLKPolarity = SPI_POLARITY_LOW;
   hspi1.Init.CLKPhase = SPI_PHASE_1EDGE;
   hspi1.Init.NSS = SPI_NSS_SOFT;
-  hspi1.Init.BaudRatePrescaler = SPI_BAUDRATEPRESCALER_2;
+  hspi1.Init.BaudRatePrescaler = SPI_BAUDRATEPRESCALER_64;
   hspi1.Init.FirstBit = SPI_FIRSTBIT_MSB;
   hspi1.Init.TIMode = SPI_TIMODE_DISABLE;
   hspi1.Init.CRCCalculation = SPI_CRCCALCULATION_DISABLE;
@@ -285,41 +280,6 @@ static void MX_UART4_Init(void)
 }
 
 /**
-  * @brief USB_OTG_FS Initialization Function
-  * @param None
-  * @retval None
-  */
-static void MX_USB_OTG_FS_PCD_Init(void)
-{
-
-  /* USER CODE BEGIN USB_OTG_FS_Init 0 */
-
-  /* USER CODE END USB_OTG_FS_Init 0 */
-
-  /* USER CODE BEGIN USB_OTG_FS_Init 1 */
-
-  /* USER CODE END USB_OTG_FS_Init 1 */
-  hpcd_USB_OTG_FS.Instance = USB_OTG_FS;
-  hpcd_USB_OTG_FS.Init.dev_endpoints = 6;
-  hpcd_USB_OTG_FS.Init.speed = PCD_SPEED_FULL;
-  hpcd_USB_OTG_FS.Init.dma_enable = DISABLE;
-  hpcd_USB_OTG_FS.Init.phy_itface = PCD_PHY_EMBEDDED;
-  hpcd_USB_OTG_FS.Init.Sof_enable = DISABLE;
-  hpcd_USB_OTG_FS.Init.low_power_enable = DISABLE;
-  hpcd_USB_OTG_FS.Init.lpm_enable = DISABLE;
-  hpcd_USB_OTG_FS.Init.vbus_sensing_enable = DISABLE;
-  hpcd_USB_OTG_FS.Init.use_dedicated_ep1 = DISABLE;
-  if (HAL_PCD_Init(&hpcd_USB_OTG_FS) != HAL_OK)
-  {
-    Error_Handler();
-  }
-  /* USER CODE BEGIN USB_OTG_FS_Init 2 */
-
-  /* USER CODE END USB_OTG_FS_Init 2 */
-
-}
-
-/**
   * Enable DMA controller clock
   */
 static void MX_DMA_Init(void)
@@ -351,18 +311,18 @@ static void MX_GPIO_Init(void)
 
   /* GPIO Ports Clock Enable */
   __HAL_RCC_GPIOH_CLK_ENABLE();
-  __HAL_RCC_GPIOC_CLK_ENABLE();
   __HAL_RCC_GPIOA_CLK_ENABLE();
+  __HAL_RCC_GPIOC_CLK_ENABLE();
   __HAL_RCC_GPIOB_CLK_ENABLE();
 
   /*Configure GPIO pin Output Level */
-  HAL_GPIO_WritePin(GPIOC, SLAVE_CS_0_Pin|SLAVE_CS_1_Pin|SLAVE_CS_2_Pin|SLAVE_CS_3_Pin, GPIO_PIN_RESET);
+  HAL_GPIO_WritePin(GPIOC, SLAVE_CS_3_Pin|SLAVE_CS_2_Pin|SLAVE_CS_1_Pin|SLAVE_CS_0_Pin, GPIO_PIN_RESET);
 
   /*Configure GPIO pin Output Level */
   HAL_GPIO_WritePin(GREEN_LED_GPIO_Port, GREEN_LED_Pin, GPIO_PIN_RESET);
 
-  /*Configure GPIO pins : SLAVE_CS_0_Pin SLAVE_CS_1_Pin SLAVE_CS_2_Pin SLAVE_CS_3_Pin */
-  GPIO_InitStruct.Pin = SLAVE_CS_0_Pin|SLAVE_CS_1_Pin|SLAVE_CS_2_Pin|SLAVE_CS_3_Pin;
+  /*Configure GPIO pins : SLAVE_CS_3_Pin SLAVE_CS_2_Pin SLAVE_CS_1_Pin SLAVE_CS_0_Pin */
+  GPIO_InitStruct.Pin = SLAVE_CS_3_Pin|SLAVE_CS_2_Pin|SLAVE_CS_1_Pin|SLAVE_CS_0_Pin;
   GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
   GPIO_InitStruct.Pull = GPIO_NOPULL;
   GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;

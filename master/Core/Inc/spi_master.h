@@ -1,89 +1,65 @@
 /*
  * spi_master.h
- *
- *  Created on: 2026年4月19日
- *      Author: 18701
+ * Simplified SPI Master for 1-to-1 (Expandable to 1-to-Multi)
  */
 
 #ifndef INC_SPI_MASTER_H_
 #define INC_SPI_MASTER_H_
 
 #include "main.h"
+#include "usbd_cdc_if.h"
+#include <stdarg.h>
+#include <stdio.h>
 #include <stdint.h>
-#include <stdbool.h>
-
-#define NUM_SLAVES            4
-#define BYTES_PER_MOTOR       5
-#define MAX_TOTAL_MOTORS      16
-#define MAX_TXRX_BYTES        (MAX_TOTAL_MOTORS * BYTES_PER_MOTOR)
 
 #define P_MIN   -12.57f
 #define P_MAX    12.57f
 #define V_MIN   -20.0f
 #define V_MAX    20.0f
-#define KP_MIN    0.0f
-#define KP_MAX 5000.0f
-#define KD_MIN    0.0f
-#define KD_MAX  100.0f
-#define T_MIN   -60.0f
-#define T_MAX    60.0f
+
+#define MAX_MOTORS_PER_SLAVE  3
+#define BYTES_PER_MOTOR       5
 
 typedef enum {
-    MASTER_MODE_DEBUG = 0,
-    MASTER_MODE_REAL = 1
-} MasterMode_t;
+    DEV1 = 1,
+    DEV2 = 2,
+    DEV3 = 3,
+    DEV4 = 4
+} SpiDevId;
+
+typedef struct {
+    uint8_t motor_id;
+    float position;
+    float speed;
+} MotorCmd;
 
 typedef struct {
     uint8_t valid;
     uint8_t motor_id;
     float position;
     float speed;
-    uint32_t tick;
-} MotorFeedback_t;
+} MotorFeedback;
+
+void usb_printf(const char *fmt, ...);
 
 /**
- * @brief  [Initialization Interface] Initializes the SPI motor master module
- * @param  hspi Pointer to the SPI handle
- * @param  huart Pointer to the UART handle for debug prints (pass NULL to disable)
- * @retval None
+ * @brief  Initializes the SPI master with handles
  */
 void MotorMaster_Init(SPI_HandleTypeDef *hspi, UART_HandleTypeDef *huart);
 
 /**
- * @brief  [Configuration Interface] Sets the system operation mode
- * @param  mode Target mode (Debug waveform or Real host commands)
- * @retval None
+ * @brief  Updates the target command buffer for a specific motor index on the active slave
  */
-void MotorMaster_SetMode(MasterMode_t mode);
+void MotorMaster_SetCommand(uint8_t motor_index, uint8_t motor_id, float position, float speed);
 
 /**
- * @brief  [Output Interface] Sends a control command to the target motor
- * @param  motor_id Logical ID of the target motor
- * @param  position Target position
- * @param  speed Target speed
- * @retval HAL_OK: Success, HAL_ERROR: ID out of bounds or route not found
+ * @brief  Retrieves the latest feedback for a given motor index
  */
-HAL_StatusTypeDef MotorMaster_SetCommand(uint8_t motor_id, float position, float speed);
+uint8_t MotorMaster_GetFeedback(uint8_t motor_index, MotorFeedback *feedback);
 
 /**
- * @brief  [Input Interface] Gets the latest feedback data of the target motor
- * @param  motor_id Logical ID of the target motor
- * @param  feedback Pointer to the structure used to receive feedback data
- * @retval 1: Success, 0: Invalid data or ID out of bounds
- */
-uint8_t MotorMaster_GetFeedback(uint8_t motor_id, MotorFeedback_t *feedback);
-
-/**
- * @brief  [Control Interface] Manually clears the emergency stop state
- * @retval None
- */
-void MotorMaster_ClearEStop(void);
-
-/**
- * @brief  [Process Interface] Main loop handler, must be called continuously in main while(1)
- * @retval None
+ * @brief  Main process loop executing the sweep test and SPI transmission
  */
 void MotorMaster_ProcessLoop(void);
-
 
 #endif /* INC_SPI_MASTER_H_ */

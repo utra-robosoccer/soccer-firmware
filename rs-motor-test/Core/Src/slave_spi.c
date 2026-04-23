@@ -198,8 +198,8 @@ HAL_StatusTypeDef spi_update_all_motors()
 		uint16_t raw_new_pos =  motor_update_buf[4*i + 1] << 8 | motor_update_buf[4*i];
 		uint16_t raw_new_spd =  motor_update_buf[4*i + 3] << 8 | motor_update_buf[4*i + 2];
 		char uart_msg[100];
-		sprintf(uart_msg,"raw new pos = %X | raw new rpm = %X\r\n", (uint16_t)raw_new_pos, (uint16_t)raw_new_spd);
-		HAL_UART_Transmit(&huart2, uart_msg, strlen(uart_msg), 10000);
+//		sprintf(uart_msg,"raw new pos = %X | raw new rpm = %X\r\n", (uint16_t)raw_new_pos, (uint16_t)raw_new_spd);
+//		HAL_UART_Transmit(&huart2, uart_msg, strlen(uart_msg), 10000);
 
 		float new_pos = uint_to_float(raw_new_pos, P_MIN, P_MAX, 16);
 		float new_spd = uint_to_float(raw_new_spd, V_MIN, V_MAX, 16);
@@ -208,8 +208,8 @@ HAL_StatusTypeDef spi_update_all_motors()
 		motors[i].set_rpm = new_spd;
 
 		//for the rest we leave it as fixed, tbc later
-		motors[i].set_kd = 5.0f;
-		motors[i].set_kp = 100.0f;
+		motors[i].set_kd = 1.0f;
+		motors[i].set_kp = 15.0f;
 		motors[i].set_torq = 0.0f;
 		if(motor_set_mit_dbg(motors[i].id,
 		                 motors[i].set_torq,

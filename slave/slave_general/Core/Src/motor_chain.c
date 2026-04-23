@@ -2,7 +2,7 @@
 
 motor_t motors[MAX_MOTOR_COUNT]; //This is the motor chain array
 
-uint8_t motorID_lut[MAX_MOTOR_COUNT] = {4, 5, 2};
+uint8_t motorID_lut[MAX_MOTOR_COUNT] = {3};
 
 // For FIFO Intr Callback function
 uint8_t can_rx_flag = 0;
@@ -144,7 +144,8 @@ static void print_unified_can_response(UART_HandleTypeDef *huart, uint8_t type, 
     }
 
     if (len > 0) {
-        HAL_UART_Transmit(huart, (uint8_t*)uart_buf, len, 100);
+//        HAL_UART_Transmit(huart, (uint8_t*)uart_buf, len, 100);
+    	printf(uart_buf);
     }
 }
 
@@ -155,6 +156,7 @@ static void print_unified_can_response(UART_HandleTypeDef *huart, uint8_t type, 
 HAL_StatusTypeDef motor_chain_init()
 {
 	uint32_t tickstart;
+
 	for (int i = 0; i < MAX_MOTOR_COUNT; i++){
 		uint8_t target_id = motorID_lut[i];
 		motors[i].id = target_id;
@@ -198,6 +200,21 @@ HAL_StatusTypeDef motor_chain_init()
 	return HAL_OK;
 }
 
+HAL_StatusTypeDef motor_enable_one_motor(uint8_t m_id)
+{
+	uint32_t tickstart;
+	can_rx_flag = 0;
+	 if (can_enable_motor(m_id, CAN_MASTER_ID) == HAL_OK) {
+		 tickstart = HAL_GetTick();
+		 while (can_rx_flag == 0) {
+			 if ((HAL_GetTick() - tickstart) > 100) {
+				 break;
+			 }
+		 }
+	 } else {return HAL_ERROR;}
+	 return HAL_OK;
+}
+
 HAL_StatusTypeDef motor_chain_init_dbg(UART_HandleTypeDef *huart)
 {
 	uint32_t tickstart;
@@ -209,7 +226,8 @@ HAL_StatusTypeDef motor_chain_init_dbg(UART_HandleTypeDef *huart)
 		        tickstart = HAL_GetTick();
 		        while (can_rx_flag == 0) {
 		            if ((HAL_GetTick() - tickstart) > 100) {
-		                HAL_UART_Transmit(huart, (uint8_t*)"Timeout: Get ID\r\n", 17, 100);
+//		                HAL_UART_Transmit(huart, (uint8_t*)"Timeout: Get ID\r\n", 17, 100);
+		            	printf("Timeout: Get ID\r\n");
 		                break;
 		            }
 		        }
@@ -225,12 +243,14 @@ HAL_StatusTypeDef motor_chain_init_dbg(UART_HandleTypeDef *huart)
 			 tickstart = HAL_GetTick();
 			 while (can_rx_flag == 0) {
 				 if ((HAL_GetTick() - tickstart) > 100) {
-					 HAL_UART_Transmit(huart, (uint8_t*)"Timeout: Set Mode\r\n", 19, 100);
+//					 HAL_UART_Transmit(huart, (uint8_t*)"Timeout: Set Mode\r\n", 19, 100);
+					 printf("Timeout: Set Mode\r\n");
 					 break;
 				 }
 			 }
 			 if (can_rx_flag) {
-				 HAL_UART_Transmit(huart, (uint8_t*)"Set Mode\r\n", 10, 100);
+//				 HAL_UART_Transmit(huart, (uint8_t*)"Set Mode\r\n", 10, 100);
+				 printf("Set Mode\r\n");
 				 print_unified_can_response(huart, 2, &motors[i], rx_data, rs_can_rx_header.ExtId);
 			 }
 		 } else {return HAL_ERROR;}
@@ -242,12 +262,14 @@ HAL_StatusTypeDef motor_chain_init_dbg(UART_HandleTypeDef *huart)
 			 tickstart = HAL_GetTick();
 			 while (can_rx_flag == 0) {
 				 if ((HAL_GetTick() - tickstart) > 100) {
-					 HAL_UART_Transmit(huart, (uint8_t*)"Timeout: Enable Motor\r\n", 23, 100);
+//					 HAL_UART_Transmit(huart, (uint8_t*)"Timeout: Enable Motor\r\n", 23, 100);
+					 printf("Timeout: Enable Motor\r\n");
 					 break;
 				 }
 			 }
 			 if (can_rx_flag) {
-				 HAL_UART_Transmit(huart, (uint8_t*)"Enable\r\n", 8, 100);
+//				 HAL_UART_Transmit(huart, (uint8_t*)"Enable\r\n", 8, 100);
+				 printf("Enable\r\n");
 				 print_unified_can_response(huart, 2, &motors[i], rx_data, rs_can_rx_header.ExtId);
 			 }
 		 } else {return HAL_ERROR;}
@@ -268,10 +290,10 @@ HAL_StatusTypeDef motor_chain_go_zeropos ()
 	for (int i = 0; i < MAX_MOTOR_COUNT; i++){
 		uint8_t target_id = motorID_lut[i];
 
-		if(motors[i].pos > 0){
+		if(motors[i].pos > 0.05){
 			direction = -1;
 		}
-		else if (motors[i].pos < 0){
+		else if (motors[i].pos < -0.05){
 			direction = 1;
 		} else {continue;} //motor is @zero pos
 
@@ -289,6 +311,7 @@ HAL_StatusTypeDef motor_chain_go_zeropos ()
 	return HAL_OK;
 }
 
+
 HAL_StatusTypeDef motor_chain_go_zeropos_dbg (UART_HandleTypeDef *huart)
 {
 	uint32_t tickstart;
@@ -299,10 +322,10 @@ HAL_StatusTypeDef motor_chain_go_zeropos_dbg (UART_HandleTypeDef *huart)
 	for (int i = 0; i < MAX_MOTOR_COUNT; i++){
 		uint8_t target_id = motorID_lut[i];
 
-		if(motors[i].pos > 0){
+		if(motors[i].pos > 0.05){
 			direction = -1;
 		}
-		else if (motors[i].pos < 0){
+		else if (motors[i].pos < -0.05){
 			direction = 1;
 		} else {continue;} //motor is @zero pos
 
@@ -376,7 +399,7 @@ HAL_StatusTypeDef motor_set_mit (uint8_t target_id, float torq, float pos, float
 		tickstart = HAL_GetTick();
 		while (can_rx_flag == 0) {
 			if ((HAL_GetTick() - tickstart) > 100) {
-				return HAL_TIMEOUT;
+				break;
 			}
 		}
 

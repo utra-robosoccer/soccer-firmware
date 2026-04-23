@@ -46,7 +46,7 @@
 
 #include "slave_spi.h"
 #include "string.h"
-//#include "cachel1_armv7.h"
+#include "cachel1_armv7.h"
 
 // TX & RX buffer declaration in MEM
 uint8_t RxBuffer_A[BUFFER_SIZE] = {0x0};
@@ -119,6 +119,7 @@ void HAL_SPI_ErrorCallback(SPI_HandleTypeDef *hspi)
 {
 	//if we detected error, we restart dma, since the isr handler has already cleared all flags for us
 	spi_error_flag = 1;
+	HAL_SPI_Abort_IT(hspi);
 	HAL_SPI_TransmitReceive_DMA(hspi, CurTxBuf, CurRxBuf, PAYLOAD_LENGTH);
 
 }
@@ -141,7 +142,10 @@ void spi_dma_init(SPI_HandleTypeDef *hspi)
 // SPI TX buf write -> copy newest motor_data to the motor_tele_buf
 void spi_write_next_tx_buf(const uint8_t* motor_new_data_buf, uint8_t* motor_tele_buf)
 {
-	memcpy(motor_tele_buf, motor_new_data_buf, PAYLOAD_LENGTH);
+//	memcpy(motor_tele_buf, motor_new_data_buf, PAYLOAD_LENGTH);
+	for(int i = 0; i < PAYLOAD_LENGTH; i ++){
+		motor_tele_buf[i] = motor_new_data_buf[i];
+	}
 //	SCB_CleanDCache_by_Addr(motor_tele_buf, PAYLOAD_LENGTH);
 	data_tx_ready_flag = 1; //signal -> ok to send motor_tele in the next frame
 }
@@ -197,8 +201,8 @@ HAL_StatusTypeDef spi_update_all_motors()
 		}
 		uint16_t raw_new_pos =  motor_update_buf[5 * i + 2] << 8 | motor_update_buf[5 * i + 1];
 		uint16_t raw_new_spd =  motor_update_buf[5 * i + 4] << 8 | motor_update_buf[5 * i + 3];
-		char uart_msg[100];
-		sprintf(uart_msg,"raw new pos = %X | raw new rpm = %X\r\n", (uint16_t)raw_new_pos, (uint16_t)raw_new_spd);
+//		char uart_msg[100];
+//		sprintf(uart_msg,"raw new pos = %X | raw new rpm = %X\r\n", (uint16_t)raw_new_pos, (uint16_t)raw_new_spd);
 //		HAL_UART_Transmit(&huart2, uart_msg, strlen(uart_msg), 10000);
 
 		float new_pos = uint_to_float(raw_new_pos, P_MIN, P_MAX, 16);
