@@ -1,6 +1,5 @@
 /*
  * spi_master.c
- * Simplified SPI Master for 1-to-1 (Expandable to 1-to-Multi)
  */
 
 #include "spi_master.h"
@@ -11,11 +10,18 @@
 static SPI_HandleTypeDef *master_hspi = NULL;
 static UART_HandleTypeDef *master_huart = NULL;
 
-// Buffers for the current 1-to-1 test (1 Slave, up to MAX_MOTORS_PER_SLAVE)
-static MotorCmd g_motor_cmds[MAX_MOTORS_PER_SLAVE] = {0};
-static MotorFeedback g_motor_feedbacks[MAX_MOTORS_PER_SLAVE] = {0};
-static uint8_t g_active_motor_count = 4; // Testing with 3 motors on DEV1
-uint8_t motorID_lut[MAX_MOTORS_PER_SLAVE] = {3,2,5,4};
+spi_dev_t slave_devices[4] = {
+    { .spi_device_idx = DEV1, .active_motor_count = 4, .spi_motor_ids = {3, 2, 5, 4} },
+    { .spi_device_idx = DEV2, .active_motor_count = 4, .spi_motor_ids = {11, 12, 13, 14} },
+    { .spi_device_idx = DEV3, .active_motor_count = 4, .spi_motor_ids = {21, 22, 23, 24} },
+    { .spi_device_idx = DEV4, .active_motor_count = 4, .spi_motor_ids = {31, 32, 33, 34} }
+};
+static uint8_t dma_tx_buf[MAX_MOTORS_PER_SLAVE * BYTES_PER_MOTOR];
+static uint8_t dma_rx_buf[MAX_MOTORS_PER_SLAVE * BYTES_PER_MOTOR];
+
+uint8_t usb_buffer[256];
+volatile uint32_t usb_buf_len = 0;
+volatile uint8_t usb_rx_flag = 0;
 
 // Sweep test variables
 static float sweep_pos = 0.0f;
@@ -37,23 +43,6 @@ static float uint_to_float(int x_int, float x_min, float x_max, int bits) {
 }
 
 /* --- Helpers: UART Debug --- */
-
-static void uart_printf(const char *fmt, ...) {
-    if (!master_huart) return;
-    char buf[128];
-    va_list ap;
-    va_start(ap, fmt);
-    int n = vsnprintf(buf, sizeof(buf), fmt, ap);
-    va_end(ap);
-    if (n > 0) HAL_UART_Transmit(master_huart, (uint8_t*)buf, (uint16_t)n, 100);
-}
-
-static void uart_dump_bytes(const char *tag, const uint8_t *buf, int n) {
-    uart_printf("%s", tag);
-    for (int i = 0; i < n; i++) uart_printf(" %02X", buf[i]);
-    uart_printf("\r\n");
-}
-
 void usb_printf(const char *fmt, ...)
 {
     // Buffer to hold the formatted string
@@ -71,6 +60,15 @@ void usb_printf(const char *fmt, ...)
     // Send the data over USB CDC
     // CDC_Transmit_FS expects a uint8_t pointer and the length
     CDC_Transmit_FS((uint8_t*)buf, (uint16_t)n);
+}
+
+void usb_dump_bytes(const char *tag, const uint8_t *buf, int n)
+{
+    usb_printf("%s", tag);
+    for (int i = 0; i < n; i++) {
+        usb_printf(" %02X", buf[i]);
+    }
+    usb_printf("\r\n");
 }
 
 /* --- Helpers: SPI Hardware --- */
@@ -116,32 +114,33 @@ static void unpack_one_motor_feedback(const uint8_t *rx, MotorFeedback *fb) {
 
 /**
  * @brief Transmits commands to a single slave and reads back feedback.
- * To expand to 1-to-Multi slaves, simply call this function sequentially
+ * call this function sequentially
  * for DEV1, DEV2, etc., passing the appropriate subsets of motor commands.
  */
-static HAL_StatusTypeDef spi_send_to_one_slave(SpiDevId dev, uint8_t num_motors, MotorCmd *cmds, MotorFeedback *feedbacks) {
-    uint8_t tx_buf[MAX_MOTORS_PER_SLAVE * BYTES_PER_MOTOR] = {0};
-    uint8_t rx_buf[MAX_MOTORS_PER_SLAVE * BYTES_PER_MOTOR] = {0};
-
-    if (num_motors > MAX_MOTORS_PER_SLAVE || num_motors == 0) return HAL_ERROR;
-
-    // Pack
-    for (uint8_t i = 0; i < num_motors; i++) {
-        pack_one_motor(&tx_buf[i * BYTES_PER_MOTOR], &cmds[i]);
+static HAL_StatusTypeDef spi_send_to_one_slave(spi_dev_t *slave)
+{
+    if (slave->active_motor_count > MAX_MOTORS_PER_SLAVE || slave->active_motor_count == 0) {
+        return HAL_ERROR;
     }
 
-    // Transmit
-    CS_SELECT(dev);
-    HAL_StatusTypeDef st = HAL_SPI_TransmitReceive(master_hspi, tx_buf, rx_buf, num_motors * BYTES_PER_MOTOR, HAL_MAX_DELAY);
+    for (uint8_t i = 0; i < slave->active_motor_count; i++) {
+        pack_one_motor(&dma_tx_buf[i * BYTES_PER_MOTOR], &slave->motor_cmds[i]);
+    }
+
+    CS_SELECT(slave->spi_device_idx);
+
+    HAL_StatusTypeDef st = HAL_SPI_TransmitReceive_DMA(master_hspi, dma_tx_buf, dma_rx_buf, slave->active_motor_count * BYTES_PER_MOTOR);
+
+    while (HAL_SPI_GetState(master_hspi) != HAL_SPI_STATE_READY);
+
     CS_ALL_HIGH();
 
-    // Unpack
     if (st == HAL_OK) {
-        for (uint8_t i = 0; i < num_motors; i++) {
-            unpack_one_motor_feedback(&rx_buf[i * BYTES_PER_MOTOR], &feedbacks[i]);
+        for (uint8_t i = 0; i < slave->active_motor_count; i++) {
+            unpack_one_motor_feedback(&dma_rx_buf[i * BYTES_PER_MOTOR], &slave->motor_feedbacks[i]);
         }
     } else {
-        usb_printf("[SPI] DEV%d Transmit Error\r\n", (int)dev);
+//        usb_printf("[SPI] DEV%d Transmit Error\r\n", (int)slave->spi_device_idx);
     }
 
     return st;
@@ -149,63 +148,75 @@ static HAL_StatusTypeDef spi_send_to_one_slave(SpiDevId dev, uint8_t num_motors,
 
 /* --- Public API --- */
 
-void MotorMaster_Init(SPI_HandleTypeDef *hspi, UART_HandleTypeDef *huart) {
+void MotorMaster_Init(SPI_HandleTypeDef *hspi, UART_HandleTypeDef *huart)
+{
     master_hspi = hspi;
     master_huart = huart;
     CS_ALL_HIGH();
 
-    // Init test setup
-    for (uint8_t i = 0; i < g_active_motor_count; i++) {
-        g_motor_cmds[i].motor_id = motorID_lut[i];
-        g_motor_cmds[i].position = 0.0f;
-        g_motor_cmds[i].speed = 1.0f;
-    }
+    for (uint8_t s = 0; s < 4; s++) {
+        for (uint8_t m = 0; m < slave_devices[s].active_motor_count; m++) {
+            uint8_t current_id = slave_devices[s].spi_motor_ids[m];
 
-    usb_printf("\r\n=== SPI Master Initialized ===\r\n");
-}
+            slave_devices[s].motor_cmds[m].motor_id = current_id;
+            slave_devices[s].motor_cmds[m].position = 0.0f;
+            slave_devices[s].motor_cmds[m].speed = 0.0f;
 
-void MotorMaster_SetCommand(uint8_t motor_index, uint8_t motor_id, float position, float speed) {
-    if (motor_index < MAX_MOTORS_PER_SLAVE) {
-        g_motor_cmds[motor_index].motor_id = motor_id;
-        g_motor_cmds[motor_index].position = position;
-        g_motor_cmds[motor_index].speed = speed;
+            slave_devices[s].motor_feedbacks[m].motor_id = 0;
+            slave_devices[s].motor_feedbacks[m].position = 0.0f;
+            slave_devices[s].motor_feedbacks[m].speed = 0.0f;
+            slave_devices[s].motor_feedbacks[m].valid = 0;
+        }
     }
 }
+// set command and get feedback need rework, skip packing incoming usb data into customized struct
+// directly packing using the motor buffer
+void MotorMaster_SetCommand(SpiDevId dev, uint8_t motor_index, float position, float speed)
+{
+    uint8_t slave_idx = (uint8_t)dev - 1;
+    if (slave_idx < 4 && motor_index < slave_devices[slave_idx].active_motor_count) {
+        slave_devices[slave_idx].motor_cmds[motor_index].position = position;
+        slave_devices[slave_idx].motor_cmds[motor_index].speed = speed;
+    }
+}
 
-uint8_t MotorMaster_GetFeedback(uint8_t motor_index, MotorFeedback *feedback) {
-    if (motor_index < MAX_MOTORS_PER_SLAVE && g_motor_feedbacks[motor_index].valid) {
-        *feedback = g_motor_feedbacks[motor_index];
-        return 1;
+uint8_t MotorMaster_GetFeedback(SpiDevId dev, uint8_t motor_index, MotorFeedback *feedback)
+{
+    uint8_t slave_idx = (uint8_t)dev - 1;
+    if (slave_idx < 4 && motor_index < slave_devices[slave_idx].active_motor_count) {
+        if (slave_devices[slave_idx].motor_feedbacks[motor_index].valid) {
+            *feedback = slave_devices[slave_idx].motor_feedbacks[motor_index];
+            return 1;
+        }
     }
     return 0;
 }
 
-void MotorMaster_ProcessLoop(void) {
-    // 1. Update Sweep Test logic
+void MotorMaster_ProcessLoop(void)
+{
     sweep_pos += 0.1f * sweep_dir;
     if (sweep_pos >= 10.0f || sweep_pos <= -10.0f) {
         sweep_dir *= -1.0f;
     }
 
-    // Apply sweep to all active motors in this test
-    for (uint8_t i = 0; i < g_active_motor_count; i++) {
-        g_motor_cmds[i].position = sweep_pos;
-        g_motor_cmds[i].speed = 2.5f;
-    }
+    for (uint8_t s = 0; s < 4; s++) {
+        spi_dev_t *current_slave = &slave_devices[s];
 
-    // 2. Execute SPI Transfer for DEV1
-    HAL_StatusTypeDef st = spi_send_to_one_slave(DEV1, g_active_motor_count, g_motor_cmds, g_motor_feedbacks);
+        for (uint8_t i = 0; i < current_slave->active_motor_count; i++) {
+            current_slave->motor_cmds[i].position = sweep_pos;
+            current_slave->motor_cmds[i].speed = 2.5f;
+        }
 
-    // 3. Optional Debugging
-    if (st == HAL_OK) {
-        usb_printf("[CMD] Pos: %.2f | [FB] ID<%d>: %.2f, ID<%d>: %.2f, ID<%d>: %.2f\r\n",
-                    sweep_pos,
-					g_motor_feedbacks[0].motor_id,
-                    g_motor_feedbacks[0].position,
-					g_motor_feedbacks[1].motor_id,
-                    g_motor_feedbacks[1].position,
-					g_motor_feedbacks[2].motor_id,
-                    g_motor_feedbacks[2].position);
+        HAL_StatusTypeDef st = spi_send_to_one_slave(current_slave);
+
+        if (st == HAL_OK && current_slave->spi_device_idx == DEV1) {
+            usb_printf("[DEV1] CMD: %.2f | FB0<%d>: %.2f | FB1<%d>: %.2f\r\n",
+                        sweep_pos,
+                        current_slave->motor_feedbacks[0].motor_id,
+                        current_slave->motor_feedbacks[0].position,
+                        current_slave->motor_feedbacks[1].motor_id,
+                        current_slave->motor_feedbacks[1].position);
+        }
     }
 
     HAL_Delay(1);
