@@ -1,5 +1,7 @@
 #include "motor_chain.h"
 
+#define PI 3.1415926f
+
 motor_t motors[MAX_MOTOR_COUNT]; //This is the motor chain array
 
 uint8_t motorID_lut[MAX_MOTOR_COUNT] = {1,2};
@@ -289,15 +291,50 @@ HAL_StatusTypeDef motor_chain_go_zeropos ()
 
 	for (int i = 0; i < MAX_MOTOR_COUNT; i++){
 		uint8_t target_id = motorID_lut[i];
+		if(motors[i].pos > PI){
+			//This indicates that the motor was at a negative position before we turn off
+			if (can_mit_control_set(target_id, 0, 2.0f*PI, 0.0f, 50.0f, 5.0f) == HAL_OK) {
+				tickstart = HAL_GetTick();
+				while (can_rx_flag == 0) {
+					if ((HAL_GetTick() - tickstart) > 100) {
+						return HAL_TIMEOUT;
+					}
+				}
+			} else {return HAL_ERROR;}
 
-		if(motors[i].pos > 0.05){
-			direction = -1;
+			can_rx_flag = 0;
+			HAL_Delay(500);
+			if(can_disable_motor(target_id, CAN_MASTER_ID) == HAL_OK){
+				tickstart = HAL_GetTick();
+				while (can_rx_flag == 0) {
+					if ((HAL_GetTick() - tickstart) > 100) {
+						return HAL_TIMEOUT;
+					}
+				}
+			} else {return HAL_ERROR;}
+			can_rx_flag = 0;
+			if(can_set_mech_zero(target_id, CAN_MASTER_ID) == HAL_OK){
+				tickstart = HAL_GetTick();
+				while (can_rx_flag == 0) {
+					if ((HAL_GetTick() - tickstart) > 100) {
+						return HAL_TIMEOUT;
+					}
+				}
+			} else {return HAL_ERROR;}
+			can_rx_flag = 0;
+			if(can_enable_motor(target_id, CAN_MASTER_ID) == HAL_OK){
+				tickstart = HAL_GetTick();
+				while (can_rx_flag == 0) {
+					if ((HAL_GetTick() - tickstart) > 100) {
+						return HAL_TIMEOUT;
+					}
+				}
+			} else {return HAL_ERROR;}
+
+			can_rx_flag = 0;
 		}
-		else if (motors[i].pos < -0.05){
-			direction = 1;
-		} else {continue;} //motor is @zero pos
 
-		if (can_mit_control_set(target_id, 0.0f, 0.0f, 5.0 * direction, 100.0f, 5.0f) == HAL_OK) {
+		if (can_mit_control_set(target_id, 0.0f, 0.0f, 0.0f, 50.0f, 5.0f) == HAL_OK) {
 			tickstart = HAL_GetTick();
 			while (can_rx_flag == 0) {
 				if ((HAL_GetTick() - tickstart) > 100) {
@@ -305,6 +342,17 @@ HAL_StatusTypeDef motor_chain_go_zeropos ()
 				}
 			}
 		} else {return HAL_ERROR;}
+
+		can_rx_flag = 0;
+
+//		if(motors[i].pos > 0.05){
+//			direction = -1;
+//		}
+//		else if (motors[i].pos < -0.05){
+//			direction = 1;
+//		} else {continue;} //motor is @zero pos
+
+
 	}
 
 	HAL_Delay(500); //Letting all the motors react
