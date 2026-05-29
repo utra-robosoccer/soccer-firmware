@@ -8,7 +8,7 @@ Sources:
 - `/home/anthonykpinson/robosoccer/robstride/Product_Information/README.md`
 - `slave/slave_general/Core/Inc/robostride.h`
 - `slave/slave_general/Core/Src/robostride.c`
-- `test_motor/rs02_can.py`
+- `tools/robostride_usb_can/rs02_can.py`
 
 ## Shared Communication Characteristics
 
