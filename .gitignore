@@ -7,6 +7,9 @@ build/
 *.o
 *.d
 *.su
+__pycache__/
+*.py[cod]
+.DS_Store
 
 # Executables and binaries
 *.elf
