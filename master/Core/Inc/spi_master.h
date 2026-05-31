@@ -12,8 +12,8 @@
 #define V_MIN   -20.0f
 #define V_MAX    20.0f
 
-#define NUM_SLV               2
-#define MAX_MOTORS_PER_SLAVE  1
+#define NUM_SLV               4
+#define MAX_MOTORS_PER_SLAVE  5
 #define BYTES_PER_MOTOR       5
 #define USB_BYTES_PER_MOTOR  sizeof(motor_cmd_t)
 

@@ -4,7 +4,7 @@
 
 motor_t motors[MAX_MOTOR_COUNT]; //This is the motor chain array
 
-uint8_t motorID_lut[MAX_MOTOR_COUNT] = {2};
+uint8_t motorID_lut[MAX_MOTOR_COUNT] = {5};
 
 // For FIFO Intr Callback function
 uint8_t can_rx_flag = 0;

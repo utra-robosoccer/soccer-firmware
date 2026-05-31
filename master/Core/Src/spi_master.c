@@ -16,9 +16,9 @@ motor_cmd_t motor_feedbacks[MAX_MOTORS_PER_SLAVE * NUM_SLV];
 
 uint8_t motorID_lut[NUM_SLV][MAX_MOTORS_PER_SLAVE] = {
     {3},
-    {5},
-//    {9, 10, 11, 12, 0},
-//    {13, 14, 15, 16, 0}
+    {2},
+    {4},
+    {5}
 };
 
 slv_motor_chain_t slaves[NUM_SLV];
@@ -113,11 +113,15 @@ void MotorMaster_Init(SPI_HandleTypeDef *hspi, UART_HandleTypeDef *huart) {
     master_huart = huart;
     CS_ALL_HIGH();
 
+    slaves[DEV1].active_motor_count = 1;
+    slaves[DEV2].active_motor_count = 1;
+    slaves[DEV3].active_motor_count = 1;
+    slaves[DEV4].active_motor_count = 1;
+
     for (uint8_t i = 0; i < NUM_SLV; i++) {
         slaves[i].slv_id = (SpiDevId)i;
         slaves[i].slv_motor_cmds = &motor_cmds[i * MAX_MOTORS_PER_SLAVE];
         slaves[i].slv_motor_feedbacks = &motor_feedbacks[i * MAX_MOTORS_PER_SLAVE];
-        slaves[i].active_motor_count = 2;
         slaves[i].motorID_lut = motorID_lut[i];
 
         for (uint8_t j = 0; j < slaves[i].active_motor_count; j++) {
@@ -163,7 +167,7 @@ void motor_master_test_inject()
 void MotorMaster_ProcessLoop(void) {
 	// test
 	sweep_pos += 0.1f * sweep_dir;
-	if (sweep_pos >= 10.0f || sweep_pos <= -10.0f) {
+	if (sweep_pos >= 3.2 || sweep_pos <= -3.2) {
 		sweep_dir *= -1.0f;
 	}
 
@@ -174,9 +178,10 @@ void MotorMaster_ProcessLoop(void) {
 							  slaves[i].active_motor_count,
 							  slaves[i].slv_motor_cmds,
 							  slaves[i].slv_motor_feedbacks);
+		HAL_Delay(100);
 	}
 
-	HAL_Delay(1);
+
 
 //    if (new_usb_packet_rx_flag) {
 //
