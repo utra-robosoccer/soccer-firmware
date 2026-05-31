@@ -15,8 +15,8 @@ motor_cmd_t motor_cmds[MAX_MOTORS_PER_SLAVE * NUM_SLV];
 motor_cmd_t motor_feedbacks[MAX_MOTORS_PER_SLAVE * NUM_SLV];
 
 uint8_t motorID_lut[NUM_SLV][MAX_MOTORS_PER_SLAVE] = {
-    {1,2},
-//    {5, 6, 7, 8, 0},
+    {3},
+    {5},
 //    {9, 10, 11, 12, 0},
 //    {13, 14, 15, 16, 0}
 };
@@ -145,21 +145,53 @@ void MotorMaster_FormatTxBuffer(void) {
     }
 }
 
+static float sweep_pos = 0.0f;
+static float sweep_dir = 1.0f;
+
+void motor_master_test_inject()
+{
+	for (uint8_t i = 0; i < NUM_SLV; i ++){
+		for (uint8_t j = 0; j < slaves[i].active_motor_count; j++) {
+			slaves[i].slv_motor_cmds[j].motor_id = slaves[i].motorID_lut[j];
+			slaves[i].slv_motor_cmds[j].position = sweep_pos;
+			slaves[i].slv_motor_cmds[j].speed = sweep_dir;
+		}
+
+	}
+}
+
 void MotorMaster_ProcessLoop(void) {
-    if (new_usb_packet_rx_flag) {
+	// test
+	sweep_pos += 0.1f * sweep_dir;
+	if (sweep_pos >= 10.0f || sweep_pos <= -10.0f) {
+		sweep_dir *= -1.0f;
+	}
 
-        MotorMaster_ParseRxBuffer();
+	motor_master_test_inject();
 
-        for (uint8_t i = 0; i < NUM_SLV; i++) {
-            spi_send_to_one_slave(slaves[i].slv_id,
-                                  slaves[i].active_motor_count,
-                                  slaves[i].slv_motor_cmds,
-                                  slaves[i].slv_motor_feedbacks);
-        }
+	for (uint8_t i = 0; i < NUM_SLV; i++) {
+		spi_send_to_one_slave(slaves[i].slv_id,
+							  slaves[i].active_motor_count,
+							  slaves[i].slv_motor_cmds,
+							  slaves[i].slv_motor_feedbacks);
+	}
 
-        MotorMaster_FormatTxBuffer();
-        CDC_Transmit_FS(buf_tx_master2jet, sizeof(buf_tx_master2jet));
+	HAL_Delay(1);
 
-        new_usb_packet_rx_flag = 0;
-    }
+//    if (new_usb_packet_rx_flag) {
+//
+//        MotorMaster_ParseRxBuffer();
+//
+//        for (uint8_t i = 0; i < NUM_SLV; i++) {
+//            spi_send_to_one_slave(slaves[i].slv_id,
+//                                  slaves[i].active_motor_count,
+//                                  slaves[i].slv_motor_cmds,
+//                                  slaves[i].slv_motor_feedbacks);
+//        }
+//
+//        MotorMaster_FormatTxBuffer();
+//        CDC_Transmit_FS(buf_tx_master2jet, sizeof(buf_tx_master2jet));
+//
+//        new_usb_packet_rx_flag = 0;
+//    }
 }
