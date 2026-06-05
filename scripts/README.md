@@ -18,7 +18,7 @@ If the auto-detection misses your install:
 
 ```sh
 export STM32CUBEIDE_PATH="/path/to/stm32cubeide"
-./scripts/build.sh master
+./scripts/build.sh firmware/master
 ```
 
 ---
@@ -84,16 +84,15 @@ sudo udevadm trigger
 ./scripts/build.sh           # (no args also lists)
 
 # Build a project (Debug by default)
-./scripts/build.sh master
-./scripts/build.sh rs-motor-test
-./scripts/build.sh slave/slave_general
+./scripts/build.sh firmware/master
+./scripts/build.sh firmware/slave/slave_general
 
 # Build a specific configuration
-./scripts/build.sh master Release
+./scripts/build.sh firmware/master Release
 
 # Clean then build
-./scripts/build.sh --clean master
-./scripts/build.sh --clean master Release
+./scripts/build.sh --clean firmware/master
+./scripts/build.sh --clean firmware/master Release
 ```
 
 ### flash.sh
@@ -104,32 +103,25 @@ sudo udevadm trigger
 ./scripts/flash.sh           # (no args also lists)
 
 # Flash a project by its directory path (relative to repo root or CWD)
-./scripts/flash.sh master
-./scripts/flash.sh rs-motor-test
-./scripts/flash.sh slave/slave_general
-./scripts/flash.sh spi_master_test/SPI_MULTI_SLAVE
-./scripts/flash.sh spi_master_test/SPI_Slave_Send
-./scripts/flash.sh SPI_MULTI_SLAVE
-./scripts/flash.sh SPI_Slave_Send
+./scripts/flash.sh firmware/master
+./scripts/flash.sh firmware/slave/slave_general
 ```
 
 The script reads the `<name>` field from the project's `.project` file to find
-the correct `.elf` — so `rs-motor-test/` flashes `motor_test.elf`, not
-`rs-motor-test.elf`.
+the correct `.elf`.
 
 If the `.elf` doesn't exist you'll see:
 
 ```
-error: no .elf found under 'rs-motor-test/Debug/'
+error: no .elf found under 'firmware/master/Debug/'
 Build the project in STM32CubeIDE first (Project → Build All).
 ```
 
 ### Build and flash in one step
 
 ```sh
-./scripts/build.sh master && ./scripts/flash.sh master
-./scripts/build.sh slave/slave_general && ./scripts/flash.sh slave/slave_general
-./scripts/build.sh --clean rs-motor-test && ./scripts/flash.sh rs-motor-test
+./scripts/build.sh firmware/master && ./scripts/flash.sh firmware/master
+./scripts/build.sh firmware/slave/slave_general && ./scripts/flash.sh firmware/slave/slave_general
 ```
 
 ---
@@ -138,10 +130,5 @@ Build the project in STM32CubeIDE first (Project → Build All).
 
 | Directory                       | Binary name       |
 |---------------------------------|-------------------|
-| `master`                        | `master`          |
-| `rs-motor-test`                 | `motor_test`      |
-| `slave/slave_general`           | `slave_general`   |
-| `spi_master_test/SPI_MULTI_SLAVE` | `SPI_MULTI_SLAVE` |
-| `spi_master_test/SPI_Slave_Send`  | `SPI_Slave_Send`  |
-| `SPI_MULTI_SLAVE`               | `SPI_MULTI_SLAVE` |
-| `SPI_Slave_Send`                | `SPI_Slave_Send`  |
+| `firmware/master`               | `master`          |
+| `firmware/slave/slave_general`  | `slave_general`   |

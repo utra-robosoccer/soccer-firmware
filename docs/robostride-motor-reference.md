@@ -6,8 +6,8 @@ Sources:
 
 - `RobStride Product Specification Document 20250626.pdf` in `/home/anthonykpinson/robosoccer/robstride/Product_Information/`
 - `/home/anthonykpinson/robosoccer/robstride/Product_Information/README.md`
-- `slave/slave_general/Core/Inc/robostride.h`
-- `slave/slave_general/Core/Src/robostride.c`
+- `firmware/slave/slave_general/Core/Inc/robostride.h`
+- `firmware/slave/slave_general/Core/Src/robostride.c`
 - `tools/robostride_usb_can/rs02_can.py`
 
 ## Shared Communication Characteristics
