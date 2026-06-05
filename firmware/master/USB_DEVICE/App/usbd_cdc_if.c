@@ -23,6 +23,7 @@
 
 /* USER CODE BEGIN INCLUDE */
 #include "spi_master.h"
+#include "usb_tx.h"
 
 /* USER CODE END INCLUDE */
 
@@ -262,18 +263,85 @@ static int8_t CDC_Control_FS(uint8_t cmd, uint8_t* pbuf, uint16_t length)
 static int8_t CDC_Receive_FS(uint8_t* Buf, uint32_t *Len)
 {
   /* USER CODE BEGIN 6 */
-  uint32_t rx_len = *Len;
+  /* ── framed protocol decoder ──────────────────────────────────────────── */
+  static uint8_t  accum[128];
+  static uint16_t accum_len = 0;
 
-  if (rx_len == 1) {
-    switch (Buf[0]) {
-      case 'e': MotorMaster_SetArmed(1); break;
-      case 'd': MotorMaster_SetArmed(0); break;
-      case 'k': break;
-      default:  break;
-    }
-  } else if (rx_len <= (NUM_SLV * MAX_MOTORS_PER_SLAVE * USB_BYTES_PER_MOTOR)) {
-    memcpy(buf_rx_jet2master, Buf, rx_len);
-    new_usb_packet_rx_flag = 1;
+  uint32_t rx_len = *Len;
+  if (accum_len + rx_len > sizeof(accum)) {
+      accum_len = 0;   /* overflow → reset, resync */
+  } else {
+      memcpy(accum + accum_len, Buf, rx_len);
+      accum_len += (uint16_t)rx_len;
+  }
+
+  /* Try to consume one or more complete messages from accum[] */
+  while (accum_len >= MSG_HEADER_SIZE) {
+      MsgHeader hdr;
+      memcpy(&hdr, accum, MSG_HEADER_SIZE);
+
+      uint16_t total = (uint16_t)(MSG_HEADER_SIZE + hdr.len);
+      if (accum_len < total) break;   /* wait for rest of payload */
+
+      /* Verify CRC */
+      uint16_t calc = proto_frame_crc(&hdr, accum + MSG_HEADER_SIZE, hdr.len);
+      if (calc != hdr.crc16) {
+          master_link_errors++;
+          accum_len = 0;              /* discard, resync */
+          break;
+      }
+      master_rx_frames++;
+
+      /* Dispatch */
+      const uint8_t *payload = accum + MSG_HEADER_SIZE;
+      switch ((MsgType)hdr.type) {
+          case MSG_CONTROL_REQ:
+              if (hdr.len >= sizeof(ControlReq)) {
+                  ControlReq req;
+                  memcpy(&req, payload, sizeof(req));
+                  MotorMaster_HandleControlReq(&req, hdr.seq);
+              } else {
+                  master_link_errors++;
+              }
+              break;
+
+          case MSG_PING: {
+              /* Echo PONG */
+              uint8_t frame[MSG_HEADER_SIZE];
+              uint16_t n = proto_build(frame, sizeof(frame),
+                                       MSG_PING, hdr.seq,
+                                       NODE_MASTER, (uint8_t)hdr.src,
+                                       HAL_GetTick(), NULL, 0u);
+              if (n > 0u) usb_tx_write(frame, n);
+              break;
+          }
+
+          case MSG_MOTOR_CMD:
+              if (hdr.len >= sizeof(MotorCmd)) {
+                  MotorCmd mc;
+                  memcpy(&mc, payload, sizeof(mc));
+                  MotorMaster_SetMitCmd(mc.motor_idx, mc.pos, mc.vel,
+                                        mc.kp, mc.kd, mc.tau_ff);
+              } else {
+                  master_link_errors++;
+              }
+              break;
+
+          default:
+              master_link_errors++;
+              break;
+      }
+
+      /* Consume processed bytes */
+      accum_len -= total;
+      if (accum_len > 0u) {
+          memmove(accum, accum + total, accum_len);
+      }
+  }
+
+  /* Legacy raw motor-cmd path – left in place, not actively used */
+  if (rx_len <= (NUM_SLV * MAX_MOTORS_PER_SLAVE * USB_BYTES_PER_MOTOR)) {
+      (void)buf_rx_jet2master;   /* suppress unused-variable warning */
   }
 
   USBD_CDC_SetRxBuffer(&hUsbDeviceFS, &Buf[0]);

@@ -4,7 +4,7 @@
 
 motor_t motors[MAX_MOTOR_COUNT]; //This is the motor chain array
 
-uint8_t motorID_lut[MAX_MOTOR_COUNT] = {ROBOSTRIDE_READ_ONLY_MOTOR_ID, 0u};
+uint8_t motorID_lut[MAX_MOTOR_COUNT] = {2u, 1u};  /* matches motor_configs[] order */
 
 // For FIFO Intr Callback function
 volatile uint8_t can_rx_flag = 0;

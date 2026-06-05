@@ -30,6 +30,7 @@
 #include "robostride.h"
 #include "motor_chain.h"
 #include "slave_spi.h"
+#include "motor_runtime.h"
 
 /* USER CODE END Includes */
 
@@ -41,14 +42,10 @@
 /* Private define ------------------------------------------------------------*/
 /* USER CODE BEGIN PD */
 #define PHASE1_POLL_PERIOD_MS 10U
-#define PHASE1_PRINT_PERIOD_MS 10U
+#define PHASE1_PRINT_PERIOD_MS 500U
 #define PHASE1_LED_PULSE_MS 40U
 #define PHASE1_STATUS_LED_GPIO_Port GPIOA
 #define PHASE1_STATUS_LED_Pin GPIO_PIN_5
-
-#define KP_HOLD            15.0f
-#define KD_HOLD             1.0f
-#define WATCHDOG_TIMEOUT_MS 200U
 #if defined(__GNUC__)
 #define PHASE1_UNUSED_FN __attribute__((unused))
 #else
@@ -76,11 +73,6 @@ static uint32_t phase1_next_poll_ms = 0;
 static uint32_t phase1_last_print_ms = 0;
 static uint32_t phase1_last_feedback_count = 0;
 static uint32_t phase1_led_off_ms = 0;
-
-typedef enum { SLAVE_IDLE = 0, SLAVE_ARMED } slave_state_t;
-static slave_state_t slave_state = SLAVE_IDLE;
-static float hold_pos = 0.0f;
-static uint32_t last_hold_refresh_ms = 0;
 
 /* USER CODE END PV */
 
@@ -165,23 +157,6 @@ static void phase1_print_motor_state(const motor_t *motor)
     }
 }
 
-static void pack_motor_tele(uint8_t *buf, uint8_t id, float pos, float vel)
-{
-    const float p_span = P_MAX - P_MIN;
-    const float v_span = V_MAX - V_MIN;
-    if (pos < P_MIN) pos = P_MIN;
-    if (pos > P_MAX) pos = P_MAX;
-    if (vel < V_MIN) vel = V_MIN;
-    if (vel > V_MAX) vel = V_MAX;
-    uint16_t pos_u16 = (uint16_t)((pos - P_MIN) * 65535.0f / p_span);
-    uint16_t vel_u16 = (uint16_t)((vel - V_MIN) * 65535.0f / v_span);
-    buf[0] = id;
-    buf[1] = (uint8_t)(pos_u16 & 0xFF);
-    buf[2] = (uint8_t)((pos_u16 >> 8) & 0xFF);
-    buf[3] = (uint8_t)(vel_u16 & 0xFF);
-    buf[4] = (uint8_t)((vel_u16 >> 8) & 0xFF);
-}
-
 /* USER CODE END 0 */
 
 /**
@@ -208,7 +183,7 @@ int main(void)
   SystemClock_Config();
 
   /* USER CODE BEGIN SysInit */
-  HAL_Delay(1000);
+  HAL_Delay(2500);  /* motors need ~1.5-2 s to boot CAN stack from cold power-on */
   SCnSCB->ACTLR |= SCnSCB_ACTLR_DISDEFWBUF_Msk ;
 
   /* USER CODE END SysInit */
@@ -221,20 +196,26 @@ int main(void)
   MX_UART4_Init();
   /* USER CODE BEGIN 2 */
 
-  memset(&motors[0], 0, sizeof(motors[0]));
-  motors[0].id = ROBOSTRIDE_READ_ONLY_MOTOR_ID;
-  motors[0].master_id = CAN_MASTER_ID;
+  /* Align CAN motor array IDs with motor_configs */
+  for (uint8_t i = 0; i < N_MOTORS; i++) {
+    memset(&motors[i], 0, sizeof(motors[i]));
+    motors[i].id        = motor_configs[i].can_id;
+    motors[i].master_id = CAN_MASTER_ID;
+  }
 
   if (can_bus_init() != HAL_OK) {
     Error_Handler();
   }
 
   spi_dma_init(&hspi1);
+  motor_runtime_init();   /* discover motors via CAN, populate alive mask */
 
-  phase1_next_poll_ms = HAL_GetTick();
-  phase1_last_print_ms = HAL_GetTick();
+  phase1_next_poll_ms   = HAL_GetTick();
+  phase1_last_print_ms  = HAL_GetTick();
   phase1_last_feedback_count = can_feedback_count;
-  printf("phase1 slave read-only: motor=%u poll=100Hz\r\n", ROBOSTRIDE_READ_ONLY_MOTOR_ID);
+  printf("slave: %u/%u motors alive\r\n",
+         (unsigned)__builtin_popcount(motor_runtime_motors_alive()),
+         (unsigned)N_MOTORS);
 
   /* USER CODE END 2 */
 
@@ -246,15 +227,14 @@ int main(void)
 
     /* USER CODE BEGIN 3 */
     uint32_t now = HAL_GetTick();
+
+    /* 100 Hz CAN poll — motor_runtime handles MIT hold vs read-state per motor */
     if ((int32_t)(now - phase1_next_poll_ms) >= 0) {
       phase1_next_poll_ms += PHASE1_POLL_PERIOD_MS;
-      if (slave_state == SLAVE_ARMED) {
-        (void)can_mit_control_set(motors[0].id, 0.0f, hold_pos, 0.0f, KP_HOLD, KD_HOLD);
-      } else {
-        (void)can_read_motor_state(ROBOSTRIDE_READ_ONLY_MOTOR_ID);
-      }
+      motor_runtime_update(now);
     }
 
+    /* On each new CAN feedback: refresh SPI telemetry buffer */
     if (can_feedback_count != phase1_last_feedback_count) {
       phase1_last_feedback_count = can_feedback_count;
       HAL_GPIO_WritePin(PHASE1_STATUS_LED_GPIO_Port, PHASE1_STATUS_LED_Pin, GPIO_PIN_SET);
@@ -266,8 +246,10 @@ int main(void)
       }
 
       uint8_t tele[PAYLOAD_LENGTH] = {0};
-      tele[0] = (uint8_t)slave_state;
-      pack_motor_tele(&tele[1], motors[0].id, motors[0].pos, motors[0].rpm);
+      tele[0] = motor_runtime_motors_alive();
+      for (uint8_t _i = 0; _i < N_MOTORS; _i++) {
+        motor_runtime_pack_tele((SpiMotorTele *)(&tele[1]) + _i, _i);
+      }
       spi_write_next_tx_buf(tele, motor_tele_buf);
     }
 
@@ -276,39 +258,48 @@ int main(void)
       phase1_led_off_ms = 0U;
     }
 
-    /* SPI command handler */
+    /* SPI command handler — dispatch to motor_runtime state machine */
     if (data_receive_flag) {
       data_receive_flag = 0;
       uint8_t cmd = motor_update_buf[0];
-      if (cmd == SPI_CMD_ARM && slave_state == SLAVE_IDLE) {
-        hold_pos = motors[0].pos;
-        uint32_t ts = HAL_GetTick();
-        can_rx_flag = 0;
-        can_change_motor_mode(motors[0].id, CAN_MASTER_ID, MIT_MODE);
-        while (can_rx_flag == 0 && (HAL_GetTick() - ts) < 100U) {}
-        HAL_Delay(20);
-        can_rx_flag = 0;
-        can_enable_motor(motors[0].id, CAN_MASTER_ID);
-        while (can_rx_flag == 0 && (HAL_GetTick() - ts) < 250U) {}
-        HAL_Delay(20);
-        (void)can_mit_control_set(motors[0].id, 0.0f, hold_pos, 0.0f, KP_HOLD, KD_HOLD);
-        slave_state = SLAVE_ARMED;
-        last_hold_refresh_ms = HAL_GetTick();
-      } else if (cmd == SPI_CMD_HOLD && slave_state == SLAVE_ARMED) {
-        last_hold_refresh_ms = HAL_GetTick();
-      } else if (cmd == SPI_CMD_DISARM) {
-        if (slave_state == SLAVE_ARMED) {
-          can_disable_motor(motors[0].id, CAN_MASTER_ID);
+      switch (cmd & 0x0Fu) {
+        case SPI_CMD_ARM: {
+          uint8_t idx = SPI_CMD_MOTOR_IDX(cmd);
+          motor_runtime_arm(idx, 0u);
+          break;
         }
-        slave_state = SLAVE_IDLE;
+        case SPI_CMD_GOTO_ZERO: {
+          uint8_t idx = SPI_CMD_MOTOR_IDX(cmd);
+          motor_runtime_goto_zero(idx, 0u);
+          break;
+        }
+        case SPI_CMD_MIT: {
+          for (uint8_t _i = 0; _i < N_MOTORS; _i++) {
+            SpiMitCmd mc;
+            memcpy(&mc, motor_update_buf + 1 + _i * (uint8_t)sizeof(SpiMitCmd),
+                   sizeof(SpiMitCmd));
+            if (mc.valid && (motors_rt[_i].state == MOTOR_ARMED_HOLD ||
+                             motors_rt[_i].state == MOTOR_ARMED_MIT)) {
+              motors_rt[_i].hold_pos = mc.pos;
+              motors_rt[_i].hold_vel = mc.vel;
+              motors_rt[_i].state    = MOTOR_ARMED_MIT;
+            }
+            /* Master is alive — always refresh watchdog regardless of valid flag */
+            motor_runtime_refresh_watchdog(_i);
+          }
+          break;
+        }
+        case SPI_CMD_HOLD:
+          for (uint8_t _i = 0; _i < N_MOTORS; _i++)
+            motor_runtime_refresh_watchdog(_i);
+          break;
+        case SPI_CMD_DISARM:
+          for (uint8_t _i = 0; _i < N_MOTORS; _i++)
+            motor_runtime_disable(_i, 0u);
+          break;
+        default:
+          break;
       }
-    }
-
-    /* Watchdog: disarm if no HOLD refresh within timeout */
-    if (slave_state == SLAVE_ARMED &&
-        (HAL_GetTick() - last_hold_refresh_ms) > WATCHDOG_TIMEOUT_MS) {
-      can_disable_motor(motors[0].id, CAN_MASTER_ID);
-      slave_state = SLAVE_IDLE;
     }
   }
   /* USER CODE END 3 */

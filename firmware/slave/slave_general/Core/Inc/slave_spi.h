@@ -10,15 +10,24 @@
 
 #include "stm32f4xx_hal.h"
 #include "motor_chain.h"
+#include "proto_common.h"
 #include "main.h"
 
-#define SPI_CMD_NOP    0x00
-#define SPI_CMD_ARM    0x01
-#define SPI_CMD_HOLD   0x02
-#define SPI_CMD_DISARM 0x03
+#define SPI_CMD_NOP       0x00
+#define SPI_CMD_ARM       0x01  /* bits[7:4] = motor index */
+#define SPI_CMD_HOLD      0x02
+#define SPI_CMD_DISARM    0x03
+#define SPI_CMD_GOTO_ZERO 0x04  /* bits[7:4] = motor index */
+#define SPI_CMD_MIT       0x05  /* pass-through MIT command, data in bytes [1..] */
 
-#define PAYLOAD_LENGTH (1 + MAX_MOTOR_COUNT * 5) // cmd byte + [id, pos_lo, pos_hi, vel_lo, vel_hi] per motor
-#define BUFFER_SIZE 32
+#define SPI_CMD_ARM_IDX(idx)       (SPI_CMD_ARM       | ((uint8_t)(idx) << 4u))
+#define SPI_CMD_GOTO_ZERO_IDX(idx) (SPI_CMD_GOTO_ZERO | ((uint8_t)(idx) << 4u))
+#define SPI_CMD_MOTOR_IDX(cmd)     ((uint8_t)((cmd) >> 4u))
+
+/* Payload = 1 header byte (motors_alive mask) + N_MOTORS × SpiMotorTele  */
+#define SPI_TELE_SIZE  ((uint16_t)sizeof(SpiMotorTele))   /* 13 */
+#define PAYLOAD_LENGTH (1u + N_MOTORS * SPI_TELE_SIZE)    /* 14 */
+#define BUFFER_SIZE    32u
 
 extern uint8_t* volatile  motor_update_buf; //This belongs to the Rx side
 extern uint8_t* volatile  motor_tele_buf; //This belongs to the Tx side
