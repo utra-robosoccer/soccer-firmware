@@ -41,7 +41,7 @@
 
 /* Private define ------------------------------------------------------------*/
 /* USER CODE BEGIN PD */
-#define PHASE1_POLL_PERIOD_MS 10U
+#define PHASE1_POLL_PERIOD_MS MOTOR_LOOP_PERIOD_MS   /* 200 Hz CAN control loop */
 #define PHASE1_PRINT_PERIOD_MS 500U
 #define PHASE1_LED_PULSE_MS 40U
 #define PHASE1_STATUS_LED_GPIO_Port GPIOA
@@ -228,7 +228,7 @@ int main(void)
     /* USER CODE BEGIN 3 */
     uint32_t now = HAL_GetTick();
 
-    /* 100 Hz CAN poll — motor_runtime handles MIT hold vs read-state per motor */
+    /* 200 Hz CAN poll — motor_runtime handles MIT hold vs read-state per motor */
     if ((int32_t)(now - phase1_next_poll_ms) >= 0) {
       phase1_next_poll_ms += PHASE1_POLL_PERIOD_MS;
       motor_runtime_update(now);

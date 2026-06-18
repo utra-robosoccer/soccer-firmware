@@ -7,6 +7,14 @@
 
 #define MOTOR_WATCHDOG_MS 200u
 
+/* Control-loop period — single source of truth for slave loop timing.
+   motor_runtime_update() runs at this cadence; goto-zero derives its waypoint
+   dt from MOTOR_LOOP_DT_S so the creep rate stays MOTOR_ZERO_RATE (rad/s)
+   regardless of loop frequency. Keep zeroing slow enough that a human can cut
+   power mid-creep. */
+#define MOTOR_LOOP_PERIOD_MS 5U
+#define MOTOR_LOOP_DT_S      ((float)MOTOR_LOOP_PERIOD_MS * 0.001f)
+
 typedef struct {
     const MotorConfig *cfg;
     MotorLifecycle     state;
@@ -27,7 +35,7 @@ extern MotorRuntime motors_rt[N_MOTORS];
 /* Lifecycle */
 void motor_runtime_init(void);
 
-/* Called every 10 ms from the CAN poll timer */
+/* Called every MOTOR_LOOP_PERIOD_MS from the CAN poll loop */
 void motor_runtime_update(uint32_t now_ms);
 
 /* ARM_HOLD: transition IDLE → ARMED_HOLD. Returns HAL_OK or HAL_ERROR. */

@@ -14,8 +14,9 @@
 #include "stm32f4xx_hal.h"
 #include "stm32f4xx_hal_can.h"
 #include "main.h"
+#include "proto_common.h"   /* N_MOTORS, motor_configs[] (generated) */
 
-#define MAX_MOTOR_COUNT 2 //This macro changes depending on the total number of motors connected to the CAN BUS
+#define MAX_MOTOR_COUNT N_MOTORS //Total motors on the CAN bus — driven by the generated motor_config.h
 extern motor_t motors[MAX_MOTOR_COUNT];
 extern volatile uint8_t can_rx_flag;
 extern volatile uint32_t can_raw_rx_count;

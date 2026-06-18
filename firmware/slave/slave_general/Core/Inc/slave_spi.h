@@ -25,9 +25,10 @@
 #define SPI_CMD_MOTOR_IDX(cmd)     ((uint8_t)((cmd) >> 4u))
 
 /* Payload = 1 header byte (motors_alive mask) + N_MOTORS × SpiMotorTele  */
-#define SPI_TELE_SIZE  ((uint16_t)sizeof(SpiMotorTele))   /* 13 */
-#define PAYLOAD_LENGTH (1u + N_MOTORS * SPI_TELE_SIZE)    /* 14 */
-#define BUFFER_SIZE    32u
+#define SPI_TELE_SIZE  ((uint16_t)sizeof(SpiMotorTele))   /* 13 bytes */
+#define PAYLOAD_LENGTH (1u + N_MOTORS * SPI_TELE_SIZE)    /* 1 + N_MOTORS*13 */
+/* DMA buffers must hold the full payload; round up to a 32-byte multiple. */
+#define BUFFER_SIZE    (((PAYLOAD_LENGTH) + 31u) & ~31u)
 
 extern uint8_t* volatile  motor_update_buf; //This belongs to the Rx side
 extern uint8_t* volatile  motor_tele_buf; //This belongs to the Tx side

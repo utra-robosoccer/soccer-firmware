@@ -1,4 +1,5 @@
 #include "robostride.h"
+#include "proto_common.h"   /* motor_can_range_by_id() — per-model V/T ranges */
 
 
 CAN_TxHeaderTypeDef rs_can_tx_header = {
@@ -36,6 +37,31 @@ static float uint_to_float(uint32_t x_int, float x_min, float x_max, int bits)
     float span = x_max - x_min;
     float offset = x_min;
     return ((float)x_int) * span / ((float)((1U << bits) - 1U)) + offset;
+}
+
+/* Single transmit path for every CAN frame. The F446 bxCAN has only 3 TX
+ * mailboxes; motor_runtime_update() bursts one frame per motor each 10ms tick,
+ * so with >3 motors the later frames (e.g. CAN ids 4,5) were silently dropped
+ * for lack of a free mailbox. Wait (bounded ~2ms) for a mailbox to free before
+ * queueing. A full 8-byte extended frame at 1 Mbps drains in ~110us, so the
+ * wait is effectively a few hundred microseconds even when all 3 are busy. */
+static HAL_StatusTypeDef can_tx(uint8_t *msg)
+{
+    uint32_t t0 = HAL_GetTick();
+    while (HAL_CAN_GetTxMailboxesFreeLevel(&hcan1) == 0u) {
+        if ((HAL_GetTick() - t0) > 1u) {
+            break;
+        }
+    }
+
+    HAL_StatusTypeDef status = HAL_CAN_AddTxMessage(&hcan1, &rs_can_tx_header, msg, &TxMailbox);
+    if (status == HAL_OK) {
+        can_tx_ok_count++;
+    } else {
+        can_tx_error_count++;
+        can_last_tx_error = HAL_CAN_GetError(&hcan1);
+    }
+    return status;
 }
 
 // ============================================================================
@@ -118,7 +144,7 @@ HAL_StatusTypeDef can_get_motor_id(uint8_t id, uint16_t master_id)
     uint8_t msg[8] = {0}; // Data is empty (0)
     rs_can_tx_header.DLC = 8;
 
-    return HAL_CAN_AddTxMessage(&hcan1, &rs_can_tx_header, msg, &TxMailbox);
+    return can_tx(msg);
 }
 
 HAL_StatusTypeDef can_unpack_get_id(motor_t* motor, uint8_t* recv_buf)
@@ -148,32 +174,33 @@ HAL_StatusTypeDef can_unpack_get_id(motor_t* motor, uint8_t* recv_buf)
 HAL_StatusTypeDef can_mit_control_set(uint8_t id, float torque, float MechPosition, float speed, float kp, float kd)
 {
     uint8_t msg[8];
-    HAL_StatusTypeDef status;
+
+    /* Velocity and torque ranges are model-specific (RS00 vs RS02); position,
+     * Kp and Kd are identical across models. Fall back to the RS02 globals if
+     * the id is not in this slave's config. */
+    const MotorCanRange *r = motor_can_range_by_id(id);
+    float v_min = r ? r->v_min : V_MIN;
+    float v_max = r ? r->v_max : V_MAX;
+    float t_min = r ? r->t_min : T_MIN;
+    float t_max = r ? r->t_max : T_MAX;
 
     txCanIdEx.mode = 1; // Type 1
     txCanIdEx.id = id;  // Target ID
-    txCanIdEx.data = float_to_uint(torque, T_MIN, T_MAX, 16);
+    txCanIdEx.data = float_to_uint(torque, t_min, t_max, 16);
     txCanIdEx.res = 0;
 
     rs_can_tx_header.DLC = 8;
 
     msg[0] = float_to_uint(MechPosition, P_MIN, P_MAX, 16) >> 8;
     msg[1] = float_to_uint(MechPosition, P_MIN, P_MAX, 16) & 0xFF;
-    msg[2] = float_to_uint(speed, V_MIN, V_MAX, 16) >> 8;
-    msg[3] = float_to_uint(speed, V_MIN, V_MAX, 16) & 0xFF;
+    msg[2] = float_to_uint(speed, v_min, v_max, 16) >> 8;
+    msg[3] = float_to_uint(speed, v_min, v_max, 16) & 0xFF;
     msg[4] = float_to_uint(kp, KP_MIN, KP_MAX, 16) >> 8;
     msg[5] = float_to_uint(kp, KP_MIN, KP_MAX, 16) & 0xFF;
     msg[6] = float_to_uint(kd, KD_MIN, KD_MAX, 16) >> 8;
     msg[7] = float_to_uint(kd, KD_MIN, KD_MAX, 16) & 0xFF;
 
-    status = HAL_CAN_AddTxMessage(&hcan1, &rs_can_tx_header, msg, &TxMailbox);
-    if (status == HAL_OK) {
-        can_tx_ok_count++;
-    } else {
-        can_tx_error_count++;
-        can_last_tx_error = HAL_CAN_GetError(&hcan1);
-    }
-    return status;
+    return can_tx(msg);
 }
 
 HAL_StatusTypeDef can_read_motor_state(uint8_t id)
@@ -214,15 +241,22 @@ HAL_StatusTypeDef can_unpack_motor_feedback(motor_t* motor, uint8_t* recv_buf)
     motor->motor_errors.stall_overload = (fault_byte >> FAULT_BIT_STALL_OVERLOAD) & 0x01;
     motor->motor_errors.uncalibrated   = (fault_byte >> FAULT_BIT_UNCALIBRATED)   & 0x01;
 
+    // Velocity and torque ranges are model-specific; look up by this motor's id.
+    const MotorCanRange *r = motor_can_range_by_id(motor->id);
+    float v_min = r ? r->v_min : V_MIN;
+    float v_max = r ? r->v_max : V_MAX;
+    float t_min = r ? r->t_min : T_MIN;
+    float t_max = r ? r->t_max : T_MAX;
+
     // 3. Unpack Data Payload
     // Byte 0-1: Position
     motor->pos = uint_to_float(recv_buf[0] << 8 | recv_buf[1], P_MIN, P_MAX, 16); // Note: Previous code was [1]<<8|0, Datasheet 643 says "High byte first" -> [0]<<8|[1]
 
     // Byte 2-3: Speed
-    motor->rpm = uint_to_float(recv_buf[2] << 8 | recv_buf[3], V_MIN, V_MAX, 16);
+    motor->rpm = uint_to_float(recv_buf[2] << 8 | recv_buf[3], v_min, v_max, 16);
 
     // Byte 4-5: Torque
-    motor->torq = uint_to_float(recv_buf[4] << 8 | recv_buf[5], T_MIN, T_MAX, 16);
+    motor->torq = uint_to_float(recv_buf[4] << 8 | recv_buf[5], t_min, t_max, 16);
 
     // Byte 6-7: Temperature
     motor->temperature = (float)(recv_buf[6] << 8 | recv_buf[7]) / 10.0;
@@ -244,7 +278,7 @@ HAL_StatusTypeDef can_enable_motor(uint8_t id, uint16_t master_id)
     txCanIdEx.data = master_id;
 
     rs_can_tx_header.DLC = 8;
-    return HAL_CAN_AddTxMessage(&hcan1, &rs_can_tx_header, msg, &TxMailbox);
+    return can_tx(msg);
 }
 
 // ============================================================================
@@ -260,7 +294,7 @@ HAL_StatusTypeDef can_disable_motor(uint8_t id, uint16_t master_id)
     uint8_t msg[8] = {0x0};
     rs_can_tx_header.DLC = 8;
 
-    return HAL_CAN_AddTxMessage(&hcan1, &rs_can_tx_header, msg, &TxMailbox);
+    return can_tx(msg);
 }
 
 // ============================================================================
@@ -277,7 +311,7 @@ HAL_StatusTypeDef can_set_mech_zero(uint8_t id, uint16_t master_id)
     msg[0] = 0x1;
 
     rs_can_tx_header.DLC = 8;
-    return HAL_CAN_AddTxMessage(&hcan1, &rs_can_tx_header, msg, &TxMailbox);
+    return can_tx(msg);
 }
 
 // ============================================================================
@@ -292,7 +326,7 @@ HAL_StatusTypeDef can_set_motor_can_id(uint8_t id, uint16_t master_id, uint8_t n
 
     uint8_t msg[8] = {0};
     rs_can_tx_header.DLC = 8;
-    return HAL_CAN_AddTxMessage(&hcan1, &rs_can_tx_header, msg, &TxMailbox);
+    return can_tx(msg);
 }
 
 // ============================================================================
@@ -310,7 +344,7 @@ HAL_StatusTypeDef can_read_single_param(uint8_t id, uint16_t master_id, uint16_t
     msg[1] = (index >> 8) & 0xFF;
 
     rs_can_tx_header.DLC = 8;
-    return HAL_CAN_AddTxMessage(&hcan1, &rs_can_tx_header, msg, &TxMailbox);
+    return can_tx(msg);
 }
 
 HAL_StatusTypeDef can_unpack_single_param(uint8_t* recv_buf, float* result_val)
@@ -349,5 +383,5 @@ HAL_StatusTypeDef can_change_motor_mode(uint8_t id, uint16_t master_id, rs_runmo
     // Data (Byte 4-7)
     msg[4] = rs_runmode & 0xff;
 
-    return HAL_CAN_AddTxMessage(&hcan1, &rs_can_tx_header, msg, &TxMailbox);
+    return can_tx(msg);
 }

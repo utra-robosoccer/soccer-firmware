@@ -106,9 +106,11 @@ void motor_runtime_update(uint32_t now_ms)
                     motors_rt[i].hold_vel = 0.0f;
                     motors_rt[i].state    = MOTOR_ARMED_HOLD;
                 } else {
-                    /* Step waypoint toward zero at constant rate (10 ms tick) */
+                    /* Step waypoint toward zero at MOTOR_ZERO_RATE (rad/s),
+                       scaled by the real loop period so the creep speed is
+                       independent of loop frequency. */
                     float sign = (pos > 0.0f) ? -1.0f : 1.0f;
-                    motors_rt[i].hold_pos += sign * MOTOR_ZERO_RATE * 0.010f;
+                    motors_rt[i].hold_pos += sign * MOTOR_ZERO_RATE * MOTOR_LOOP_DT_S;
                     /* Clamp — don't overshoot zero */
                     if (sign < 0.0f && motors_rt[i].hold_pos < 0.0f) motors_rt[i].hold_pos = 0.0f;
                     if (sign > 0.0f && motors_rt[i].hold_pos > 0.0f) motors_rt[i].hold_pos = 0.0f;
@@ -158,19 +160,22 @@ HAL_StatusTypeDef motor_runtime_arm(uint8_t idx, uint16_t cmd_seq)
     motors_rt[idx].hold_pos = m->pos;
     motors_rt[idx].hold_vel = 0.0f;
 
-    /* Set MIT mode */
+    /* Set MIT mode. Wait up to 10 ms for CAN ACK, then 10 ms settle so the
+       motor completes its internal mode switch before the enable arrives.
+       Budget per motor: 2 x (10+10) = 40 ms.  5 motors = 200 ms total, which
+       keeps every already-zeroing motor's watchdog delta at ≤160 ms < 200 ms. */
     uint32_t ts = HAL_GetTick();
     can_rx_flag = 0;
     can_change_motor_mode(cid, CAN_MASTER_ID, MIT_MODE);
-    while (can_rx_flag == 0 && (HAL_GetTick() - ts) < 100u) {}
-    HAL_Delay(20u);
+    while (can_rx_flag == 0 && (HAL_GetTick() - ts) < 10u) {}
+    HAL_Delay(10u);
 
     /* Enable */
     ts = HAL_GetTick();
     can_rx_flag = 0;
     can_enable_motor(cid, CAN_MASTER_ID);
-    while (can_rx_flag == 0 && (HAL_GetTick() - ts) < 150u) {}
-    HAL_Delay(20u);
+    while (can_rx_flag == 0 && (HAL_GetTick() - ts) < 10u) {}
+    HAL_Delay(10u);
 
     /* First hold command */
     can_mit_control_set(cid, 0.0f, motors_rt[idx].hold_pos, 0.0f,
@@ -203,17 +208,19 @@ HAL_StatusTypeDef motor_runtime_goto_zero(uint8_t idx, uint16_t cmd_seq)
 
     uint8_t cid = motor_configs[idx].can_id;
 
+    /* Set MIT mode — same settle strategy as motor_runtime_arm */
     uint32_t ts = HAL_GetTick();
     can_rx_flag = 0;
     can_change_motor_mode(cid, CAN_MASTER_ID, MIT_MODE);
-    while (can_rx_flag == 0 && (HAL_GetTick() - ts) < 100u) {}
-    HAL_Delay(20u);
+    while (can_rx_flag == 0 && (HAL_GetTick() - ts) < 10u) {}
+    HAL_Delay(10u);
 
+    /* Enable */
     ts = HAL_GetTick();
     can_rx_flag = 0;
     can_enable_motor(cid, CAN_MASTER_ID);
-    while (can_rx_flag == 0 && (HAL_GetTick() - ts) < 150u) {}
-    HAL_Delay(20u);
+    while (can_rx_flag == 0 && (HAL_GetTick() - ts) < 10u) {}
+    HAL_Delay(10u);
 
     /* Initialise waypoint at current position so the rate-limited ramp starts correctly */
     const motor_t *mz = get_motor_by_id(cid);

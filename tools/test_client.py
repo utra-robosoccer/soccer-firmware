@@ -5,17 +5,24 @@ test_client.py — framed-protocol test client for robosoccer firmware.
 Usage:  python3 test_client.py [PORT]
         PORT defaults to /dev/ttyACM0
 
+Select-then-act: pick a motor with a digit, then act on it with a letter.
+
 Keys:
-  1/2   ARM_HOLD  motor 1/2
-  3/4   GOTO_ZERO motor 1/2
-  5/6   SINE toggle motor 1/2  (±30° at 0.3 Hz via MIT_CMD — arm first)
-  d     DISABLE all motors (also stops active sines)
+  1..N  SELECT active motor (N = configured motor count)
+  a     ARM_HOLD   active motor
+  z     GOTO_ZERO  active motor  (crawl to zero, then hold)
+  s     SINE       active motor  (toggle ±30° at 0.3 Hz via MIT_CMD — arm first)
+  A     ARM_HOLD   ALL motors
+  Z     GOTO_ZERO  ALL motors
+  S     SINE       ALL motors    (starts sine on every motor — arm first)
+  D     DISABLE    ALL motors    (also stops all sines)
   p     PING
-  q     QUIT
+  q     QUIT       (disable all, then exit)
   ?     this help
 """
 
 import math
+import os
 import select
 import struct
 import sys
@@ -25,6 +32,16 @@ import time
 import tty
 
 import serial
+
+# Motor table generated from configs/slave0.yaml (single source of truth).
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+try:
+    from motor_config_gen import (
+        N_MOTORS, MOTORS, MOTOR_DEFAULT_KP, MOTOR_DEFAULT_KD,
+    )
+except ImportError:
+    sys.exit("motor_config_gen.py not found — run:\n"
+             "    python3 scripts/gen_motor_config.py configs/slave0.yaml")
 
 # ═══════════════════════════════════════════════════════════════════
 #  Protocol constants  (mirror firmware/common/include/protocol.h)
@@ -93,16 +110,21 @@ assert struct.calcsize(FMT_CONTROL_RESP)  == 6,   "ControlResp"
 assert struct.calcsize(FMT_MOTOR_CMD)     == 21,  "MotorCmd"
 
 # ── Python-side sine parameters ───────────────────────────────────────────────
-SINE_AMP   = 0.5236             # 30° in rad
-SINE_FREQ  = 0.3                # Hz
+SINE_AMP   = math.pi / 2.0      # 90° in rad
+SINE_FREQ  = 0.5                # Hz
 SINE_OMEGA = 2.0 * math.pi * SINE_FREQ
 
-# Gains matching motor_config.h defaults
-MOTOR_DEFAULT_KP = [15.0, 15.0]
-MOTOR_DEFAULT_KD = [1.0,  1.0]
+# MOTOR_DEFAULT_KP / MOTOR_DEFAULT_KD come from motor_config_gen (per motor).
 
 # Last known motor positions, updated from incoming MOTOR_STATE frames
-_motor_pos = [0.0, 0.0]
+_motor_pos = [0.0] * N_MOTORS
+
+def _motor_label(idx: int) -> str:
+    """Human-readable description of a motor index, e.g. 'id=1 (CAN 1, RS02)'."""
+    if 0 <= idx < len(MOTORS):
+        m = MOTORS[idx]
+        return f"id={idx + 1} (CAN {m['can_id']}, {m['model']})"
+    return f"id={idx + 1}"
 
 # ═══════════════════════════════════════════════════════════════════
 #  CRC16-CCITT  (poly=0x1021, init=0xFFFF — must match firmware)
@@ -298,24 +320,25 @@ def _sine_thread(idx: int, ser_ref, ser_lock: threading.Lock,
                 ser_ref.write(frame)
             except serial.SerialException:
                 break
-        time.sleep(0.05)  # 20 Hz
+        time.sleep(0.01)  # 100 Hz
 
 # ═══════════════════════════════════════════════════════════════════
 #  Main loop
 # ═══════════════════════════════════════════════════════════════════
 
-HELP = """\
-  1   ARM_HOLD   motor id=1  (motor_idx=0, CAN 2)
-  2   ARM_HOLD   motor id=2  (motor_idx=1, CAN 1)
-  3   GOTO_ZERO  motor id=1  — crawl to zero, then hold
-  4   GOTO_ZERO  motor id=2  — crawl to zero, then hold
-  5   SINE       motor id=1  — toggle ±30° @ 0.3 Hz  (arm first)
-  6   SINE       motor id=2  — toggle ±30° @ 0.3 Hz  (arm first)
-  d   DISABLE    all motors  (also stops active sines)
-  p   PING       check link
-  q   QUIT       disable all then exit
-  ?   this help
-"""
+def _build_help() -> str:
+    lines = [f"  1..{N_MOTORS}  SELECT active motor:"]
+    for m in MOTORS:
+        lines.append(f"          {m['idx'] + 1} = {_motor_label(m['idx'])}")
+    lines += [
+        "  a   ARM_HOLD   active        z   GOTO_ZERO  active",
+        "  s   SINE       active (toggle ±90° @ 0.5 Hz via MIT — arm first)",
+        "  A   ARM_HOLD   ALL    Z   GOTO_ZERO ALL    S   SINE ALL    D   DISABLE ALL",
+        "  p   PING       check link    q   QUIT (disable all)    ?   this help",
+    ]
+    return "\n".join(lines) + "\n"
+
+HELP = _build_help()
 
 def main() -> None:
     port = sys.argv[1] if len(sys.argv) > 1 else "/dev/ttyACM0"
@@ -331,9 +354,10 @@ def main() -> None:
     rx_buf: bytearray = bytearray()
 
     ser_lock     = threading.Lock()
-    sine_stop    = [threading.Event(), threading.Event()]
-    sine_active  = [False, False]
-    sine_threads = [None, None]
+    sine_stop    = [threading.Event() for _ in range(N_MOTORS)]
+    sine_active  = [False] * N_MOTORS
+    sine_threads = [None] * N_MOTORS
+    active       = 0  # currently selected motor index
 
     print("─" * 60)
     print(f"  soccer-firmware test client  |  {port}")
@@ -351,6 +375,36 @@ def main() -> None:
     def _ser_write(data: bytes) -> None:
         with ser_lock:
             ser.write(data)
+
+    def _send_ctrl(idx: int, cmd: int, name: str) -> None:
+        payload = struct.pack(FMT_CONTROL_REQ, idx, cmd, 0)
+        _ser_write(encode_frame(MSG_CONTROL_REQ, NODE_JETSON, NODE_MASTER, payload))
+        print(f"[{_t()}] → CONTROL_REQ {name:<9} {_motor_label(idx)} seq={(_seq-1)&0xFFFF}")
+        sys.stdout.flush()
+
+    def _toggle_sine(idx: int) -> None:
+        if sine_active[idx]:
+            _stop_sine(idx)
+            print(f"[{_t()}] → SINE {_motor_label(idx)} STOPPED")
+        else:
+            center = _motor_pos[idx]
+            sine_stop[idx].clear()
+            sine_active[idx] = True
+            th = threading.Thread(
+                target=_sine_thread,
+                args=(idx, ser, ser_lock, sine_stop[idx], center),
+                daemon=True,
+            )
+            sine_threads[idx] = th
+            th.start()
+            print(f"[{_t()}] → SINE {_motor_label(idx)} STARTED  center={center:+.3f} rad")
+        sys.stdout.flush()
+
+    def _disable_all() -> None:
+        for i in range(N_MOTORS):
+            _stop_sine(i)
+        for i in range(N_MOTORS):
+            _send_ctrl(i, CTRL_DISABLE, "DISABLE")
 
     try:
         tty.setcbreak(fd_stdin)
@@ -387,46 +441,36 @@ def main() -> None:
                 except OSError:
                     break
 
-                if ch in ("1", "2"):
-                    motor_idx = int(ch) - 1
-                    payload = struct.pack(FMT_CONTROL_REQ, motor_idx, CTRL_ARM_HOLD, 0)
-                    _ser_write(encode_frame(MSG_CONTROL_REQ, NODE_JETSON, NODE_MASTER, payload))
-                    print(f"[{_t()}] → CONTROL_REQ ARM_HOLD   id={ch} (idx={motor_idx}) seq={(_seq-1)&0xFFFF}")
+                if ch.isdigit() and ch != "0" and int(ch) <= N_MOTORS:
+                    active = int(ch) - 1
+                    print(f"[{_t()}] ▸ selected {_motor_label(active)}")
                     sys.stdout.flush()
 
-                elif ch in ("3", "4"):
-                    motor_idx = int(ch) - 3   # '3'→idx 0, '4'→idx 1
-                    payload = struct.pack(FMT_CONTROL_REQ, motor_idx, CTRL_GOTO_ZERO, 0)
-                    _ser_write(encode_frame(MSG_CONTROL_REQ, NODE_JETSON, NODE_MASTER, payload))
-                    print(f"[{_t()}] → CONTROL_REQ GOTO_ZERO  id={motor_idx+1} (idx={motor_idx}) seq={(_seq-1)&0xFFFF}")
-                    sys.stdout.flush()
+                elif ch == "a":
+                    _send_ctrl(active, CTRL_ARM_HOLD, "ARM_HOLD")
 
-                elif ch in ("5", "6"):
-                    idx = int(ch) - 5   # '5'→idx 0, '6'→idx 1
-                    if sine_active[idx]:
-                        _stop_sine(idx)
-                        print(f"[{_t()}] → SINE id={idx+1} STOPPED")
-                    else:
-                        center = _motor_pos[idx]
-                        sine_stop[idx].clear()
-                        sine_active[idx] = True
-                        t = threading.Thread(
-                            target=_sine_thread,
-                            args=(idx, ser, ser_lock, sine_stop[idx], center),
-                            daemon=True,
-                        )
-                        sine_threads[idx] = t
-                        t.start()
-                        print(f"[{_t()}] → SINE id={idx+1} STARTED  center={center:+.3f} rad")
-                    sys.stdout.flush()
+                elif ch == "z":
+                    _send_ctrl(active, CTRL_GOTO_ZERO, "GOTO_ZERO")
 
-                elif ch == "d":
-                    for i in range(2):
-                        _stop_sine(i)
-                    for motor_idx in range(2):
-                        payload = struct.pack(FMT_CONTROL_REQ, motor_idx, CTRL_DISABLE, 0)
-                        _ser_write(encode_frame(MSG_CONTROL_REQ, NODE_JETSON, NODE_MASTER, payload))
-                    print(f"[{_t()}] → CONTROL_REQ DISABLE all")
+                elif ch == "s":
+                    _toggle_sine(active)
+
+                elif ch == "A":
+                    for i in range(N_MOTORS):
+                        _send_ctrl(i, CTRL_ARM_HOLD, "ARM_HOLD")
+
+                elif ch == "Z":
+                    for i in range(N_MOTORS):
+                        _send_ctrl(i, CTRL_GOTO_ZERO, "GOTO_ZERO")
+
+                elif ch == "S":
+                    for i in range(N_MOTORS):
+                        if not sine_active[i]:
+                            _toggle_sine(i)
+
+                elif ch == "D":
+                    _disable_all()
+                    print(f"[{_t()}] → DISABLE all")
                     sys.stdout.flush()
 
                 elif ch == "p":
@@ -437,11 +481,7 @@ def main() -> None:
 
                 elif ch in ("q", "\x03", "\x04"):
                     print(f"\n[{_t()}] Disabling all and exiting…")
-                    for i in range(2):
-                        _stop_sine(i)
-                    for motor_idx in range(2):
-                        payload = struct.pack(FMT_CONTROL_REQ, motor_idx, CTRL_DISABLE, 0)
-                        _ser_write(encode_frame(MSG_CONTROL_REQ, NODE_JETSON, NODE_MASTER, payload))
+                    _disable_all()
                     time.sleep(0.05)
                     break
 
@@ -450,7 +490,7 @@ def main() -> None:
                     sys.stdout.flush()
 
     finally:
-        for i in range(2):
+        for i in range(N_MOTORS):
             _stop_sine(i)
         termios.tcsetattr(fd_stdin, termios.TCSADRAIN, old_term)
         ser.close()

@@ -20,7 +20,7 @@
 #define SPI_CMD_GOTO_ZERO_IDX(idx) (SPI_CMD_GOTO_ZERO | ((uint8_t)(idx) << 4u))
 
 #define NUM_SLV               1
-#define MAX_MOTORS_PER_SLAVE  2
+#define MAX_MOTORS_PER_SLAVE  N_MOTORS
 #define BYTES_PER_MOTOR       5
 #define USB_BYTES_PER_MOTOR  sizeof(motor_cmd_t)
 

@@ -2,9 +2,7 @@
 
 #define PI 3.1415926f
 
-motor_t motors[MAX_MOTOR_COUNT]; //This is the motor chain array
-
-uint8_t motorID_lut[MAX_MOTOR_COUNT] = {2u, 1u};  /* matches motor_configs[] order */
+motor_t motors[MAX_MOTOR_COUNT]; //This is the motor chain array, indexed in motor_configs[] order
 
 // For FIFO Intr Callback function
 volatile uint8_t can_rx_flag = 0;
@@ -32,7 +30,7 @@ uint8_t rx_data[8];
 motor_t* get_motor_by_id(uint8_t id)
 {
     for (int i = 0; i < MAX_MOTOR_COUNT; i++) {
-        if (motorID_lut[i] == id) {
+        if (motor_configs[i].can_id == id) {
             return &motors[i];
         }
     }
@@ -208,7 +206,7 @@ HAL_StatusTypeDef motor_chain_init()
 	uint32_t tickstart;
 
 	for (int i = 0; i < MAX_MOTOR_COUNT; i++){
-		uint8_t target_id = motorID_lut[i];
+		uint8_t target_id = motor_configs[i].can_id;
 		motors[i].id = target_id;
 		can_rx_flag = 0;
 		if (can_get_motor_id(target_id, CAN_MASTER_ID) == HAL_OK) {
@@ -269,7 +267,7 @@ HAL_StatusTypeDef motor_chain_init_dbg(UART_HandleTypeDef *huart)
 {
 	uint32_t tickstart;
 	for (int i = 0; i < MAX_MOTOR_COUNT; i++){
-		uint8_t target_id = motorID_lut[i];
+		uint8_t target_id = motor_configs[i].can_id;
 		motors[i].id = target_id;
 		can_rx_flag = 0;
 		if (can_get_motor_id(target_id, CAN_MASTER_ID) == HAL_OK) {
@@ -336,7 +334,7 @@ HAL_StatusTypeDef motor_chain_go_zeropos ()
 	can_rx_flag = 0;
 
 	for (int i = 0; i < MAX_MOTOR_COUNT; i++){
-		uint8_t target_id = motorID_lut[i];
+		uint8_t target_id = motor_configs[i].can_id;
 		if(motors[i].pos > PI){
 			//This indicates that the motor was at a negative position before we turn off
 			if (can_mit_control_set(target_id, 0, 2.0f*PI, 0.0f, 50.0f, 5.0f) == HAL_OK) {
@@ -414,7 +412,7 @@ HAL_StatusTypeDef motor_chain_go_zeropos_dbg (UART_HandleTypeDef *huart)
 	float direction;
 
 	for (int i = 0; i < MAX_MOTOR_COUNT; i++){
-		uint8_t target_id = motorID_lut[i];
+		uint8_t target_id = motor_configs[i].can_id;
 
 		if(motors[i].pos > 0.05){
 			direction = -1;

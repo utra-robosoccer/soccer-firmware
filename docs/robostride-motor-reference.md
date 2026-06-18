@@ -35,17 +35,25 @@ mode[28:24] | data[23:8] | node_id[7:0]
 | 18 | Tx | Write parameter / change mode | `can_change_motor_mode` |
 
 - Current run modes use register `0x7005`: `0` MIT, `1` position PP, `2` velocity, `3` current, `4` CSP.
-- Current MIT scaling in firmware is common across all motors:
+- MIT scaling is now **per-model**: velocity and torque ranges differ between
+  RS00 and RS02, while position, Kp and Kd are identical across both. Firmware
+  selects the range by motor id via `motor_can_range_by_id()` in the generated
+  `firmware/common/include/motor_config.h` (source: `configs/slave0.yaml`).
+  Values verified from the RobStride manuals' Communication Type 1 tables
+  (`RS00User Manual260428.pdf` p.39, `RS02User Manual260428.pdf` p.41):
 
-| Signal | Range | Bits | Payload location |
-| --- | ---: | ---: | --- |
-| Position | -12.57 to +12.57 rad | 16 | Type 1 bytes 0-1, Type 2 bytes 0-1 |
-| Velocity | -20 to +20 rad/s | 16 | Type 1 bytes 2-3, Type 2 bytes 2-3 |
-| Kp | 0 to 5000 | 16 | Type 1 bytes 4-5 |
-| Kd | 0 to 100 | 16 | Type 1 bytes 6-7 |
-| Torque | -60 to +60 Nm | 16 | Type 1 CAN ID `data`, Type 2 bytes 4-5 |
-| Temperature | raw / 10 C | 16 | Type 2 bytes 6-7 |
+| Signal | RS00 range | RS02 range | Bits | Payload location |
+| --- | ---: | ---: | ---: | --- |
+| Position | -12.57 to +12.57 rad | -12.57 to +12.57 rad | 16 | Type 1 bytes 0-1, Type 2 bytes 0-1 |
+| Velocity | -33 to +33 rad/s | -44 to +44 rad/s | 16 | Type 1 bytes 2-3, Type 2 bytes 2-3 |
+| Kp | 0 to 500 | 0 to 500 | 16 | Type 1 bytes 4-5 |
+| Kd | 0 to 5 | 0 to 5 | 16 | Type 1 bytes 6-7 |
+| Torque | -14 to +14 Nm | -17 to +17 Nm | 16 | Type 1 CAN ID `data`, Type 2 bytes 4-5 |
+| Temperature | raw / 10 C | raw / 10 C | 16 | Type 2 bytes 6-7 |
 
+- The SPI master↔slave telemetry transport encodes pos/vel/tau into 16-bit
+  fields using a single global bound (the widest model: V±44, T±17) so both
+  models round-trip losslessly; this is independent of the per-model CAN scaling.
 - Type 1 MIT payload and Type 2 feedback payload are big-endian 16-bit fields.
 - Type 2 feedback CAN ID `data` field layout:
 
@@ -112,7 +120,7 @@ Shared environmental/electrical ratings from the product spec:
 
 ## Firmware Implications
 
-- `T_MAX = 60 Nm` matches RS03 physical peak torque but exceeds RS00, RS02, RS05, and RS06 peak torque. Add model-aware command limiting before using the same control code across these motors.
-- `V_MAX = 20 rad/s` is below the product no-load speed for RS00, RS02, RS05, and RS06. That may be an intentional MIT control envelope, but it is not the full mechanical speed capability from the product spec.
+- CAN MIT velocity/torque scaling is now selected per-model at encode/decode time via `motor_can_range_by_id()` (RS00 V±33 / T±14, RS02 V±44 / T±17). The global `V_MIN/MAX` and `T_MIN/MAX` macros in `robostride.h` are the RS02 values; they double as the SPI transport bounds and as the fallback when a CAN id is not found in `motor_configs[]`.
+- These MIT ranges are the protocol wire-format envelopes, not the motors' physical peak torque (see Product Motor Characteristics). RS00/RS02 peak torque (14 / 17 Nm) happens to match their MIT torque range, but for RS03/RS05/RS06 you must still clamp controller commands to the model's physical limits.
 - If a bus mixes newer RS02/RS03 hardware, verify CAN termination because some later batches removed the onboard CAN resistor.
 - Mechanical zero behavior is firmware-version sensitive. Prefer CSP or MIT/motion-control zeroing; PP-mode zeroing may be blocked on newer firmware.

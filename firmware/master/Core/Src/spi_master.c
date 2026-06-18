@@ -6,22 +6,30 @@
 static SPI_HandleTypeDef  *master_hspi  = NULL;
 static UART_HandleTypeDef *master_huart = NULL;
 
+/* Loop cadences. Command delivery (SPI poll) runs fast so a 50 Hz Jetson
+ * command stream is sampled well above Nyquist; telemetry/status to the host
+ * are decoupled and emitted slower since the Jetson consumes at 50 Hz. */
+#define MASTER_POLL_PERIOD_MS   5u    /* 200 Hz SPI / command loop */
+#define MASTER_TELE_PERIOD_MS   5u    /* 200 Hz MOTOR_STATE telemetry (== poll: every fresh sample) */
+#define MASTER_STATUS_PERIOD_MS 50u   /* 20 Hz MASTER/SLAVE_STATUS */
+
 /* ── legacy USB-command path (unused, kept per spec) ────────────────────── */
 uint8_t new_usb_packet_rx_flag = 0;
 uint8_t buf_rx_jet2master[NUM_SLV * MAX_MOTORS_PER_SLAVE * USB_BYTES_PER_MOTOR];
 static  uint8_t buf_tx_master2jet[NUM_SLV * MAX_MOTORS_PER_SLAVE * USB_BYTES_PER_MOTOR];
 static  motor_cmd_t motor_cmds[MAX_MOTORS_PER_SLAVE * NUM_SLV];
 static  motor_cmd_t motor_feedbacks[MAX_MOTORS_PER_SLAVE * NUM_SLV];
-static  uint8_t motorID_lut[NUM_SLV][MAX_MOTORS_PER_SLAVE] = { {1, 2} };
+static  uint8_t motorID_lut[NUM_SLV][MAX_MOTORS_PER_SLAVE] = { {1, 2, 3, 4, 5} };
         slv_motor_chain_t slaves[NUM_SLV];
 
 /* ── armed-state tracking ────────────────────────────────────────────────── */
 static uint8_t master_armed           = 0;
-static uint8_t first_arm_packet       = 0;
 static uint8_t send_disarm            = 0;
-static uint8_t arm_motor_idx          = 0;
-static uint8_t first_goto_zero_packet = 0;
-static uint8_t goto_zero_motor_idx    = 0;
+/* Per-motor one-shot command bitmasks — bit i = motor i pending.
+   Each bit is cleared after a successful SPI delivery, one motor per poll tick,
+   so rapid-fire "arm all" / "zero all" from the host doesn't overwrite itself. */
+static uint8_t pending_arm_bits       = 0;
+static uint8_t pending_goto_zero_bits = 0;
 static SpiMitCmd pending_mit[N_MOTORS];
 static uint8_t   mit_pending          = 0;
 
@@ -179,8 +187,10 @@ void MotorMaster_HandleControlReq(const ControlReq *req, uint16_t req_seq)
                 resp.new_state = MOTOR_BOOT;
                 break;
             }
-            arm_motor_idx = req->motor_idx;
-            MotorMaster_SetArmed(1u);
+            if (req->motor_idx < N_MOTORS)
+                pending_arm_bits |= (uint8_t)(1u << req->motor_idx);
+            master_armed = 1u;
+            send_disarm  = 0u;
             resp.result    = CTRL_OK;
             resp.new_state = MOTOR_ARMED_HOLD;
             break;
@@ -195,11 +205,10 @@ void MotorMaster_HandleControlReq(const ControlReq *req, uint16_t req_seq)
                 resp.new_state = MOTOR_BOOT;
                 break;
             }
-            goto_zero_motor_idx    = req->motor_idx;
-            first_goto_zero_packet = 1;
-            master_armed           = 1;   /* keep HOLD flowing for watchdog */
-            first_arm_packet       = 0;
-            send_disarm            = 0;
+            if (req->motor_idx < N_MOTORS)
+                pending_goto_zero_bits |= (uint8_t)(1u << req->motor_idx);
+            master_armed = 1u;   /* keep HOLD flowing for watchdog */
+            send_disarm  = 0u;
             resp.result    = CTRL_OK;
             resp.new_state = MOTOR_ZEROING;
             break;
@@ -232,9 +241,9 @@ void MotorMaster_Init(SPI_HandleTypeDef *hspi, UART_HandleTypeDef *huart)
         slaves[i].slv_id             = (SpiDevId)i;
         slaves[i].slv_motor_cmds     = &motor_cmds[i * MAX_MOTORS_PER_SLAVE];
         slaves[i].slv_motor_feedbacks = &motor_feedbacks[i * MAX_MOTORS_PER_SLAVE];
-        slaves[i].active_motor_count = 2;
+        slaves[i].active_motor_count = MAX_MOTORS_PER_SLAVE;
         slaves[i].motorID_lut        = motorID_lut[i];
-        for (uint8_t j = 0; j < 2u; j++) {
+        for (uint8_t j = 0; j < MAX_MOTORS_PER_SLAVE; j++) {
             slaves[i].slv_motor_cmds[j].motor_id = slaves[i].motorID_lut[j];
             slaves[i].slv_motor_cmds[j].position  = 0.0f;
             slaves[i].slv_motor_cmds[j].speed     = 0.0f;
@@ -256,10 +265,11 @@ void MotorMaster_SetMitCmd(uint8_t idx, float pos, float vel,
 void MotorMaster_SetArmed(uint8_t armed)
 {
     if (armed) {
-        first_arm_packet = 1;
-        send_disarm      = 0;
+        send_disarm = 0;
     } else {
-        send_disarm = 1;
+        send_disarm            = 1;
+        pending_arm_bits       = 0u;
+        pending_goto_zero_bits = 0u;
     }
     master_armed = armed;
 }
@@ -271,37 +281,42 @@ void MotorMaster_FormatTxBuffer(void) {}
 void MotorMaster_ProcessLoop(void)
 {
     static uint32_t next_poll_ms   = 0;
+    static uint32_t next_tele_ms   = 0;
     static uint32_t next_status_ms = 0;
     uint32_t now = HAL_GetTick();
 
     /* Drain USB TX ring buffer */
     usb_tx_pump();
 
-    /* 50 ms SPI poll */
+    /* SPI poll — command delivery at 200 Hz */
     if ((int32_t)(now - next_poll_ms) >= 0) {
-        next_poll_ms += 50u;
+        next_poll_ms += MASTER_POLL_PERIOD_MS;
 
         uint8_t cmd;
         const uint8_t *mit_payload = NULL;
-        uint8_t sent_arm       = 0;
-        uint8_t sent_goto_zero = 0;
+        uint8_t sent_arm_idx       = 0;
+        uint8_t sent_goto_zero_idx = 0;
+        uint8_t sent_arm           = 0;
+        uint8_t sent_goto_zero     = 0;
         if (send_disarm) {
             cmd = SPI_CMD_DISARM; send_disarm = 0;
-        } else if (first_goto_zero_packet) {
-            cmd = SPI_CMD_GOTO_ZERO_IDX(goto_zero_motor_idx);
-            sent_goto_zero = 1;             /* clear only on HAL_OK */
+        } else if (pending_goto_zero_bits) {
+            /* Deliver one GOTO_ZERO per tick (lowest pending motor first) */
+            sent_goto_zero_idx = (uint8_t)__builtin_ctz(pending_goto_zero_bits);
+            cmd = SPI_CMD_GOTO_ZERO_IDX(sent_goto_zero_idx);
+            sent_goto_zero = 1;             /* clear bit only on HAL_OK */
+        } else if (pending_arm_bits) {
+            /* Deliver one ARM per tick */
+            sent_arm_idx = (uint8_t)__builtin_ctz(pending_arm_bits);
+            cmd = SPI_CMD_ARM_IDX(sent_arm_idx);
+            sent_arm = 1;                   /* clear bit only on HAL_OK */
         } else if (mit_pending) {
             cmd = SPI_CMD_MIT;
             mit_payload = (const uint8_t *)pending_mit;
             mit_pending = 0u;
             /* valid flags cleared AFTER exchange so memcpy in spi_exchange sees valid=1 */
         } else if (master_armed) {
-            if (first_arm_packet) {
-                cmd = SPI_CMD_ARM_IDX(arm_motor_idx);
-                sent_arm = 1;               /* clear only on HAL_OK */
-            } else {
-                cmd = SPI_CMD_HOLD;
-            }
+            cmd = SPI_CMD_HOLD;
         } else {
             cmd = SPI_CMD_NOP;
         }
@@ -314,22 +329,40 @@ void MotorMaster_ProcessLoop(void)
         }
 
         if (st == HAL_OK) {
-            /* Confirm one-shot packets only after successful delivery */
-            if (sent_arm)       first_arm_packet       = 0;
-            if (sent_goto_zero) first_goto_zero_packet = 0;
+            /* Confirm one-shot bits against telemetry, not just SPI delivery.
+               The slave may be blocked in arm/goto_zero init (~40 ms) while the
+               master has already moved on to HOLD, so the DMA buffer gets
+               overwritten before the slave processes the command.  Keep the bit
+               set and retry every tick until the state change is confirmed. */
+            if (sent_arm) {
+                if (tele[sent_arm_idx].state == MOTOR_ARMED_HOLD)
+                    pending_arm_bits &= ~(uint8_t)(1u << sent_arm_idx);
+                /* else IDLE/other: slave was busy — retry next tick */
+            }
+            if (sent_goto_zero) {
+                uint8_t s = tele[sent_goto_zero_idx].state;
+                if (s == MOTOR_ZEROING || s == MOTOR_ARMED_HOLD)
+                    pending_goto_zero_bits &= ~(uint8_t)(1u << sent_goto_zero_idx);
+                /* else IDLE: slave was busy — retry next tick */
+            }
             slave_alive        = 1u;
             slave_motors_alive = alive;
             memcpy(latest_tele, tele, sizeof(tele));
-
-            for (uint8_t i = 0; i < N_MOTORS; i++) {
-                emit_motor_state(i, now);
-            }
         }
     }
 
-    /* 20 Hz status emit */
+    /* Telemetry emit (MOTOR_STATE) at 100 Hz, decoupled from the poll so the
+     * host sees fresh latest_tele without paying for a 200 Hz frame rate. */
+    if ((int32_t)(now - next_tele_ms) >= 0) {
+        next_tele_ms += MASTER_TELE_PERIOD_MS;
+        for (uint8_t i = 0; i < N_MOTORS; i++) {
+            emit_motor_state(i, now);
+        }
+    }
+
+    /* Status emit at 20 Hz */
     if ((int32_t)(now - next_status_ms) >= 0) {
-        next_status_ms += 50u;
+        next_status_ms += MASTER_STATUS_PERIOD_MS;
         emit_master_status(now);
         emit_slave_status(now);
     }
