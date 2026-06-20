@@ -11,7 +11,8 @@ Keys:
   1..N  SELECT active motor (N = configured motor count)
   a     ARM_HOLD   active motor
   z     GOTO_ZERO  active motor  (crawl to zero, then hold)
-  s     SINE       active motor  (toggle ±30° at 0.3 Hz via MIT_CMD — arm first)
+  s     SINE       active motor  (toggle a sine sized to the motor's soft limits
+                                  @ 0.25 Hz via MIT_CMD — arm first; slave clamps)
   A     ARM_HOLD   ALL motors
   Z     GOTO_ZERO  ALL motors
   S     SINE       ALL motors    (starts sine on every motor — arm first)
@@ -38,6 +39,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 try:
     from motor_config_gen import (
         N_MOTORS, MOTORS, MOTOR_DEFAULT_KP, MOTOR_DEFAULT_KD,
+        MOTOR_SOFT_MIN, MOTOR_SOFT_MAX,
     )
 except ImportError:
     sys.exit("motor_config_gen.py not found — run:\n"
@@ -110,9 +112,14 @@ assert struct.calcsize(FMT_CONTROL_RESP)  == 6,   "ControlResp"
 assert struct.calcsize(FMT_MOTOR_CMD)     == 21,  "MotorCmd"
 
 # ── Python-side sine parameters ───────────────────────────────────────────────
-SINE_AMP   = math.pi / 2.0      # 90° in rad
-SINE_FREQ  = 0.5                # Hz
-SINE_OMEGA = 2.0 * math.pi * SINE_FREQ
+# The sweep is sized PER MOTOR to its soft limits: amplitude = OVERSHOOT × the
+# soft half-range, centred on the limit midpoint. This gently reaches and holds
+# each limit (the slave still enforces the clamp) instead of slamming a fixed
+# ±90° command through a much smaller clamped range. Lower frequency keeps the
+# mid-stroke velocity gentle so the motion is smooth.
+SINE_FREQ      = 0.25           # Hz
+SINE_OMEGA     = 2.0 * math.pi * SINE_FREQ
+SINE_OVERSHOOT = 1.2            # sweep amplitude as a multiple of the soft half-range
 
 # MOTOR_DEFAULT_KP / MOTOR_DEFAULT_KD come from motor_config_gen (per motor).
 
@@ -305,14 +312,24 @@ def print_frame(msg_type: int, seq: int, payload: bytes) -> None:
 
 def _sine_thread(idx: int, ser_ref, ser_lock: threading.Lock,
                  stop_event: threading.Event, center: float) -> None:
-    """Sends MIT motor commands at 20 Hz tracing a ±30° sine wave."""
+    """Sends MIT motor commands at 100 Hz tracing a sine sized to this motor's
+    soft limits: centred on the limit midpoint with amplitude SINE_OVERSHOOT ×
+    the soft half-range. It overshoots the limit slightly so the slave's clamp
+    still engages (the motor reaches and holds the limit), but at a low
+    mid-stroke velocity so the motion is smooth rather than slamming.
+
+    The `center` argument is accepted for call-compatibility but ignored; the
+    sweep is always centred on the soft-limit midpoint."""
     kp = MOTOR_DEFAULT_KP[idx]
     kd = MOTOR_DEFAULT_KD[idx]
+    lo, hi   = MOTOR_SOFT_MIN[idx], MOTOR_SOFT_MAX[idx]
+    mid      = 0.5 * (lo + hi)
+    amp      = SINE_OVERSHOOT * 0.5 * (hi - lo)
     t0 = time.monotonic()
     while not stop_event.is_set():
         t   = time.monotonic() - t0
-        pos = center + SINE_AMP * math.sin(SINE_OMEGA * t)
-        vel = SINE_AMP * SINE_OMEGA * math.cos(SINE_OMEGA * t)
+        pos = mid + amp * math.sin(SINE_OMEGA * t)
+        vel =       amp * SINE_OMEGA * math.cos(SINE_OMEGA * t)
         payload = struct.pack(FMT_MOTOR_CMD, idx, pos, vel, kp, kd, 0.0)
         frame   = encode_frame(MSG_MOTOR_CMD, NODE_JETSON, NODE_MASTER, payload)
         with ser_lock:
@@ -332,7 +349,7 @@ def _build_help() -> str:
         lines.append(f"          {m['idx'] + 1} = {_motor_label(m['idx'])}")
     lines += [
         "  a   ARM_HOLD   active        z   GOTO_ZERO  active",
-        "  s   SINE       active (toggle ±90° @ 0.5 Hz via MIT — arm first)",
+        "  s   SINE       active (sine sized to soft limits @ 0.25 Hz via MIT — arm first; slave clamps)",
         "  A   ARM_HOLD   ALL    Z   GOTO_ZERO ALL    S   SINE ALL    D   DISABLE ALL",
         "  p   PING       check link    q   QUIT (disable all)    ?   this help",
     ]
@@ -387,17 +404,20 @@ def main() -> None:
             _stop_sine(idx)
             print(f"[{_t()}] → SINE {_motor_label(idx)} STOPPED")
         else:
-            center = _motor_pos[idx]
             sine_stop[idx].clear()
             sine_active[idx] = True
             th = threading.Thread(
                 target=_sine_thread,
-                args=(idx, ser, ser_lock, sine_stop[idx], center),
+                args=(idx, ser, ser_lock, sine_stop[idx], _motor_pos[idx]),
                 daemon=True,
             )
             sine_threads[idx] = th
             th.start()
-            print(f"[{_t()}] → SINE {_motor_label(idx)} STARTED  center={center:+.3f} rad")
+            lo, hi = MOTOR_SOFT_MIN[idx], MOTOR_SOFT_MAX[idx]
+            amp = SINE_OVERSHOOT * 0.5 * (hi - lo)
+            print(f"[{_t()}] → SINE {_motor_label(idx)} STARTED  "
+                  f"mid={0.5*(lo+hi):+.3f}  amp=±{amp:.3f} rad @ {SINE_FREQ} Hz "
+                  f"(soft limits [{lo:+.3f}, {hi:+.3f}])")
         sys.stdout.flush()
 
     def _disable_all() -> None:

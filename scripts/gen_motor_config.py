@@ -147,7 +147,7 @@ typedef struct {{
     float       soft_min;    /* rad */
     float       soft_max;    /* rad */
     float       max_vel;     /* rad/s */
-    float       max_tau;     /* Nm */
+    float       max_tau;     /* Nm — torque trip: |tau| above this idles motor */
     float       default_kp;
     float       default_kd;
 }} MotorConfig;
@@ -186,6 +186,8 @@ def gen_python(cfg, src_name):
             "    dict("
             f"idx={m['idx']}, can_id={m['can_id']}, model={m['model']!r}, "
             f"joint_name={m['joint_name']!r}, "
+            f"soft_min={float(m['soft_min'])!r}, soft_max={float(m['soft_max'])!r}, "
+            f"max_vel={float(m['max_vel'])!r}, max_tau={float(m['max_tau'])!r}, "
             f"default_kp={float(m['default_kp'])!r}, default_kd={float(m['default_kd'])!r})"
         )
     motor_block = ",\n".join(motor_lines)
@@ -219,6 +221,10 @@ MODEL_RANGES = {{
 
 MOTOR_DEFAULT_KP = [m["default_kp"] for m in MOTORS]
 MOTOR_DEFAULT_KD = [m["default_kd"] for m in MOTORS]
+
+# Per-motor soft angle limits (rad). Commands are clamped to [soft_min, soft_max].
+MOTOR_SOFT_MIN = [m["soft_min"] for m in MOTORS]
+MOTOR_SOFT_MAX = [m["soft_max"] for m in MOTORS]
 '''
 
 

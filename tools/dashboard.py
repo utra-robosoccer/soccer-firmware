@@ -54,11 +54,33 @@ _snap   = [_MotorSnap() for _ in range(N_MOTORS)]
 _link   = {"rx": 0, "err": 0, "alive": 0, "uptime_ms": 0}
 _events: deque = deque(maxlen=6)
 
+# Sine-streaming state, shared with the RX thread (populated in main()). Module
+# scope so _ingest() can auto-stop a motor's sine when the slave drops it out of
+# its armed state (e.g. the torque trip idles it).
+sine_active: list = []
+sine_stop:   list = []
+
+# Slave lifecycle states that count as "armed" (actively driven). Mirrors
+# protocol.h: ARMED_HOLD=3, ARMED_MIT=7.
+_ARMED_STATES = (3, 7)
+
 
 def _log(msg: str) -> None:
     ts = time.strftime("%H:%M:%S")
     with _lock:
         _events.appendleft(f"[dim]{ts}[/dim]  {msg}")
+
+
+def _auto_stop_sine(idx: int) -> None:
+    """Stop a motor's host-side sine when the motor leaves its armed state.
+
+    The slave's torque trip idles a motor on overload; without this the sine
+    thread keeps streaming, the ~ indicator stays lit, and a subsequent
+    GOTO_ZERO gets overrun by the resumed sine the moment the motor re-arms."""
+    if idx < len(sine_active) and sine_active[idx]:
+        sine_stop[idx].set()
+        sine_active[idx] = False
+        _log(f"SINE motor {idx+1} [yellow]auto-stopped[/yellow] (motor left armed state)")
 
 
 # ── state colour map ──────────────────────────────────────────────────────────
@@ -190,6 +212,7 @@ def _ingest(mt: int, pl: bytes) -> None:
             i = d["motor_idx"]
             with _lock:
                 s = _snap[i]
+                prev_state = s.state
                 s.state   = d["state"]
                 s.pos     = d["pos"]
                 s.vel     = d["vel"]
@@ -197,6 +220,10 @@ def _ingest(mt: int, pl: bytes) -> None:
                 s.temp    = d["temp"]
                 s.fault   = d["fault_flags"]
                 s.updated = time.monotonic()
+            # Motor just dropped out of its armed state (e.g. slave torque trip
+            # → IDLE) while a sine was running: stop the host-side sine.
+            if prev_state in _ARMED_STATES and d["state"] not in _ARMED_STATES:
+                _auto_stop_sine(i)
 
     elif mt == tc.MSG_MASTER_STATUS:
         d = tc.parse_master_status(pl)
@@ -228,9 +255,10 @@ def main() -> None:
         sys.exit(f"Cannot open {port}: {e}")
 
     ser_lock     = threading.Lock()
-    sine_stop    = [threading.Event() for _ in range(N_MOTORS)]
-    sine_active  = [False] * N_MOTORS
-    sine_threads = [None] * N_MOTORS
+    # Populate the module-level sine state in place so the RX thread shares it.
+    sine_stop[:]   = [threading.Event() for _ in range(N_MOTORS)]
+    sine_active[:] = [False] * N_MOTORS
+    sine_threads   = [None] * N_MOTORS
     active       = [0]          # list so input thread can mutate via closure
     quit_event   = threading.Event()
 

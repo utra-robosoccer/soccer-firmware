@@ -278,11 +278,9 @@ int main(void)
             SpiMitCmd mc;
             memcpy(&mc, motor_update_buf + 1 + _i * (uint8_t)sizeof(SpiMitCmd),
                    sizeof(SpiMitCmd));
-            if (mc.valid && (motors_rt[_i].state == MOTOR_ARMED_HOLD ||
-                             motors_rt[_i].state == MOTOR_ARMED_MIT)) {
-              motors_rt[_i].hold_pos = mc.pos;
-              motors_rt[_i].hold_vel = mc.vel;
-              motors_rt[_i].state    = MOTOR_ARMED_MIT;
+            if (mc.valid) {
+              /* Clamp to the motor's soft angle limits on the slave side. */
+              motor_runtime_apply_mit(_i, mc.pos, mc.vel);
             }
             /* Master is alive — always refresh watchdog regardless of valid flag */
             motor_runtime_refresh_watchdog(_i);

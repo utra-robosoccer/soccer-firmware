@@ -43,49 +43,49 @@ motors:
     can_id: 1
     model: RS02
     joint_name: motor0
-    soft_min: -6.28
-    soft_max:  6.28
+    soft_min: -0.79   # ~45 deg
+    soft_max:  0.79
     max_vel:   10.0
-    max_tau:   10.0
+    max_tau:   0.8    # Nm — torque trip: exceed and the motor drops to IDLE
     default_kp: 15.0
     default_kd:  1.0
   - idx: 1
     can_id: 2
     model: RS02
     joint_name: motor1
-    soft_min: -6.28
-    soft_max:  6.28
+    soft_min: -1.05   # ~60 deg
+    soft_max:  1.05
     max_vel:   10.0
-    max_tau:   10.0
+    max_tau:   0.8    # Nm — torque trip: exceed and the motor drops to IDLE
     default_kp: 15.0
     default_kd:  1.0
   - idx: 2
     can_id: 3
     model: RS00
     joint_name: motor2
-    soft_min: -6.28
-    soft_max:  6.28
+    soft_min: -1.31   # ~75 deg
+    soft_max:  1.31
     max_vel:   10.0
-    max_tau:   10.0
+    max_tau:   0.8    # Nm — torque trip: exceed and the motor drops to IDLE
     default_kp: 15.0
     default_kd:  1.0
   - idx: 3
     can_id: 4
     model: RS00
     joint_name: motor3
-    soft_min: -6.28
-    soft_max:  6.28
+    soft_min: -1.05   # ~60 deg
+    soft_max:  1.05
     max_vel:   10.0
-    max_tau:   10.0
+    max_tau:   0.8    # Nm — torque trip: exceed and the motor drops to IDLE
     default_kp: 15.0
     default_kd:  1.0
   - idx: 4
     can_id: 5
     model: RS00
     joint_name: motor4
-    soft_min: -6.28
-    soft_max:  6.28
+    soft_min: -0.52   # ~30 deg
+    soft_max:  0.52
     max_vel:   10.0
-    max_tau:   10.0
+    max_tau:   0.8    # Nm — torque trip: exceed and the motor drops to IDLE
     default_kp: 15.0
     default_kd:  1.0

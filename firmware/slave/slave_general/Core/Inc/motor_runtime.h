@@ -18,12 +18,16 @@
 typedef struct {
     const MotorConfig *cfg;
     MotorLifecycle     state;
-    float              pos;
+    float              pos;          /* wrapped to [-pi, pi] (home frame) */
     float              vel;
     float              tau;
     float              temp;
-    float              hold_pos;
-    float              hold_vel;    /* velocity feedforward for ARMED_HOLD */
+    float              hold_pos;      /* home-frame setpoint */
+    float              hold_vel;      /* velocity feedforward for ARMED_HOLD */
+    float              pos_offset;    /* raw - wrapped: the multiple of 2*pi the
+                                         motor adopted at power-up. Added back to
+                                         every command so the motor takes the
+                                         short path to a home-frame target. */
     uint16_t           fault_flags;
     uint16_t           last_cmd_seq;
     uint32_t           watchdog_ms;
@@ -49,6 +53,10 @@ HAL_StatusTypeDef motor_runtime_disable(uint8_t idx, uint16_t cmd_seq);
 
 /* Refresh watchdog (called when master sends SPI_CMD_HOLD) */
 void motor_runtime_refresh_watchdog(uint8_t idx);
+
+/* Apply a streamed MIT setpoint while armed, clamping the commanded position
+   to the motor's soft angle limits (soft_min/soft_max). No-op if not armed. */
+void motor_runtime_apply_mit(uint8_t idx, float pos, float vel);
 
 /* Pack telemetry for SPI TX buffer */
 void motor_runtime_pack_tele(SpiMotorTele *out, uint8_t idx);

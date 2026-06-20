@@ -55,7 +55,7 @@ typedef struct {
     float       soft_min;    /* rad */
     float       soft_max;    /* rad */
     float       max_vel;     /* rad/s */
-    float       max_tau;     /* Nm */
+    float       max_tau;     /* Nm — torque trip: |tau| above this idles motor */
     float       default_kp;
     float       default_kd;
 } MotorConfig;
@@ -65,10 +65,10 @@ static const MotorConfig motor_configs[N_MOTORS] = {
         .can_id     = 1u,
         .model      = MOTOR_MODEL_RS02,
         .joint_name = "motor0",
-        .soft_min   = -6.28f,
-        .soft_max   = 6.28f,
+        .soft_min   = -0.79f,
+        .soft_max   = 0.79f,
         .max_vel    = 10.0f,
-        .max_tau    = 10.0f,
+        .max_tau    = 0.8f,
         .default_kp = 15.0f,
         .default_kd = 1.0f,
     },
@@ -76,10 +76,10 @@ static const MotorConfig motor_configs[N_MOTORS] = {
         .can_id     = 2u,
         .model      = MOTOR_MODEL_RS02,
         .joint_name = "motor1",
-        .soft_min   = -6.28f,
-        .soft_max   = 6.28f,
+        .soft_min   = -1.05f,
+        .soft_max   = 1.05f,
         .max_vel    = 10.0f,
-        .max_tau    = 10.0f,
+        .max_tau    = 0.8f,
         .default_kp = 15.0f,
         .default_kd = 1.0f,
     },
@@ -87,10 +87,10 @@ static const MotorConfig motor_configs[N_MOTORS] = {
         .can_id     = 3u,
         .model      = MOTOR_MODEL_RS00,
         .joint_name = "motor2",
-        .soft_min   = -6.28f,
-        .soft_max   = 6.28f,
+        .soft_min   = -1.31f,
+        .soft_max   = 1.31f,
         .max_vel    = 10.0f,
-        .max_tau    = 10.0f,
+        .max_tau    = 0.8f,
         .default_kp = 15.0f,
         .default_kd = 1.0f,
     },
@@ -98,10 +98,10 @@ static const MotorConfig motor_configs[N_MOTORS] = {
         .can_id     = 4u,
         .model      = MOTOR_MODEL_RS00,
         .joint_name = "motor3",
-        .soft_min   = -6.28f,
-        .soft_max   = 6.28f,
+        .soft_min   = -1.05f,
+        .soft_max   = 1.05f,
         .max_vel    = 10.0f,
-        .max_tau    = 10.0f,
+        .max_tau    = 0.8f,
         .default_kp = 15.0f,
         .default_kd = 1.0f,
     },
@@ -109,10 +109,10 @@ static const MotorConfig motor_configs[N_MOTORS] = {
         .can_id     = 5u,
         .model      = MOTOR_MODEL_RS00,
         .joint_name = "motor4",
-        .soft_min   = -6.28f,
-        .soft_max   = 6.28f,
+        .soft_min   = -0.52f,
+        .soft_max   = 0.52f,
         .max_vel    = 10.0f,
-        .max_tau    = 10.0f,
+        .max_tau    = 0.8f,
         .default_kp = 15.0f,
         .default_kd = 1.0f,
     }
