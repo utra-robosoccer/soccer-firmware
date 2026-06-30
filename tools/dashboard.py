@@ -34,7 +34,8 @@ from rich.text import Text
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import test_client as tc
-from motor_config_gen import MOTOR_DEFAULT_KD, MOTOR_DEFAULT_KP, MOTORS, N_MOTORS
+from motor_config_gen import (MOTOR_DEFAULT_KD, MOTOR_DEFAULT_KP, MOTORS, N_MOTORS,
+                              N_SLAVES, SLAVES, SLAVE_MOTOR_COUNTS)
 
 # ── shared state ──────────────────────────────────────────────────────────────
 
@@ -50,8 +51,10 @@ class _MotorSnap:
         self.updated = 0.0
 
 _lock   = threading.Lock()
-_snap   = [_MotorSnap() for _ in range(N_MOTORS)]
+_snap   = [_MotorSnap() for _ in range(N_MOTORS)]   # by global flattened index
 _link   = {"rx": 0, "err": 0, "alive": 0, "uptime_ms": 0}
+_master = {"robot_state": 0, "slave_alive": 0}
+_slaves = [{"motors_alive": 0, "state": 0} for _ in range(N_SLAVES)]
 _events: deque = deque(maxlen=6)
 
 # Sine-streaming state, shared with the RX thread (populated in main()). Module
@@ -104,8 +107,10 @@ def _render(active: int, sine_active: list, port: str) -> Panel:
                   for s in _snap]
         rx     = _link["rx"]
         err    = _link["err"]
-        alive  = _link["alive"]
         uptime = _link["uptime_ms"]
+        robot  = _master["robot_state"]
+        salive = _master["slave_alive"]
+        slaves = [dict(s) for s in _slaves]
         evts   = list(_events)
 
     now = time.monotonic()
@@ -113,7 +118,8 @@ def _render(active: int, sine_active: list, port: str) -> Panel:
     tbl = Table(box=box.SIMPLE_HEAVY, show_header=True,
                 header_style="bold white", expand=True, padding=(0, 1))
     tbl.add_column("",        width=2,  justify="center")   # active marker
-    tbl.add_column("idx",     width=3,  justify="center")
+    tbl.add_column("id",      width=3,  justify="center")
+    tbl.add_column("slv",     width=3,  justify="center")
     tbl.add_column("joint",   width=8)
     tbl.add_column("model",   width=5)
     tbl.add_column("state",   width=11)
@@ -124,49 +130,71 @@ def _render(active: int, sine_active: list, port: str) -> Panel:
     tbl.add_column("~",       width=2,  justify="center")   # sine indicator
     tbl.add_column("fault",   width=6,  justify="center")
 
-    for i, (st, pos, vel, tau, temp, fault, updated) in enumerate(snaps):
-        cfg     = MOTORS[i]
-        sel     = (i == active)
-        stale   = (now - updated) > 0.5 if updated else True
-        vs      = "dim white" if stale else "white"
+    def fv(v):
+        return f"{v:+.4f}" if v == v else "  ---  "
 
-        sname   = tc.MOTOR_STATE_NAMES.get(st, f"?{st}")
-        state_t = Text(sname, style=_STATE_STYLE.get(sname, ""))
+    gi = 0
+    for s_idx, slave in enumerate(SLAVES):
+        if s_idx > 0:
+            tbl.add_section()
+        online = bool(salive & (1 << s_idx))
+        for cfg in slave["motors"]:
+            st, pos, vel, tau, temp, fault, updated = snaps[gi]
+            sel   = (gi == active)
+            stale = (not online) or ((now - updated) > 0.5 if updated else True)
+            vs    = "dim white" if stale else "white"
 
-        def fv(v):
-            return f"{v:+.4f}" if v == v else "  ---  "
+            sname   = tc.MOTOR_STATE_NAMES.get(st, f"?{st}")
+            state_t = (Text("OFFLINE", style="dim red") if not online
+                       else Text(sname, style=_STATE_STYLE.get(sname, "")))
 
-        tbl.add_row(
-            Text("▶", style="bold cyan") if sel else Text(""),
-            Text(str(i + 1), style="bold" if sel else ""),
-            cfg["joint_name"],
-            cfg["model"],
-            state_t,
-            Text(fv(pos),  style=vs),
-            Text(fv(vel),  style=vs),
-            Text(fv(tau),  style=vs),
-            Text(f"{temp:.0f}" if temp == temp else " --", style=vs),
-            Text("◉", style="bold magenta") if sine_active[i] else Text("·", style="dim"),
-            Text("OK",            style="green")    if not fault else
-            Text(f"{fault:04x}", style="bold red"),
-            style="on dark_blue" if sel else "",
-        )
+            tbl.add_row(
+                Text("▶", style="bold cyan") if sel else Text(""),
+                Text(str(gi + 1), style="bold" if sel else ""),
+                Text(f"s{s_idx}", style="cyan" if online else "dim red"),
+                cfg["joint_name"],
+                cfg["model"],
+                state_t,
+                Text(fv(pos),  style=vs),
+                Text(fv(vel),  style=vs),
+                Text(fv(tau),  style=vs),
+                Text(f"{temp:.0f}" if temp == temp else " --", style=vs),
+                Text("◉", style="bold magenta") if sine_active[gi] else Text("·", style="dim"),
+                Text("OK",            style="green")    if not fault else
+                Text(f"{fault:04x}", style="bold red"),
+                style="on dark_blue" if sel else "",
+            )
+            gi += 1
 
     m = MOTORS[active]
     sine_on = [i + 1 for i in range(N_MOTORS) if sine_active[i]]
     sine_info = f"  [magenta]sine: {sine_on}[/magenta]" if sine_on else ""
 
+    # Per-slave summary: ONLINE/OFFLINE + motors alive count.
+    parts = []
+    for s_idx in range(N_SLAVES):
+        online = bool(salive & (1 << s_idx))
+        cnt    = SLAVE_MOTOR_COUNTS[s_idx]
+        nalive = bin(slaves[s_idx]["motors_alive"]).count("1")
+        if online:
+            parts.append(f"[green]slave{s_idx} ONLINE {nalive}/{cnt}[/green]")
+        else:
+            parts.append(f"[dim red]slave{s_idx} OFFLINE[/dim red]")
+    rs_name = tc.ROBOT_STATE_NAMES.get(robot, "?")
+    rs_style = {"READY": "bold green", "DEGRADED": "bold yellow",
+                "INIT": "bold blue"}.get(rs_name, "white")
+
     status = Text.from_markup(
-        f"[bold]active: motor {active+1}[/bold]"
-        f"  {m['joint_name']} · CAN {m['can_id']} · {m['model']}"
-        f"   [dim]rx={rx}  err={err}  alive=0b{alive:05b}  up={uptime//1000}s[/dim]"
-        f"{sine_info}"
+        f"[{rs_style}]robot: {rs_name}[/]   " + "   ".join(parts) +
+        f"   [dim]rx={rx} err={err} up={uptime//1000}s[/dim]{sine_info}\n"
+        f"[bold]active: id {active+1}[/bold]  s{m['slave']}.m{m['idx']} · "
+        f"{m['joint_name']} · CAN {m['can_id']} · {m['model']}"
     )
 
     keys = Text.from_markup(
         "[dim]"
-        "[bold white]1–5[/] select  "
-        "[bold white]a[/] ARM  [bold white]z[/] ZERO  [bold white]s[/] SINE  "
+        f"[bold white]1–{N_MOTORS}[/] select  "
+        "[bold white]a[/] ARM  [bold white]z[/] ZERO  [bold white]s[/] SINE  [bold white]d[/] DISABLE  "
         "│  [bold white]A/Z/S/D[/] all  "
         "[bold white]p[/] PING  [bold white]q[/] QUIT"
         "[/dim]"
@@ -208,8 +236,8 @@ def _serial_rx(ser: serial.Serial, stop: threading.Event) -> None:
 def _ingest(mt: int, pl: bytes) -> None:
     if mt == tc.MSG_MOTOR_STATE:
         d = tc.parse_motor_state(pl)
-        if d and 0 <= d["motor_idx"] < N_MOTORS:
-            i = d["motor_idx"]
+        if d and d.get("gidx") is not None:
+            i = d["gidx"]                        # global flattened index
             with _lock:
                 s = _snap[i]
                 prev_state = s.state
@@ -229,17 +257,25 @@ def _ingest(mt: int, pl: bytes) -> None:
         d = tc.parse_master_status(pl)
         if d:
             with _lock:
-                _link["rx"]        = d["rx_frames"]
-                _link["err"]       = d["link_errors"]
-                _link["alive"]     = d["motors_alive"]
-                _link["uptime_ms"] = d["uptime_ms"]
+                _link["rx"]            = d["rx_frames"]
+                _link["err"]           = d["link_errors"]
+                _link["uptime_ms"]     = d["uptime_ms"]
+                _master["robot_state"] = d["robot_state"]
+                _master["slave_alive"] = d["slave_alive"]
+
+    elif mt == tc.MSG_SLAVE_STATUS:
+        d = tc.parse_slave_status(pl)
+        if d and 0 <= d["slave_id"] < N_SLAVES:
+            with _lock:
+                _slaves[d["slave_id"]]["motors_alive"] = d["motors_alive"]
+                _slaves[d["slave_id"]]["state"]        = d["motor_state"]
 
     elif mt == tc.MSG_CONTROL_RESP:
         d = tc.parse_control_resp(pl)
         if d:
             res = tc.CTRL_RESULT_NAMES.get(d["result"], "?")
             ns  = tc.MOTOR_STATE_NAMES.get(d["new_state"], "?")
-            _log(f"CTRL_RESP  motor {d['motor_idx']+1} → [bold]{ns}[/bold]  [{res}]")
+            _log(f"CTRL_RESP  s{d['slave_id']}.m{d['motor_idx']} → [bold]{ns}[/bold]  [{res}]")
 
     elif mt == tc.MSG_PING:
         _log("[green]PONG[/green]")
@@ -269,9 +305,10 @@ def main() -> None:
             ser.write(data)
 
     def _send_ctrl(idx: int, cmd: int, name: str) -> None:
-        payload = struct.pack(tc.FMT_CONTROL_REQ, idx, cmd, 0)
+        slave_id, local_idx = tc._slave_local(idx)
+        payload = struct.pack(tc.FMT_CONTROL_REQ, slave_id, local_idx, cmd, 0)
         _ser_write(tc.encode_frame(tc.MSG_CONTROL_REQ, tc.NODE_JETSON, tc.NODE_MASTER, payload))
-        _log(f"→ [bold]{name}[/bold]  motor {idx+1}")
+        _log(f"→ [bold]{name}[/bold]  id {idx+1} (s{slave_id}.m{local_idx})")
 
     def _stop_sine(idx: int) -> None:
         if sine_active[idx]:
@@ -326,6 +363,9 @@ def main() -> None:
                 _send_ctrl(active[0], tc.CTRL_GOTO_ZERO, "GOTO_ZERO")
             elif ch == "s":
                 _toggle_sine(active[0])
+            elif ch == "d":
+                _stop_sine(active[0])
+                _send_ctrl(active[0], tc.CTRL_DISABLE, "DISABLE")
 
             elif ch == "A":
                 for i in range(N_MOTORS):

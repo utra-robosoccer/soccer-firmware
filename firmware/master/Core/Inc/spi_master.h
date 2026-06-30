@@ -19,14 +19,18 @@
 #define SPI_CMD_ARM_IDX(idx)       (SPI_CMD_ARM       | ((uint8_t)(idx) << 4u))
 #define SPI_CMD_GOTO_ZERO_IDX(idx) (SPI_CMD_GOTO_ZERO | ((uint8_t)(idx) << 4u))
 
-#define NUM_SLV               1
-#define MAX_MOTORS_PER_SLAVE  N_MOTORS
+/* NUM_SLAVES, MAX_MOTORS_PER_SLAVE come from system_config.h (via proto_common.h). */
+#define NUM_SLV               NUM_SLAVES
 #define BYTES_PER_MOTOR       5
 #define USB_BYTES_PER_MOTOR  sizeof(motor_cmd_t)
 
-/* SPI packet from slave: 1 header byte + N_MOTORS * SpiMotorTele (13 bytes each) */
+/* SPI packet from a slave: 1 alive byte + (that slave's motor count) *
+   SpiMotorTele (13 bytes each). Per-slave sizes differ; buffers are allocated
+   for the widest slave and the per-slave length is computed at runtime from
+   slave_motor_counts[]. */
 #define SPI_TELE_BYTES   13u
-#define SPI_RX_PKT_SIZE  (1u + N_MOTORS * SPI_TELE_BYTES)
+#define SPI_MAX_PKT_SIZE (1u + MAX_MOTORS_PER_SLAVE * SPI_TELE_BYTES)
+#define SPI_PKT_SIZE(n)  (1u + (uint16_t)(n) * SPI_TELE_BYTES)
 
 typedef enum {
     DEV1 = 0,
@@ -71,7 +75,7 @@ void MotorMaster_FormatTxBuffer(void);
 
 void MotorMaster_SetArmed(uint8_t armed);
 void MotorMaster_HandleControlReq(const ControlReq *req, uint16_t req_seq);
-void MotorMaster_SetMitCmd(uint8_t idx, float pos, float vel,
+void MotorMaster_SetMitCmd(uint8_t slave_id, uint8_t idx, float pos, float vel,
                             float kp, float kd, float tau_ff);
 
 extern uint32_t master_link_errors;

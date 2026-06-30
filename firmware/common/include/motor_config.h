@@ -1,6 +1,6 @@
 /* AUTO-GENERATED — DO NOT EDIT.
- * Source: configs/slave0.yaml
- * Regenerate: python3 scripts/gen_motor_config.py configs/slave0.yaml
+ * Source: configs/slave1.yaml
+ * Regenerate: python3 scripts/gen_motor_config.py --slave configs/slave1.yaml
  */
 #ifndef MOTOR_CONFIG_H
 #define MOTOR_CONFIG_H
@@ -11,7 +11,7 @@
 extern "C" {
 #endif
 
-#define N_MOTORS 5u
+#define N_MOTORS 2u
 
 /* SPI transport encoding bounds shared by slave (pack) and master (unpack).
  * Set to the widest model so every motor's value fits losslessly. */
@@ -62,9 +62,9 @@ typedef struct {
 
 static const MotorConfig motor_configs[N_MOTORS] = {
     {
-        .can_id     = 1u,
+        .can_id     = 6u,
         .model      = MOTOR_MODEL_RS02,
-        .joint_name = "motor0",
+        .joint_name = "motor6",
         .soft_min   = -0.79f,
         .soft_max   = 0.79f,
         .max_vel    = 10.0f,
@@ -73,44 +73,11 @@ static const MotorConfig motor_configs[N_MOTORS] = {
         .default_kd = 1.0f,
     },
     {
-        .can_id     = 2u,
-        .model      = MOTOR_MODEL_RS02,
-        .joint_name = "motor1",
-        .soft_min   = -1.05f,
-        .soft_max   = 1.05f,
-        .max_vel    = 10.0f,
-        .max_tau    = 0.8f,
-        .default_kp = 15.0f,
-        .default_kd = 1.0f,
-    },
-    {
-        .can_id     = 3u,
+        .can_id     = 7u,
         .model      = MOTOR_MODEL_RS00,
-        .joint_name = "motor2",
-        .soft_min   = -1.31f,
-        .soft_max   = 1.31f,
-        .max_vel    = 10.0f,
-        .max_tau    = 0.8f,
-        .default_kp = 15.0f,
-        .default_kd = 1.0f,
-    },
-    {
-        .can_id     = 4u,
-        .model      = MOTOR_MODEL_RS00,
-        .joint_name = "motor3",
-        .soft_min   = -1.05f,
-        .soft_max   = 1.05f,
-        .max_vel    = 10.0f,
-        .max_tau    = 0.8f,
-        .default_kp = 15.0f,
-        .default_kd = 1.0f,
-    },
-    {
-        .can_id     = 5u,
-        .model      = MOTOR_MODEL_RS00,
-        .joint_name = "motor4",
-        .soft_min   = -0.52f,
-        .soft_max   = 0.52f,
+        .joint_name = "motor7",
+        .soft_min   = -0.79f,
+        .soft_max   = 0.79f,
         .max_vel    = 10.0f,
         .max_tau    = 0.8f,
         .default_kp = 15.0f,

@@ -320,7 +320,7 @@ static int8_t CDC_Receive_FS(uint8_t* Buf, uint32_t *Len)
               if (hdr.len >= sizeof(MotorCmd)) {
                   MotorCmd mc;
                   memcpy(&mc, payload, sizeof(mc));
-                  MotorMaster_SetMitCmd(mc.motor_idx, mc.pos, mc.vel,
+                  MotorMaster_SetMitCmd(mc.slave_id, mc.motor_idx, mc.pos, mc.vel,
                                         mc.kp, mc.kd, mc.tau_ff);
               } else {
                   master_link_errors++;

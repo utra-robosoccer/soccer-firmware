@@ -46,14 +46,23 @@ if [ $# -eq 0 ] || [ "$1" = "--list" ] || [ "$1" = "-l" ]; then
 fi
 
 CLEAN=0
-if [ "$1" = "--clean" ] || [ "$1" = "-c" ]; then
-    CLEAN=1
-    shift
-fi
+CONFIG_SLAVE=""
+# Parse leading options in any order: --clean / -c, --config <slaveN>
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --clean|-c) CLEAN=1; shift ;;
+        --config)
+            shift
+            CONFIG_SLAVE="$1"
+            [ -n "$CONFIG_SLAVE" ] || { printf "error: --config needs a slave name (e.g. slave1)\n" >&2; exit 1; }
+            shift ;;
+        *) break ;;
+    esac
+done
 
 if [ $# -eq 0 ]; then
     printf "error: no project path given\n" >&2
-    printf "Usage: %s [--clean] <project-path> [Debug|Release]\n" "$0" >&2
+    printf "Usage: %s [--clean] [--config <slaveN>] <project-path> [Debug|Release]\n" "$0" >&2
     exit 1
 fi
 
@@ -101,6 +110,19 @@ fi
 
 printf "CubeIDE: %s\n" "$CUBEIDE"
 printf "Project: %s  config: %s\n" "$PROJ_NAME" "$BUILD_CONFIG"
+
+# ── optional per-slave config regeneration ───────────────────────────────────
+# --config <slaveN> regenerates the slave's motor_config.h from configs/<slaveN>.yaml
+# so one shared source tree builds a per-slave binary.
+if [ -n "$CONFIG_SLAVE" ]; then
+    CONFIG_YAML="$REPO_ROOT/configs/${CONFIG_SLAVE}.yaml"
+    if [ ! -f "$CONFIG_YAML" ]; then
+        printf "error: config '%s' not found (looked for %s)\n" "$CONFIG_SLAVE" "$CONFIG_YAML" >&2
+        exit 1
+    fi
+    printf "Config: regenerating motor_config.h from configs/%s.yaml\n" "$CONFIG_SLAVE"
+    python3 "$REPO_ROOT/scripts/gen_motor_config.py" --slave "$CONFIG_YAML" || exit 1
+fi
 
 # ── run headless build ───────────────────────────────────────────────────────
 

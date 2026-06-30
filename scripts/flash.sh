@@ -30,6 +30,17 @@ if [ $# -eq 0 ] || [ "$1" = "--list" ] || [ "$1" = "-l" ]; then
     exit 0
 fi
 
+# Optional --config <slaveN>: regenerate that slave's motor_config.h and rebuild
+# (via build.sh) before flashing, so one shared source tree flashes a per-slave
+# binary. Without it, the already-built Debug/*.elf is flashed as-is.
+CONFIG_SLAVE=""
+if [ "$1" = "--config" ]; then
+    shift
+    CONFIG_SLAVE="$1"
+    [ -n "$CONFIG_SLAVE" ] || { printf "error: --config needs a slave name (e.g. slave1)\n" >&2; exit 1; }
+    shift
+fi
+
 PROJECT_ARG="$1"
 
 # Resolve project directory (absolute or relative to repo root)
@@ -48,6 +59,12 @@ if [ ! -f "$PROJ_FILE" ]; then
     printf "error: no .project file in '%s' — not a CubeIDE project\n" "$PROJECT_DIR" >&2
     printf "Run '%s --list' to see available projects.\n" "$0" >&2
     exit 1
+fi
+
+# ── optional: regenerate per-slave config + rebuild before flashing ───────────
+if [ -n "$CONFIG_SLAVE" ]; then
+    printf "Config: %s — regenerating + rebuilding before flash\n" "$CONFIG_SLAVE"
+    "$REPO_ROOT/scripts/build.sh" --config "$CONFIG_SLAVE" "$PROJECT_DIR" || exit 1
 fi
 
 # ── locate the .elf ──────────────────────────────────────────────────────────

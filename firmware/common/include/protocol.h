@@ -14,6 +14,7 @@ typedef enum {
     NODE_JETSON  = 1u,
     NODE_MASTER  = 2u,
     NODE_SLAVE_0 = 3u,
+    NODE_SLAVE_1 = 4u,
 } NodeId;
 
 /* ── message types ───────────────────────────────────────────────────────── */
@@ -92,14 +93,16 @@ typedef struct PROTO_PACKED {
 } MasterStatus;
 
 typedef struct PROTO_PACKED {
+    uint8_t  slave_id;      /* which slave this status is for         */
     uint8_t  motors_alive;
-    uint8_t  motor_state;   /* MotorLifecycle for motor 0   */
+    uint8_t  motor_state;   /* MotorLifecycle for motor 0 on slave    */
     uint32_t uptime_ms;
 } SlaveStatus;
 
 typedef struct PROTO_PACKED {
-    uint8_t  motor_idx;
-    uint8_t  state;         /* MotorLifecycle               */
+    uint8_t  slave_id;      /* which slave the motor is on            */
+    uint8_t  motor_idx;     /* local index within that slave          */
+    uint8_t  state;         /* MotorLifecycle                         */
     float    pos;
     float    vel;
     float    tau;
@@ -109,12 +112,14 @@ typedef struct PROTO_PACKED {
 } MotorStatePayload;
 
 typedef struct PROTO_PACKED {
-    uint8_t  motor_idx;
-    uint8_t  cmd;           /* ControlCmd                   */
-    uint16_t reserved;
+    uint8_t  slave_id;      /* target slave                           */
+    uint8_t  motor_idx;     /* local index within that slave          */
+    uint8_t  cmd;           /* ControlCmd                             */
+    uint8_t  reserved;
 } ControlReq;
 
 typedef struct PROTO_PACKED {
+    uint8_t  slave_id;
     uint8_t  motor_idx;
     uint8_t  cmd;
     uint8_t  result;        /* ControlResult                */
@@ -122,9 +127,10 @@ typedef struct PROTO_PACKED {
     uint16_t req_seq;
 } ControlResp;
 
-/* MSG_MOTOR_CMD – stub */
+/* MSG_MOTOR_CMD – live MIT setpoint from host */
 typedef struct PROTO_PACKED {
-    uint8_t  motor_idx;
+    uint8_t  slave_id;      /* target slave                           */
+    uint8_t  motor_idx;     /* local index within that slave          */
     float    pos;
     float    vel;
     float    kp;

@@ -95,21 +95,22 @@ CTRL_RESULT_NAMES = {0: "OK", 1: "ERR_STATE", 2: "ERR_STUB", 3: "ERR_MOTOR"}
 HDR_FMT  = "<HHBBIHHH"
 HDR_SIZE = struct.calcsize(HDR_FMT)  # 16
 
-# Payload formats (little-endian, packed)
-FMT_MASTER_STATUS = "<BBBIII"   # 15 bytes
-FMT_SLAVE_STATUS  = "<BBI"      #  6 bytes
-FMT_MOTOR_STATE   = "<BBffffHH" # 22 bytes
-FMT_CONTROL_REQ   = "<BBH"      #  4 bytes
-FMT_CONTROL_RESP  = "<BBBBH"    #  6 bytes
-FMT_MOTOR_CMD     = "<Bfffff"   # 21 bytes: motor_idx, pos, vel, kp, kd, tau_ff
+# Payload formats (little-endian, packed). Multi-slave: control/telemetry carry
+# a leading slave_id, and motor_idx is LOCAL to that slave.
+FMT_MASTER_STATUS = "<BBBIII"    # 15 bytes
+FMT_SLAVE_STATUS  = "<BBBI"      #  7 bytes: slave_id, motors_alive, motor_state, uptime
+FMT_MOTOR_STATE   = "<BBBffffHH" # 23 bytes: slave_id, motor_idx, state, pos,vel,tau,temp, fault, lcs
+FMT_CONTROL_REQ   = "<BBBB"      #  4 bytes: slave_id, motor_idx, cmd, reserved
+FMT_CONTROL_RESP  = "<BBBBBH"    #  7 bytes: slave_id, motor_idx, cmd, result, new_state, req_seq
+FMT_MOTOR_CMD     = "<BBfffff"   # 22 bytes: slave_id, motor_idx, pos, vel, kp, kd, tau_ff
 
 assert HDR_SIZE == 16,                            f"HDR {HDR_SIZE}"
 assert struct.calcsize(FMT_MASTER_STATUS) == 15,  "MasterStatus"
-assert struct.calcsize(FMT_SLAVE_STATUS)  == 6,   "SlaveStatus"
-assert struct.calcsize(FMT_MOTOR_STATE)   == 22,  "MotorState"
+assert struct.calcsize(FMT_SLAVE_STATUS)  == 7,   "SlaveStatus"
+assert struct.calcsize(FMT_MOTOR_STATE)   == 23,  "MotorState"
 assert struct.calcsize(FMT_CONTROL_REQ)   == 4,   "ControlReq"
-assert struct.calcsize(FMT_CONTROL_RESP)  == 6,   "ControlResp"
-assert struct.calcsize(FMT_MOTOR_CMD)     == 21,  "MotorCmd"
+assert struct.calcsize(FMT_CONTROL_RESP)  == 7,   "ControlResp"
+assert struct.calcsize(FMT_MOTOR_CMD)     == 22,  "MotorCmd"
 
 # ── Python-side sine parameters ───────────────────────────────────────────────
 # The sweep is sized PER MOTOR to its soft limits: amplitude = OVERSHOOT × the
@@ -123,14 +124,30 @@ SINE_OVERSHOOT = 1.2            # sweep amplitude as a multiple of the soft half
 
 # MOTOR_DEFAULT_KP / MOTOR_DEFAULT_KD come from motor_config_gen (per motor).
 
-# Last known motor positions, updated from incoming MOTOR_STATE frames
+# Last known motor positions, updated from incoming MOTOR_STATE frames (by
+# global flattened index across all slaves).
 _motor_pos = [0.0] * N_MOTORS
 
+# Map between the flattened global index (digit keys 1..N) and (slave, local idx)
+# used on the wire.
+GLOBAL_OF = {(m["slave"], m["idx"]): g for g, m in enumerate(MOTORS)}
+
+def _slave_local(g: int):
+    """(slave_id, local_idx) for a global motor index."""
+    m = MOTORS[g]
+    return m["slave"], m["idx"]
+
+def _global_of(slave_id: int, local_idx: int):
+    """Global flattened index for a (slave, local) pair, or None."""
+    return GLOBAL_OF.get((slave_id, local_idx))
+
 def _motor_label(idx: int) -> str:
-    """Human-readable description of a motor index, e.g. 'id=1 (CAN 1, RS02)'."""
+    """Human-readable description of a global motor index, e.g.
+    'id=1 s0.m0 (CAN 1, RS02)'."""
     if 0 <= idx < len(MOTORS):
         m = MOTORS[idx]
-        return f"id={idx + 1} (CAN {m['can_id']}, {m['model']})"
+        return (f"id={idx + 1} s{m['slave']}.m{m['idx']} "
+                f"(CAN {m['can_id']}, {m['model']})")
     return f"id={idx + 1}"
 
 # ═══════════════════════════════════════════════════════════════════
@@ -217,23 +234,24 @@ def parse_master_status(p: bytes) -> dict:
 def parse_slave_status(p: bytes) -> dict:
     if len(p) < struct.calcsize(FMT_SLAVE_STATUS):
         return {}
-    ma, ms, up = struct.unpack_from(FMT_SLAVE_STATUS, p)
-    return dict(motors_alive=ma, motor_state=ms, uptime_ms=up)
+    sid, ma, ms, up = struct.unpack_from(FMT_SLAVE_STATUS, p)
+    return dict(slave_id=sid, motors_alive=ma, motor_state=ms, uptime_ms=up)
 
 def parse_motor_state(p: bytes) -> dict:
     if len(p) < struct.calcsize(FMT_MOTOR_STATE):
         return {}
-    idx, st, pos, vel, tau, temp, ff, lcs = struct.unpack_from(FMT_MOTOR_STATE, p)
-    if 0 <= idx < len(_motor_pos):
-        _motor_pos[idx] = pos
-    return dict(motor_idx=idx, state=st, pos=pos, vel=vel,
+    sid, idx, st, pos, vel, tau, temp, ff, lcs = struct.unpack_from(FMT_MOTOR_STATE, p)
+    g = _global_of(sid, idx)
+    if g is not None:
+        _motor_pos[g] = pos
+    return dict(slave_id=sid, motor_idx=idx, gidx=g, state=st, pos=pos, vel=vel,
                 tau=tau, temp=temp, fault_flags=ff, last_cmd_seq=lcs)
 
 def parse_control_resp(p: bytes) -> dict:
     if len(p) < struct.calcsize(FMT_CONTROL_RESP):
         return {}
-    idx, cmd, result, new_st, req_seq = struct.unpack_from(FMT_CONTROL_RESP, p)
-    return dict(motor_idx=idx, cmd=cmd, result=result,
+    sid, idx, cmd, result, new_st, req_seq = struct.unpack_from(FMT_CONTROL_RESP, p)
+    return dict(slave_id=sid, motor_idx=idx, cmd=cmd, result=result,
                 new_state=new_st, req_seq=req_seq)
 
 # ═══════════════════════════════════════════════════════════════════
@@ -275,14 +293,17 @@ def print_frame(msg_type: int, seq: int, payload: bytes) -> None:
         d = parse_slave_status(payload)
         ms_val = d.get("motor_state", 0)
         print(f"[{_t()}] {label:<16} "
+              f"slave={d.get('slave_id', 0)} "
               f"slave_state={_motor_state_str(ms_val):<20} "
               f"motors_alive=0b{d.get('motors_alive', 0):b}")
 
     elif msg_type == MSG_MOTOR_STATE:
         d = parse_motor_state(payload)
         st_val = d.get("state", 0)
+        g = d.get("gidx")
+        id_str = f"id={g + 1}" if g is not None else "id=?"
         print(f"[{_t()}] {label:<16} "
-              f"id={d.get('motor_idx', 0) + 1} "
+              f"{id_str} s{d.get('slave_id', 0)}.m{d.get('motor_idx', 0)} "
               f"state={_motor_state_str(st_val):<20} "
               f"pos={d.get('pos', 0.0):+.3f} "
               f"vel={d.get('vel', 0.0):+.3f} "
@@ -294,6 +315,7 @@ def print_frame(msg_type: int, seq: int, payload: bytes) -> None:
         result_str = CTRL_RESULT_NAMES.get(d.get("result", 0), "?")
         ns_val = d.get("new_state", 0)
         print(f"[{_t()}] {label:<16} "
+              f"s{d.get('slave_id', 0)}.m{d.get('motor_idx', 0)} "
               f"req_seq={d.get('req_seq', 0)} "
               f"result={result_str} "
               f"new_state={_motor_state_str(ns_val)}")
@@ -318,8 +340,10 @@ def _sine_thread(idx: int, ser_ref, ser_lock: threading.Lock,
     still engages (the motor reaches and holds the limit), but at a low
     mid-stroke velocity so the motion is smooth rather than slamming.
 
-    The `center` argument is accepted for call-compatibility but ignored; the
-    sweep is always centred on the soft-limit midpoint."""
+    `idx` is the global flattened index; it is mapped to (slave, local) for the
+    wire. The `center` argument is accepted for call-compatibility but ignored;
+    the sweep is always centred on the soft-limit midpoint."""
+    slave_id, local_idx = _slave_local(idx)
     kp = MOTOR_DEFAULT_KP[idx]
     kd = MOTOR_DEFAULT_KD[idx]
     lo, hi   = MOTOR_SOFT_MIN[idx], MOTOR_SOFT_MAX[idx]
@@ -330,7 +354,7 @@ def _sine_thread(idx: int, ser_ref, ser_lock: threading.Lock,
         t   = time.monotonic() - t0
         pos = mid + amp * math.sin(SINE_OMEGA * t)
         vel =       amp * SINE_OMEGA * math.cos(SINE_OMEGA * t)
-        payload = struct.pack(FMT_MOTOR_CMD, idx, pos, vel, kp, kd, 0.0)
+        payload = struct.pack(FMT_MOTOR_CMD, slave_id, local_idx, pos, vel, kp, kd, 0.0)
         frame   = encode_frame(MSG_MOTOR_CMD, NODE_JETSON, NODE_MASTER, payload)
         with ser_lock:
             try:
@@ -394,7 +418,8 @@ def main() -> None:
             ser.write(data)
 
     def _send_ctrl(idx: int, cmd: int, name: str) -> None:
-        payload = struct.pack(FMT_CONTROL_REQ, idx, cmd, 0)
+        slave_id, local_idx = _slave_local(idx)
+        payload = struct.pack(FMT_CONTROL_REQ, slave_id, local_idx, cmd, 0)
         _ser_write(encode_frame(MSG_CONTROL_REQ, NODE_JETSON, NODE_MASTER, payload))
         print(f"[{_t()}] → CONTROL_REQ {name:<9} {_motor_label(idx)} seq={(_seq-1)&0xFFFF}")
         sys.stdout.flush()

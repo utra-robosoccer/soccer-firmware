@@ -262,6 +262,12 @@ int main(void)
     if (data_receive_flag) {
       data_receive_flag = 0;
       uint8_t cmd = motor_update_buf[0];
+      /* Any command proves the master link is alive — refresh EVERY motor's
+         watchdog. Otherwise a long blocking op on one motor (e.g. zeroing
+         several motors in a row, each ~60 ms) lets an already-armed motor's
+         watchdog expire mid-sequence and it falls back to IDLE. */
+      for (uint8_t _w = 0; _w < N_MOTORS; _w++)
+        motor_runtime_refresh_watchdog(_w);
       switch (cmd & 0x0Fu) {
         case SPI_CMD_ARM: {
           uint8_t idx = SPI_CMD_MOTOR_IDX(cmd);

@@ -114,12 +114,18 @@ void motor_runtime_update(uint32_t now_ms)
             motors_rt[i].fault_flags = pack_faults(m);
         }
 
-        /* Per-motor torque trip: while actively driving (hold or live MIT), if
-           the measured torque exceeds this motor's max_tau, cut it to IDLE.
-           apply_mit() is a no-op once idle, so the trip latches until the host
-           re-arms the motor. */
+        /* Per-motor torque trip: while actively driving (hold, live MIT, or
+           creeping home during zeroing), if the measured torque exceeds this
+           motor's max_tau, cut it to IDLE. ZEROING is guarded too so a joint
+           that jams or collides with the body mid-homing cannot keep pushing:
+           the creep waypoint marches toward 0 even when the joint is blocked,
+           so the position error (and torque) builds unbounded otherwise. Free
+           creep peaks well under max_tau (soft MOTOR_ZERO_KP), so this does not
+           false-trip a normal homing. apply_mit() is a no-op once idle, so the
+           trip latches until the host re-arms the motor. */
         if ((motors_rt[i].state == MOTOR_ARMED_HOLD ||
-             motors_rt[i].state == MOTOR_ARMED_MIT) &&
+             motors_rt[i].state == MOTOR_ARMED_MIT  ||
+             motors_rt[i].state == MOTOR_ZEROING) &&
             fabsf(motors_rt[i].tau) > motors_rt[i].cfg->max_tau) {
             idle_motor(i);
         }
@@ -152,18 +158,28 @@ void motor_runtime_update(uint32_t now_ms)
                        pos_offset then flips sign mid-motion and MIT commands run
                        away. Resetting at home removes the winding while keeping
                        the physical home reference (we are at home right now). */
+                    uint32_t ts;
                     can_disable_motor(cid, CAN_MASTER_ID);
-                    HAL_Delay(2u);
+                    HAL_Delay(5u);
                     can_set_mech_zero(cid, CAN_MASTER_ID);
-                    HAL_Delay(2u);
+                    HAL_Delay(5u);
+                    /* Re-establish MIT with the SAME ACK-wait + 10 ms settle as
+                       motor_runtime_arm. The RS02 needs the longer settle after
+                       disable/set-zero — with only ~2 ms the enable is missed and
+                       the motor silently ignores MIT (holds at 0, tau 0). */
+                    ts = HAL_GetTick(); can_rx_flag = 0;
                     can_change_motor_mode(cid, CAN_MASTER_ID, MIT_MODE);
-                    HAL_Delay(2u);
+                    while (can_rx_flag == 0 && (HAL_GetTick() - ts) < 10u) {}
+                    HAL_Delay(10u);
+                    ts = HAL_GetTick(); can_rx_flag = 0;
                     can_enable_motor(cid, CAN_MASTER_ID);
+                    while (can_rx_flag == 0 && (HAL_GetTick() - ts) < 10u) {}
+                    HAL_Delay(10u);
                     motors_rt[i].pos         = 0.0f;
                     motors_rt[i].pos_offset  = 0.0f;
                     motors_rt[i].hold_pos    = 0.0f;
                     motors_rt[i].hold_vel    = 0.0f;
-                    motors_rt[i].watchdog_ms = now_ms;
+                    motors_rt[i].watchdog_ms = HAL_GetTick(); /* post-delay, not stale now_ms */
                     motors_rt[i].state       = MOTOR_ARMED_HOLD;
                 } else {
                     /* Step waypoint toward zero at MOTOR_ZERO_RATE (rad/s),
@@ -179,7 +195,15 @@ void motor_runtime_update(uint32_t now_ms)
                              sign * MOTOR_ZERO_RATE,
                              MOTOR_ZERO_KP, MOTOR_ZERO_KD);
                 }
-                if ((now_ms - motors_rt[i].watchdog_ms) > MOTOR_WATCHDOG_MS) {
+                /* Only the creep phase honours the watchdog (bail if the host
+                   stops commanding mid-zero). After arrival above we are already
+                   ARMED_HOLD, and the arrival's blocking re-enable (~70 ms of
+                   HAL_Delay) makes the freshly-set watchdog_ms LATER than the
+                   stale now_ms captured before this loop iteration — the unsigned
+                   subtraction would underflow and falsely trip the just-armed
+                   motor to IDLE. Guarding on MOTOR_ZEROING skips that. */
+                if (motors_rt[i].state == MOTOR_ZEROING &&
+                    (now_ms - motors_rt[i].watchdog_ms) > MOTOR_WATCHDOG_MS) {
                     can_disable_motor(cid, CAN_MASTER_ID);
                     motors_rt[i].state = MOTOR_IDLE;
                 }
