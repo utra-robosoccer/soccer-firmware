@@ -25,13 +25,13 @@
 #define SPI_CMD_MOTOR_IDX(cmd)     ((uint8_t)((cmd) >> 4u))
 
 /* slave→master telemetry frame (see protocol.h SPI_TELE_FRAME_SIZE):
-   [alive_mask u8][echo_seq u8][MotorState × N][health_rsvd[8]][crc16 u16] */
+   [alive_mask u8][echo_seq u8][MotorState × N][slave_debug_rsvd[8]][crc16 u16] */
 #define PAYLOAD_LENGTH SPI_TELE_FRAME_SIZE(N_MOTORS)
 /* DMA buffers must hold the full frame; round up to a 32-byte multiple. */
 #define BUFFER_SIZE    (((PAYLOAD_LENGTH) + 31u) & ~31u)
 
-extern uint8_t* volatile  motor_update_buf; //This belongs to the Rx side
-extern uint8_t* volatile  motor_tele_buf; //This belongs to the Tx side
+extern uint8_t* volatile  cmd_inbox_buf;  // completed RX frame — main reads (command in)
+extern uint8_t* volatile  tele_stage_buf; // inactive TX frame — main writes (telemetry out)
 extern volatile uint8_t data_receive_flag;
 extern volatile uint8_t data_tx_ready_flag;
 extern volatile uint8_t spi_error_flag;
@@ -40,7 +40,7 @@ extern uint8_t random_count; // just for spi dbg
 
 
 void spi_dma_init(SPI_HandleTypeDef *hspi);
-void spi_write_next_tx_buf(const uint8_t* motor_new_data_buf, uint8_t* motor_tele_buf);
+void spi_write_next_tx_buf(const uint8_t* src_frame, uint8_t* dst);
 
 
 

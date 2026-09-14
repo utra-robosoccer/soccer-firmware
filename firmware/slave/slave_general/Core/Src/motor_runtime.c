@@ -478,7 +478,7 @@ void motor_runtime_pack_tele(MotorState *out, uint8_t idx)
        snapshot stamp), saturating at 255. */
     uint32_t age     = HAL_GetTick() - r->last_fb_ms;
     out->fb_age      = (age > 255u) ? 255u : (uint8_t)age;
-    out->_rsvd       = 0u;
+    out->reserved_v2 = 0u;
 }
 
 uint8_t motor_runtime_motors_alive(void)

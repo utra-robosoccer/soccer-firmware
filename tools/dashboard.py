@@ -36,6 +36,11 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import test_client as tc
 from motor_config_gen import (MOTOR_DEFAULT_KD, MOTOR_DEFAULT_KP, MOTORS, N_MOTORS,
                               N_SLAVES, SLAVES, SLAVE_MOTOR_COUNTS)
+from protocol import age_ms as _age_ms   # end-to-end per-motor staleness (ms)
+
+# A motor is stale once its end-to-end age exceeds this. After emission gating a
+# silent slave stops sending MOTOR_STATE, so age climbs — silence is meaningful.
+STALE_MS = 150.0
 
 # ── shared state ──────────────────────────────────────────────────────────────
 
@@ -56,7 +61,7 @@ _lock   = threading.Lock()
 _snap   = [_MotorSnap() for _ in range(N_MOTORS)]   # by global flattened index
 _link   = {"rx": 0, "err": 0, "alive": 0, "uptime_ms": 0}
 _master = {"robot_state": 0, "slave_alive": 0}
-_slaves = [{"motors_alive": 0, "state": 0} for _ in range(N_SLAVES)]
+_slaves = [{"motors_alive": 0, "crc_errors": 0} for _ in range(N_SLAVES)]
 _events: deque = deque(maxlen=6)
 
 # Sine-streaming state, shared with the RX thread (populated in main()). Module
@@ -105,7 +110,7 @@ _STATE_STYLE = {
 
 def _render(active: int, sine_active: list, port: str) -> Panel:
     with _lock:
-        snaps  = [(s.state, s.pos, s.vel, s.tau, s.temp, s.fault, s.updated)
+        snaps  = [(s.state, s.pos, s.vel, s.tau, s.temp, s.fault, s.updated, s.fb_age)
                   for s in _snap]
         rx     = _link["rx"]
         err    = _link["err"]
@@ -129,6 +134,7 @@ def _render(active: int, sine_active: list, port: str) -> Panel:
     tbl.add_column("vel r/s", width=9,  justify="right")
     tbl.add_column("tau Nm",  width=8,  justify="right")
     tbl.add_column("°C",      width=5,  justify="right")
+    tbl.add_column("age ms",  width=6,  justify="right")   # end-to-end staleness
     tbl.add_column("~",       width=2,  justify="center")   # sine indicator
     tbl.add_column("fault",   width=6,  justify="center")
 
@@ -141,10 +147,13 @@ def _render(active: int, sine_active: list, port: str) -> Panel:
             tbl.add_section()
         online = bool(salive & (1 << s_idx))
         for cfg in slave["motors"]:
-            st, pos, vel, tau, temp, fault, updated = snaps[gi]
+            st, pos, vel, tau, temp, fault, updated, fb_age = snaps[gi]
             sel   = (gi == active)
-            stale = (not online) or ((now - updated) > 0.5 if updated else True)
+            age   = _age_ms(now, updated, fb_age) if updated else float("inf")
+            stale = (not online) or (age > STALE_MS)
             vs    = "dim white" if stale else "white"
+            age_t = (Text("  --", style="dim") if updated == 0 else
+                     Text(f"{age:4.0f}", style="bold red" if age > STALE_MS else "green"))
 
             sname   = tc.MOTOR_STATE_NAMES.get(st, f"?{st}")
             state_t = (Text("OFFLINE", style="dim red") if not online
@@ -161,6 +170,7 @@ def _render(active: int, sine_active: list, port: str) -> Panel:
                 Text(fv(vel),  style=vs),
                 Text(fv(tau),  style=vs),
                 Text(f"{temp:.0f}" if temp == temp else " --", style=vs),
+                age_t,
                 Text("◉", style="bold magenta") if sine_active[gi] else Text("·", style="dim"),
                 Text("OK",            style="green")    if not fault else
                 Text(f"{fault:04x}", style="bold red"),
@@ -272,7 +282,7 @@ def _ingest(mt: int, pl: bytes) -> None:
         if d and 0 <= d["slave_id"] < N_SLAVES:
             with _lock:
                 _slaves[d["slave_id"]]["motors_alive"] = d["motors_alive"]
-                _slaves[d["slave_id"]]["state"]        = d["motor_state"]
+                _slaves[d["slave_id"]]["crc_errors"]   = d["crc_errors"]
 
     elif mt == tc.MSG_CONTROL_RESP:
         d = tc.parse_control_resp(pl)

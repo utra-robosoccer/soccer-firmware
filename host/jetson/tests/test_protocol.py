@@ -26,8 +26,9 @@ _FLAGS = P.CMDFLAG_CLAMPED_POS | P.CMDFLAG_CMD_STALE
 
 
 def _atom(pos_raw: int, life: int, cause: int) -> bytes:
+    # motor_fault (0x0A) distinct from cmd_flags (_FLAGS=0x05) so a byte swap is caught.
     return struct.pack(P.MOTORSTATE_FMT, pos_raw, 40000, 30000, 42,
-                       (life & 0x0F) | (cause << 4), 0x05, _FLAGS,
+                       (life & 0x0F) | (cause << 4), 0x0A, _FLAGS,
                        0xDEADBEEF, 250, 0)
 
 
@@ -39,10 +40,10 @@ class MotorStateDecode(unittest.TestCase):
         self.assertEqual(d["motor_idx"], 2)
         self.assertEqual(d["state"], _LIFE0)
         self.assertEqual(d["cause"], _CAUSE0)
-        self.assertEqual(d["motor_fault"], 0x05)
+        self.assertEqual(d["motor_fault"], 0x0A)
         self.assertEqual(d["fault_word"], 0xDEADBEEF)
         self.assertEqual(d["fb_age"], 250)
-        ms = d["motor"]
+        ms = d["atom"]
         self.assertTrue(ms.clamped_pos)
         self.assertFalse(ms.clamped_tau)
         self.assertTrue(ms.cmd_stale)
@@ -71,6 +72,25 @@ class FrameCodec(unittest.TestCase):
         fr = bytearray(P.encode_frame(P.MSG_PING, P.NODE_JETSON, P.NODE_MASTER))
         fr[-1] ^= 0x01                      # corrupt the CRC
         self.assertIsNone(P.decode_frame(bytearray(fr)))
+
+    def test_wrong_version_dropped_and_counted(self):
+        # Build a CRC-valid frame, then rewrite ver_flags low byte to 2 and fix
+        # the CRC so it passes CRC but fails the version gate.
+        payload = struct.pack(P.FMT_MOTOR_STATE_HDR, 0, 0) + _atom(0, 0, 0)
+        fr = bytearray(P.encode_frame(P.MSG_MOTOR_STATE, P.NODE_MASTER, P.NODE_JETSON, payload))
+        fr[12] = 2                      # ver_flags low byte (header offset 12) → version 2
+        fr[14] = 0                      # zero the CRC field, then recompute like the codec
+        fr[15] = 0
+        crc = P.crc16(bytes(fr))
+        fr[14] = crc & 0xFF
+        fr[15] = (crc >> 8) & 0xFF
+        before = P.version_errors
+        self.assertIsNone(P.decode_frame(bytearray(fr)))   # dropped, no frame returned
+        self.assertEqual(P.version_errors, before + 1)     # and counted
+
+        # A v1 frame still round-trips.
+        ok = bytearray(P.encode_frame(P.MSG_MOTOR_STATE, P.NODE_MASTER, P.NODE_JETSON, payload))
+        self.assertIsNotNone(P.decode_frame(ok))
 
 
 class CrossLanguageFixture(unittest.TestCase):

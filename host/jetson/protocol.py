@@ -77,12 +77,15 @@ CTRL_RESULT_NAMES = {0: "OK", 1: "ERR_STATE", 2: "ERR_STUB", 3: "ERR_MOTOR"}
 
 ROBOT_STATE_NAMES = {0: "INIT", 1: "READY", 2: "DEGRADED"}
 
+# v1 telemetry contract version — carried in MsgHeader.ver_flags low byte.
+PROTO_VERSION = 1
+
 # ── wire layouts (little-endian, packed) ──────────────────────────────────────
-HDR_FMT  = "<HHBBIHHH"          # type,seq,src,dst,ts_ms,len,flags,crc  → 16 B
+HDR_FMT  = "<HHBBIHHH"          # type,seq,src,dst,ts_ms,len,ver_flags,crc  → 16 B
 HDR_SIZE = struct.calcsize(HDR_FMT)
 
-FMT_MASTER_STATUS = "<BBBIII"   # robot_state,slave_alive,motors_alive,uptime,link_errs,rx_frames (15)
-FMT_SLAVE_STATUS  = "<BBBII"    # slave_id,motors_alive,motor_state,uptime,crc_errors (11)
+FMT_MASTER_STATUS = "<BBIII"    # robot_state,slave_alive,uptime,link_errs,rx_frames (14)
+FMT_SLAVE_STATUS  = "<BBII"     # slave_id,motors_alive,uptime,crc_errors (10)
 FMT_CONTROL_REQ   = "<BBBB"     # slave_id,motor_idx,cmd,reserved (4)
 FMT_CONTROL_RESP  = "<BBBBBH"   # slave_id,motor_idx,cmd,result,new_state,req_seq (7)
 FMT_MOTOR_CMD     = "<BBfffff"  # slave_id,motor_idx,pos,vel,kp,kd,tau_ff (22)
@@ -93,8 +96,8 @@ FMT_MOTOR_STATE_HDR = "<BB"      # slave_id, motor_idx before the atom
 
 assert HDR_SIZE == 16, HDR_SIZE
 assert MOTORSTATE_SIZE == 16, MOTORSTATE_SIZE
-assert struct.calcsize(FMT_SLAVE_STATUS) == 11
-assert struct.calcsize(FMT_MASTER_STATUS) == 15
+assert struct.calcsize(FMT_SLAVE_STATUS) == 10
+assert struct.calcsize(FMT_MASTER_STATUS) == 14
 
 
 def _decode(raw: int, lo: float, hi: float) -> float:
@@ -119,7 +122,7 @@ class MotorState:
     cmd_flags: int
     fault_word: int     # 0x3022 latched on fault; 0 clear; 0xFFFFFFFF read-fail
     fb_age: int         # ms since this motor's last Type-2, saturating 255
-    rsvd: int
+    reserved_v2: int    # reserved growth byte (0); append-only evolution
 
     @classmethod
     def unpack(cls, data: bytes) -> "MotorState":
@@ -169,11 +172,16 @@ def crc16(data: bytes) -> int:
 _seq = 0
 _MAX_PAYLOAD = 256
 
+# Count of CRC-valid frames dropped for a wrong protocol version (diagnostics).
+version_errors = 0
+
 
 def encode_frame(msg_type: int, src: int, dst: int, payload: bytes = b"") -> bytes:
     global _seq
     ts_ms = (time.monotonic_ns() // 1_000_000) & 0xFFFFFFFF
-    hdr = struct.pack(HDR_FMT, msg_type, _seq, src, dst, ts_ms, len(payload), 0, 0)
+    # ver_flags = PROTO_VERSION in the low byte, high byte reserved 0.
+    hdr = struct.pack(HDR_FMT, msg_type, _seq, src, dst, ts_ms, len(payload),
+                      PROTO_VERSION, 0)
     frame = bytearray(hdr) + payload
     checksum = crc16(bytes(frame))
     frame[14] = checksum & 0xFF
@@ -187,10 +195,12 @@ def decode_frame(buf: bytearray):
 
     Returns ``(msg_type, seq, ts_ms, payload, consumed)`` or ``None`` if no
     complete valid frame is present yet. Drops one byte and retries on bad CRC
-    or implausible payload length.
+    or implausible payload length; consumes and counts a CRC-valid frame whose
+    protocol version != PROTO_VERSION.
     """
+    global version_errors
     while len(buf) >= HDR_SIZE:
-        msg_type, seq, src, dst, ts_ms, pay_len, flags, crc_wire = \
+        msg_type, seq, src, dst, ts_ms, pay_len, ver_flags, crc_wire = \
             struct.unpack_from(HDR_FMT, buf, 0)
         if pay_len > _MAX_PAYLOAD:
             del buf[0]
@@ -204,6 +214,11 @@ def decode_frame(buf: bytearray):
         if crc16(bytes(check)) != crc_wire:
             del buf[0]
             continue
+        if (ver_flags & 0xFF) != PROTO_VERSION:
+            # CRC-valid but wrong version → consume the whole frame, don't resync.
+            version_errors += 1
+            del buf[:total]
+            continue
         payload = bytes(buf[HDR_SIZE:total])
         return (msg_type, seq, ts_ms, payload, total)
     return None
@@ -213,16 +228,16 @@ def decode_frame(buf: bytearray):
 def parse_master_status(p: bytes) -> dict:
     if len(p) < struct.calcsize(FMT_MASTER_STATUS):
         return {}
-    rs, sa, ma, up, le, rf = struct.unpack_from(FMT_MASTER_STATUS, p)
-    return dict(robot_state=rs, slave_alive=sa, motors_alive=ma,
+    rs, sa, up, le, rf = struct.unpack_from(FMT_MASTER_STATUS, p)
+    return dict(robot_state=rs, slave_alive=sa,
                 uptime_ms=up, link_errors=le, rx_frames=rf)
 
 
 def parse_slave_status(p: bytes) -> dict:
     if len(p) < struct.calcsize(FMT_SLAVE_STATUS):
         return {}
-    sid, ma, ms, up, crc_err = struct.unpack_from(FMT_SLAVE_STATUS, p)
-    return dict(slave_id=sid, motors_alive=ma, motor_state=ms,
+    sid, ma, up, crc_err = struct.unpack_from(FMT_SLAVE_STATUS, p)
+    return dict(slave_id=sid, motors_alive=ma,
                 uptime_ms=up, crc_errors=crc_err)
 
 
@@ -230,16 +245,24 @@ def parse_motor_state(p: bytes) -> dict:
     """Decode a MotorStatePayload: [slave_id][motor_idx][MotorState atom].
 
     Returns the addressing fields plus the decoded atom (engineering units and
-    the ``MotorState`` object under ``motor``)."""
+    the ``MotorState`` object under ``atom``)."""
     if len(p) < struct.calcsize(FMT_MOTOR_STATE_HDR) + MOTORSTATE_SIZE:
         return {}
     sid, idx = struct.unpack_from(FMT_MOTOR_STATE_HDR, p, 0)
     ms = MotorState.unpack(p[struct.calcsize(FMT_MOTOR_STATE_HDR):])
-    return dict(slave_id=sid, motor_idx=idx, motor=ms,
+    return dict(slave_id=sid, motor_idx=idx, atom=ms,
                 state=ms.lifecycle, cause=ms.cause,
                 pos=ms.pos, vel=ms.vel, tau=ms.tau, temp=ms.temp,
                 motor_fault=ms.motor_fault, cmd_flags=ms.cmd_flags,
                 fault_word=ms.fault_word, fb_age=ms.fb_age)
+
+
+def age_ms(now: float, t_last_msg: float, fb_age_at_receipt: int) -> float:
+    """End-to-end per-motor staleness (ms): host time since the last MOTOR_STATE
+    for this motor, plus the CAN-hop age that frame reported. With emission
+    gating, a silent slave stops advancing t_last_msg so this climbs — the
+    end-to-end freshness signal, unlike the atom's fb_age which freezes."""
+    return (now - t_last_msg) * 1000.0 + fb_age_at_receipt
 
 
 def parse_control_resp(p: bytes) -> dict:

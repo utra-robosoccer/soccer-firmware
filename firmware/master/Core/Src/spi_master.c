@@ -35,7 +35,7 @@ uint32_t master_rx_frames   = 0;
 /* ── per-slave runtime state ─────────────────────────────────────────────── */
 static uint8_t      slave_alive[NUM_SLAVES];
 static uint8_t      slave_motors_alive[NUM_SLAVES];
-static MotorState   latest_tele[NUM_SLAVES][MAX_MOTORS_PER_SLAVE];
+static MotorState   latest_atom[NUM_SLAVES][MAX_MOTORS_PER_SLAVE];
 static uint32_t     slave_crc_errors[NUM_SLAVES];   /* telemetry frames failing CRC */
 static uint8_t      spi_seq[NUM_SLAVES];             /* per-slave command seq counter  */
 static uint16_t     tx_seq = 0;
@@ -135,7 +135,6 @@ static void emit_master_status(uint32_t now_ms)
     MasterStatus pay = {0};
     pay.robot_state  = (uint8_t)rs;
     pay.slave_alive  = alive_mask;               /* bit s = slave s reachable */
-    pay.motors_alive = slave_motors_alive[0];    /* legacy field: slave 0 */
     pay.uptime_ms    = now_ms;
     pay.link_errors  = master_link_errors;
     pay.rx_frames    = master_rx_frames;
@@ -154,9 +153,6 @@ static void emit_slave_status(uint8_t s, uint32_t now_ms)
     SlaveStatus pay = {0};
     pay.slave_id     = s;
     pay.motors_alive = slave_motors_alive[s];
-    pay.motor_state  = (slave_motors_alive[s] & 0x01u)
-                         ? SPI_STATE_LIFE(latest_tele[s][0].state)
-                         : (uint8_t)MOTOR_BOOT;
     pay.uptime_ms    = now_ms;
     pay.crc_errors   = slave_crc_errors[s];
 
@@ -177,7 +173,7 @@ static void emit_motor_state(uint8_t s, uint8_t idx, uint32_t now_ms)
     MotorStatePayload pay;
     pay.slave_id  = s;
     pay.motor_idx = idx;
-    pay.motor     = latest_tele[s][idx];
+    pay.atom      = latest_atom[s][idx];
 
     uint8_t frame[MSG_HEADER_SIZE + sizeof(MotorStatePayload)];
     uint16_t n = proto_build(frame, sizeof(frame),
@@ -270,7 +266,7 @@ void MotorMaster_Init(SPI_HandleTypeDef *hspi, UART_HandleTypeDef *huart)
     memset(pending_goto_zero_bits, 0, sizeof(pending_goto_zero_bits));
     memset(pending_mit, 0, sizeof(pending_mit));
     memset(mit_pending, 0, sizeof(mit_pending));
-    memset(latest_tele, 0, sizeof(latest_tele));
+    memset(latest_atom, 0, sizeof(latest_atom));
     memset(slave_crc_errors, 0, sizeof(slave_crc_errors));
     memset(spi_seq, 0, sizeof(spi_seq));
 }
@@ -364,7 +360,7 @@ static void poll_one_slave(uint8_t s)
         }
         slave_alive[s]        = 1u;
         slave_motors_alive[s] = alive;
-        memcpy(latest_tele[s], tele, (size_t)n * sizeof(MotorState));
+        memcpy(latest_atom[s], tele, (size_t)n * sizeof(MotorState));
     } else {
         /* Absent slave / garbage frame — mark offline and drop pending one-shots
            so they don't pile up against a board that isn't there. */
@@ -393,10 +389,15 @@ void MotorMaster_ProcessLoop(void)
         }
     }
 
-    /* Telemetry emit (MOTOR_STATE) — one frame per motor, tagged with slave. */
+    /* Telemetry emit (MOTOR_STATE) — one frame per motor, tagged with slave.
+       GATED on slave_alive[s]: only emit atoms for a slave whose most recent poll
+       CRC-passed (poll + tele run in lockstep here). A failed/absent poll → no
+       MOTOR_STATE for that slave this tick, so on the host silence is meaningful
+       (end-to-end freshness). SlaveStatus below still reports the silent slave. */
     if ((int32_t)(now - next_tele_ms) >= 0) {
         next_tele_ms += MASTER_TELE_PERIOD_MS;
         for (uint8_t s = 0; s < NUM_SLAVES; s++) {
+            if (!slave_alive[s]) continue;
             for (uint8_t i = 0; i < slave_motor_counts[s]; i++) {
                 emit_motor_state(s, i, now);
             }

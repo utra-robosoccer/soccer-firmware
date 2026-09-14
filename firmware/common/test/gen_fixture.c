@@ -29,11 +29,11 @@ static MotorState make_atom(uint16_t pos_raw, uint8_t life, uint8_t cause)
     m.tau_raw     = 30000u;
     m.temp_c      = 42u;
     m.state       = SPI_STATE_PACK(life, cause);
-    m.motor_fault = 0x05u;
-    m.cmd_flags   = SPI_CMDFLAG_CLAMPED_POS | SPI_CMDFLAG_CMD_STALE;
+    m.motor_fault = 0x0Au;   /* distinct from cmd_flags so a byte swap is caught */
+    m.cmd_flags   = SPI_CMDFLAG_CLAMPED_POS | SPI_CMDFLAG_CMD_STALE;  /* 0x05 */
     m.fault_word  = 0xDEADBEEFu;
     m.fb_age      = 250u;
-    m._rsvd       = 0u;
+    m.reserved_v2 = 0u;
     return m;
 }
 

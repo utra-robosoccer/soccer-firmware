@@ -23,7 +23,7 @@ Everything we know about one motor, packed tight:
 | 9 | `cmd_flags` | u8 | what happened to the command this tick |
 | 10–13 | `fault_word` | u32 | detailed fault code (or 0) |
 | 14 | `fb_age` | u8 | ms since the motor last reported |
-| 15 | `_rsvd` | u8 | reserved (0) |
+| 15 | `reserved_v2` | u8 | reserved growth byte (0); append-only |
 
 ### Reading pos / vel / tau
 
@@ -115,20 +115,33 @@ Atoms don't travel alone. A slave sends the master one **frame** holding every
 motor plus a wrapper:
 
 ```
-[ alive_mask ][ echo_seq ][ MotorState × N ][ health_rsvd (8) ][ crc16 (2) ]
-      1 byte      1 byte      16·N bytes          reserved         checksum
+[ alive_mask ][ echo_seq ][ MotorState × N ][ slave_debug_rsvd (8) ][ crc16 (2) ]
+      1 byte      1 byte      16·N bytes            reserved             checksum
 ```
 
 - **`alive_mask`** — one bit per motor: is it responding?
-- **`echo_seq`** — echoes the sequence number of the last command, so the master
-  can tell its commands are getting through.
-- **`health_rsvd`** — 8 spare bytes reserved for future per-slave health data.
+- **`echo_seq`** — echoes the sequence number of the last command (command path
+  owns it; the master discards it).
+- **`slave_debug_rsvd`** — 8 spare bytes reserved for future per-slave debug data.
 - **`crc16`** — the integrity check (next section).
 
-The master→Jetson hop wraps each atom in a small USB message with its own
-16-byte header (type, sequence, timestamp, length, and its own CRC) — but the
-atom inside is forwarded **unchanged**. The master doesn't reinterpret motor
-data; the Jetson decodes it.
+The master→Jetson hop wraps each atom in a small USB message (`MotorStatePayload`
+= `slave_id + motor_idx + atom`) with a 16-byte `MsgHeader` (type, sequence,
+timestamp, length, **`ver_flags`**, and its own CRC) — but the atom inside is
+forwarded **unchanged**. The master doesn't reinterpret motor data; the Jetson
+decodes it.
+
+**Version:** `MsgHeader.ver_flags` low byte carries the protocol version (`= 1`).
+The host **drops and counts** any frame whose version ≠ 1 — so a firmware/host
+mismatch is caught, not silently misread.
+
+**Emission gating (freshness):** the master emits `MOTOR_STATE` for a slave only
+on ticks where that slave's SPI poll passed CRC. If a slave goes silent, its
+per-motor frames simply **stop** (rather than repeating a frozen last value), so
+on the host **silence is meaningful**. `SLAVE_STATUS` (20 Hz) keeps reporting the
+silent slave as the diagnosis channel. The host tracks end-to-end staleness as
+`age_ms = (now − last_msg) + fb_age`, which climbs when a motor goes silent —
+unlike the atom's `fb_age`, which only covers the CAN hop.
 
 ## The CRC: trust, but verify
 
@@ -150,6 +163,23 @@ buffer, an absent slave clocking back garbage — into a **dropped frame, never
 wrong data**. If `crc_errors` is climbing fast, suspect wiring or a board that
 isn't running; if it's parked at a fixed number, that's just start-up noise from
 before both boards were in sync.
+
+## Frozen v1 contract — two hard rules
+
+This layout is **frozen as v1**. Two constraints that must never be broken:
+
+1. **`MotorState` evolves append-only — no mid-struct inserts, ever.** New fields
+   go at the end (into `reserved_v2` / by growing the atom + bumping the version).
+   Inserting a field in the middle shifts every later field's offset and silently
+   corrupts any host that wasn't rebuilt in lockstep.
+2. **Slave and master images MUST be built from the same active config.** The
+   motor count `N` is baked into both at compile time from the same generated
+   config; there is no in-band check. A mismatch is **undetectable on the wire** —
+   it presents as a permanently dead slave with a climbing `crc_errors`.
+
+Two guards keep the C and Python sides honest: a compile-time size assert
+(`sizeof(MotorState)==16`) and a cross-language fixture test that byte-compares a
+C-packed frame against the Python-packed one. Keep both green.
 
 ## Where to see it live
 

@@ -89,6 +89,10 @@ typedef enum {
 #  define PROTO_PACKED
 #endif
 
+/* Telemetry contract version. Carried in MsgHeader.ver_flags low byte; the host
+ * drops any frame whose version != this. High byte reserved (0). */
+#define PROTO_VERSION 1u
+
 typedef struct PROTO_PACKED {
     uint16_t type;    /* MsgType                              */
     uint16_t seq;
@@ -96,7 +100,7 @@ typedef struct PROTO_PACKED {
     uint8_t  dst;
     uint32_t ts_ms;   /* HAL_GetTick() at send time           */
     uint16_t len;     /* payload bytes                        */
-    uint16_t flags;   /* reserved, must be 0                  */
+    uint16_t ver_flags; /* low byte = PROTO_VERSION; high byte reserved 0 */
     uint16_t crc16;   /* CRC16-CCITT over hdr(crc=0)+payload  */
 } MsgHeader;
 
@@ -117,15 +121,14 @@ typedef struct PROTO_PACKED {
     uint8_t  cmd_flags;     /* SPI_CMDFLAG_* (recomputed each tick)              */
     uint32_t fault_word;    /* 0x3022 latched on fault entry; 0 clear; 0xFFFFFFFF read-fail */
     uint8_t  fb_age;        /* ms since this motor's last Type-2, saturating 255 */
-    uint8_t  _rsvd;         /* 0                                                 */
+    uint8_t  reserved_v2;   /* reserved growth byte (0). Append-only evolution.  */
 } MotorState;               /* 16 bytes */
 
 /* ── payload structs ─────────────────────────────────────────────────────── */
 
 typedef struct PROTO_PACKED {
     uint8_t  robot_state;   /* RobotState                   */
-    uint8_t  slave_alive;   /* bit 0 = slave 0 reachable    */
-    uint8_t  motors_alive;  /* bit i = motor i alive        */
+    uint8_t  slave_alive;   /* bit s = slave s reachable    */
     uint32_t uptime_ms;
     uint32_t link_errors;   /* bad CRC or unknown msg_type  */
     uint32_t rx_frames;
@@ -133,8 +136,7 @@ typedef struct PROTO_PACKED {
 
 typedef struct PROTO_PACKED {
     uint8_t  slave_id;      /* which slave this status is for         */
-    uint8_t  motors_alive;
-    uint8_t  motor_state;   /* MotorLifecycle (low nibble) for motor 0 */
+    uint8_t  motors_alive;  /* bit i = motor i alive                  */
     uint32_t uptime_ms;
     uint32_t crc_errors;    /* SPI telemetry frames failing CRC       */
 } SlaveStatus;
@@ -145,7 +147,7 @@ typedef struct PROTO_PACKED {
 typedef struct PROTO_PACKED {
     uint8_t    slave_id;    /* which slave the motor is on            */
     uint8_t    motor_idx;   /* local index within that slave          */
-    MotorState motor;       /* 16 B atom, exactly as received over SPI */
+    MotorState atom;        /* 16 B atom, exactly as received over SPI */
 } MotorStatePayload;
 
 typedef struct PROTO_PACKED {
@@ -185,19 +187,19 @@ typedef struct PROTO_PACKED {
 /* ── SPI frame layout (one full-duplex transfer, length = tele frame) ──────
  *
  * slave → master telemetry frame (fixed):
- *   [alive_mask u8][echo_seq u8][MotorState × N][health_rsvd[8]=0][crc16 u16]
- *   crc16 = proto_crc16() over every preceding byte. health_rsvd is reserved
- *   for future per-slave health and is covered by the CRC.
+ *   [alive_mask u8][echo_seq u8][MotorState × N][slave_debug_rsvd[8]=0][crc16 u16]
+ *   crc16 = proto_crc16() over every preceding byte. slave_debug_rsvd is reserved
+ *   for future per-slave debug/health and is covered by the CRC.
  *
  * master → slave command frame rides in the prefix of the same transfer:
  *   [cmd u8][seq u8][SpiMitCmd × N ...]
  * The transfer length is the (larger) telemetry frame size. */
-#define SPI_TELE_HDR_BYTES     2u                 /* alive_mask + echo_seq        */
-#define SPI_TELE_HEALTH_BYTES  8u                 /* reserved per-slave health    */
-#define SPI_TELE_CRC_BYTES     2u                 /* crc16 trailer                */
+#define SPI_TELE_HDR_BYTES          2u            /* alive_mask + echo_seq        */
+#define SPI_TELE_SLAVE_DEBUG_BYTES  8u            /* reserved per-slave debug     */
+#define SPI_TELE_CRC_BYTES          2u            /* crc16 trailer                */
 #define SPI_TELE_FRAME_SIZE(n) ((uint16_t)(SPI_TELE_HDR_BYTES + \
                                 (uint16_t)(n) * (uint16_t)sizeof(MotorState) + \
-                                SPI_TELE_HEALTH_BYTES + SPI_TELE_CRC_BYTES))
+                                SPI_TELE_SLAVE_DEBUG_BYTES + SPI_TELE_CRC_BYTES))
 
 #define SPI_CMD_HDR_BYTES      2u                 /* cmd + seq                    */
 #define SPI_CMD_FRAME_SIZE(n)  ((uint16_t)(SPI_CMD_HDR_BYTES + \
@@ -262,12 +264,13 @@ static inline uint16_t proto_build(uint8_t *out, uint16_t cap,
 
     MsgHeader hdr;
     memset(&hdr, 0, sizeof(hdr));
-    hdr.type  = type;
-    hdr.seq   = seq;
-    hdr.src   = src;
-    hdr.dst   = dst;
-    hdr.ts_ms = ts_ms;
-    hdr.len   = pay_len;
+    hdr.type      = type;
+    hdr.seq       = seq;
+    hdr.src       = src;
+    hdr.dst       = dst;
+    hdr.ts_ms     = ts_ms;
+    hdr.len       = pay_len;
+    hdr.ver_flags = PROTO_VERSION;   /* low byte = version, high byte reserved 0 */
 
     memcpy(out, &hdr, MSG_HEADER_SIZE);
     if (pay_len > 0u && payload != NULL) {

@@ -48,20 +48,20 @@
 #include "string.h"
 #include "cachel1_armv7.h"
 
-// TX & RX buffer declaration in MEM
-uint8_t RxBuffer_A[BUFFER_SIZE] = {0x0};
-uint8_t RxBuffer_B[BUFFER_SIZE] = {0x0};
+// SPI DMA ping-pong buffers. One half is clocked by the DMA while the other is
+// owned by the main loop; the TxRxCplt ISR swaps roles at the end of each
+// transfer. [0]/[1] are the two halves of each direction.
+uint8_t spi_rx_pingpong[2][BUFFER_SIZE] = {{0x0}, {0x0}};
+uint8_t spi_tx_pingpong[2][BUFFER_SIZE] = {
+    {0xff, 0xff, 0xff, 0xff, 0, 0, 0, 0, 0xDE, 0xAD, 0xBE, 0xEF},
+    {0, 0, 0, 0, 0xff, 0xff, 0xff, 0xff, 0xDE, 0xAD, 0xBE, 0xEF},
+};
 
-uint8_t TxBuffer_A[BUFFER_SIZE] = {0xff, 0xff, 0xff, 0xff, 0, 0,0,0, 0xDE, 0xAD, 0xBE, 0xEF};
-uint8_t TxBuffer_B[BUFFER_SIZE] = {0,0,0,0, 0xff,0xff,0xff,0xff, 0xDE, 0xAD, 0xBE, 0xEF};
-
-// SPI DMA TX & RX Memory addrsng)
-uint8_t* volatile CurTxBuf;
-uint8_t* volatile CurRxBuf;
-
-// CAN Bus motor update mem addr (swapping, should always be different from the SPI TX RX mem addr)
-uint8_t* volatile motor_update_buf; //This belongs to the Rx side
-uint8_t* volatile motor_tele_buf; //This belongs to the Tx side
+// Which half the DMA is actively clocking, vs the half the main loop owns.
+uint8_t* volatile spi_tx_active;   // DMA is sending this half
+uint8_t* volatile spi_rx_active;   // DMA is filling this half
+uint8_t* volatile cmd_inbox_buf;   // completed RX frame — main READS (command in)
+uint8_t* volatile tele_stage_buf;  // inactive TX frame — main WRITES (telemetry out)
 
 volatile uint8_t data_receive_flag = 0;
 volatile uint8_t data_tx_ready_flag = 0;
@@ -81,36 +81,33 @@ void spi_dbg_helper()
 }
 void HAL_SPI_TxRxCpltCallback(SPI_HandleTypeDef *hspi)
 {
-	//Handling RX Double buffer
-	if (CurRxBuf == RxBuffer_A){
-		CurRxBuf = RxBuffer_B;
-		motor_update_buf = RxBuffer_A;
+	//Handling RX ping-pong: hand the just-filled half to main, keep the other for DMA
+	if (spi_rx_active == spi_rx_pingpong[0]){
+		spi_rx_active = spi_rx_pingpong[1];
+		cmd_inbox_buf = spi_rx_pingpong[0];
 	}
 	else {
-		CurRxBuf = RxBuffer_A;
-		motor_update_buf = RxBuffer_B;
+		spi_rx_active = spi_rx_pingpong[0];
+		cmd_inbox_buf = spi_rx_pingpong[1];
 	}
 
 	data_receive_flag = 1;
 
-	//Handling TX Double buffer
+	//Handling TX ping-pong (only when main has staged a fresh telemetry frame)
 	if (data_tx_ready_flag){
-		//Main loop signals a complete motor chain telemetry
-		data_tx_ready_flag = 0;
 		//***The Tx ready flag is set in the CAN receive intr service routine***
-		if(CurTxBuf == TxBuffer_A){
-			CurTxBuf = TxBuffer_B;
-			motor_tele_buf = TxBuffer_A;
+		data_tx_ready_flag = 0;
+		if(spi_tx_active == spi_tx_pingpong[0]){
+			spi_tx_active  = spi_tx_pingpong[1];
+			tele_stage_buf = spi_tx_pingpong[0];
 		}
 		else {
-			CurTxBuf = TxBuffer_A;
-			motor_tele_buf = TxBuffer_B;
+			spi_tx_active  = spi_tx_pingpong[0];
+			tele_stage_buf = spi_tx_pingpong[1];
 		}
 	}
 
-//	spi_dbg_helper();
-//	HAL_GPIO_TogglePin(LD2_GPIO_Port, LD2_Pin); //toggle a LED if this callback is triggered
-	HAL_SPI_TransmitReceive_DMA(hspi, CurTxBuf, CurRxBuf, PAYLOAD_LENGTH); //rearm DMA
+	HAL_SPI_TransmitReceive_DMA(hspi, spi_tx_active, spi_rx_active, PAYLOAD_LENGTH); //rearm DMA
 }
 
 void HAL_SPI_ErrorCallback(SPI_HandleTypeDef *hspi)
@@ -118,34 +115,33 @@ void HAL_SPI_ErrorCallback(SPI_HandleTypeDef *hspi)
 	//if we detected error, we restart dma, since the isr handler has already cleared all flags for us
 	spi_error_flag = 1;
 	HAL_SPI_Abort_IT(hspi);
-	HAL_SPI_TransmitReceive_DMA(hspi, CurTxBuf, CurRxBuf, PAYLOAD_LENGTH);
+	HAL_SPI_TransmitReceive_DMA(hspi, spi_tx_active, spi_rx_active, PAYLOAD_LENGTH);
 
 }
 
 void spi_dma_init(SPI_HandleTypeDef *hspi)
 {
-	//Critical txbuf and rxbuf init
-	  CurTxBuf = TxBuffer_A;
-	  motor_tele_buf = TxBuffer_B;
+	//Critical ping-pong init: DMA on half [0], main owns half [1] each direction
+	  spi_tx_active  = spi_tx_pingpong[0];
+	  tele_stage_buf = spi_tx_pingpong[1];
 
-	  CurRxBuf = RxBuffer_A;
-	  motor_update_buf = RxBuffer_B;
-	  if (HAL_SPI_TransmitReceive_DMA(hspi, CurTxBuf, CurRxBuf, PAYLOAD_LENGTH) != HAL_OK){
+	  spi_rx_active  = spi_rx_pingpong[0];
+	  cmd_inbox_buf  = spi_rx_pingpong[1];
+	  if (HAL_SPI_TransmitReceive_DMA(hspi, spi_tx_active, spi_rx_active, PAYLOAD_LENGTH) != HAL_OK){
 	  //Set up DMA here, ready to receive
 		  Error_Handler();
 	  }
 }
 
 
-// SPI TX buf write -> copy newest motor_data to the motor_tele_buf
-void spi_write_next_tx_buf(const uint8_t* motor_new_data_buf, uint8_t* motor_tele_buf)
+// Copy a freshly-built telemetry frame into the inactive TX half (tele_stage_buf),
+// then flag it ready so the next TxRxCplt swaps it in.
+void spi_write_next_tx_buf(const uint8_t* src_frame, uint8_t* dst)
 {
-//	memcpy(motor_tele_buf, motor_new_data_buf, PAYLOAD_LENGTH);
 	for(int i = 0; i < PAYLOAD_LENGTH; i ++){
-		motor_tele_buf[i] = motor_new_data_buf[i];
+		dst[i] = src_frame[i];
 	}
-//	SCB_CleanDCache_by_Addr(motor_tele_buf, PAYLOAD_LENGTH);
-	data_tx_ready_flag = 1; //signal -> ok to send motor_tele in the next frame
+	data_tx_ready_flag = 1; //signal -> ok to send this frame next transfer
 }
 
 

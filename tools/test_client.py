@@ -154,17 +154,15 @@ def print_frame(msg_type: int, seq: int, payload: bytes) -> None:
         rs = ROBOT_STATE_NAMES.get(d.get("robot_state", 0), "?")
         print(f"[{_t()}] {label:<16} "
               f"robot_state={rs:<9} "
-              f"slave_alive={d.get('slave_alive', 0)} "
-              f"motors_alive=0b{d.get('motors_alive', 0):b} "
+              f"slave_alive=0b{d.get('slave_alive', 0):b} "
               f"link_errs={d.get('link_errors', 0)}")
 
     elif msg_type == MSG_SLAVE_STATUS:
         d = parse_slave_status(payload)
-        ms_val = d.get("motor_state", 0)
         print(f"[{_t()}] {label:<16} "
               f"slave={d.get('slave_id', 0)} "
-              f"slave_state={_motor_state_str(ms_val):<20} "
-              f"motors_alive=0b{d.get('motors_alive', 0):b}")
+              f"motors_alive=0b{d.get('motors_alive', 0):b} "
+              f"crc_errors={d.get('crc_errors', 0)}")
 
     elif msg_type == MSG_MOTOR_STATE:
         d = parse_motor_state(payload)

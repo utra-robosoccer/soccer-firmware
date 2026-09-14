@@ -247,9 +247,9 @@ int main(void)
 
       /* Build the whole telemetry frame in one atomic pass, then CRC it, before
          handing it to the DMA double-buffer. Layout (protocol.h):
-         [alive_mask][echo_seq][MotorState × N][health_rsvd[8]][crc16]. */
+         [alive_mask][echo_seq][MotorState × N][slave_debug_rsvd[8]][crc16]. */
       uint8_t frame[PAYLOAD_LENGTH];
-      memset(frame, 0, sizeof(frame));            /* zeroes health_rsvd + padding */
+      memset(frame, 0, sizeof(frame));            /* zeroes slave_debug_rsvd + padding */
       frame[0] = motor_runtime_motors_alive();
       frame[1] = phase1_echo_seq;
       MotorState *ms = (MotorState *)&frame[SPI_TELE_HDR_BYTES];
@@ -259,7 +259,7 @@ int main(void)
       uint16_t crc = proto_crc16(frame, (size_t)(PAYLOAD_LENGTH - SPI_TELE_CRC_BYTES));
       frame[PAYLOAD_LENGTH - 2] = (uint8_t)(crc & 0xFFu);   /* little-endian */
       frame[PAYLOAD_LENGTH - 1] = (uint8_t)(crc >> 8);
-      spi_write_next_tx_buf(frame, motor_tele_buf);
+      spi_write_next_tx_buf(frame, tele_stage_buf);
     }
 
     if (phase1_led_off_ms != 0U && (int32_t)(now - phase1_led_off_ms) >= 0) {
@@ -270,8 +270,8 @@ int main(void)
     /* SPI command handler — dispatch to motor_runtime state machine */
     if (data_receive_flag) {
       data_receive_flag = 0;
-      uint8_t cmd = motor_update_buf[0];
-      phase1_echo_seq = motor_update_buf[1];   /* echo back in next telemetry frame */
+      uint8_t cmd = cmd_inbox_buf[0];
+      phase1_echo_seq = cmd_inbox_buf[1];   /* echo back in next telemetry frame */
       /* Any command proves the master link is alive — refresh EVERY motor's
          watchdog. Otherwise a long blocking op on one motor (e.g. zeroing
          several motors in a row, each ~60 ms) lets an already-armed motor's
@@ -293,7 +293,7 @@ int main(void)
           for (uint8_t _i = 0; _i < N_MOTORS; _i++) {
             SpiMitCmd mc;
             /* MIT payload rides after the [cmd][seq] header (SPI_CMD_HDR_BYTES). */
-            memcpy(&mc, motor_update_buf + SPI_CMD_HDR_BYTES + _i * (uint8_t)sizeof(SpiMitCmd),
+            memcpy(&mc, cmd_inbox_buf + SPI_CMD_HDR_BYTES + _i * (uint8_t)sizeof(SpiMitCmd),
                    sizeof(SpiMitCmd));
             if (mc.valid) {
               /* Clamp to the motor's soft angle limits on the slave side. */
