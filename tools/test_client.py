@@ -34,7 +34,7 @@ import tty
 
 import serial
 
-# Motor table generated from configs/slave0.yaml (single source of truth).
+# Motor table generated from the active setup's slave YAMLs (single source of truth).
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 try:
     from motor_config_gen import (
@@ -43,74 +43,31 @@ try:
     )
 except ImportError:
     sys.exit("motor_config_gen.py not found — run:\n"
-             "    python3 scripts/gen_motor_config.py configs/slave0.yaml")
+             "    python3 scripts/gen_motor_config.py")
 
 # ═══════════════════════════════════════════════════════════════════
-#  Protocol constants  (mirror firmware/common/include/protocol.h)
+#  Protocol — the canonical wire library (host/jetson/protocol.py)
 # ═══════════════════════════════════════════════════════════════════
+_HOST_JETSON = os.path.join(
+    os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "host", "jetson")
+sys.path.insert(0, _HOST_JETSON)
+from protocol import (                                       # noqa: E402
+    NODE_JETSON, NODE_MASTER, NODE_SLAVE_0,
+    MSG_PING, MSG_MASTER_STATUS, MSG_SLAVE_STATUS, MSG_MOTOR_STATE,
+    MSG_CONTROL_REQ, MSG_CONTROL_RESP, MSG_MOTOR_CMD, MSG_NAMES,
+    ROBOT_STATE_NAMES, LIFECYCLE_NAMES, CAUSE_NAMES,
+    CTRL_ARM_HOLD, CTRL_DISABLE, CTRL_GOTO_ZERO, CTRL_RESULT_NAMES,
+    CMDFLAG_CLAMPED_POS, CMDFLAG_CLAMPED_TAU, CMDFLAG_CMD_STALE,
+    HDR_FMT, HDR_SIZE, crc16, encode_frame, decode_frame,
+    FMT_MASTER_STATUS, FMT_SLAVE_STATUS, FMT_CONTROL_REQ, FMT_CONTROL_RESP,
+    FMT_MOTOR_CMD, MotorState, MOTORSTATE_SIZE,
+    parse_master_status, parse_slave_status, parse_control_resp,
+    parse_motor_state as _proto_parse_motor_state,
+)
 
-# NodeId
-NODE_JETSON  = 1
-NODE_MASTER  = 2
-NODE_SLAVE_0 = 3
-
-# MsgType
-MSG_PING          = 0x01
-MSG_MASTER_STATUS = 0x02
-MSG_SLAVE_STATUS  = 0x03
-MSG_MOTOR_STATE   = 0x04
-MSG_CONTROL_REQ   = 0x05
-MSG_CONTROL_RESP  = 0x06
-MSG_MOTOR_CMD     = 0x07
-
-MSG_NAMES = {
-    MSG_PING:          "PING",
-    MSG_MASTER_STATUS: "MASTER_STATUS",
-    MSG_SLAVE_STATUS:  "SLAVE_STATUS",
-    MSG_MOTOR_STATE:   "MOTOR_STATE",
-    MSG_CONTROL_REQ:   "CONTROL_REQ",
-    MSG_CONTROL_RESP:  "CONTROL_RESP",
-    MSG_MOTOR_CMD:     "MOTOR_CMD",
-}
-
-# RobotState
-ROBOT_STATE_NAMES = {0: "INIT", 1: "READY", 2: "DEGRADED"}
-
-# MotorLifecycle
-MOTOR_STATE_NAMES = {
-    0: "BOOT", 1: "DISCOVERING", 2: "IDLE",
-    3: "ARMED_HOLD", 4: "FAULT", 5: "DISABLED", 6: "ZEROING",
-    7: "ARMED_MIT",
-}
-
-# ControlCmd
-CTRL_ARM_HOLD  = 0x01
-CTRL_DISABLE   = 0x02
-CTRL_GOTO_ZERO = 0x04
-
-# ControlResult
-CTRL_RESULT_NAMES = {0: "OK", 1: "ERR_STATE", 2: "ERR_STUB", 3: "ERR_MOTOR"}
-
-# ── MsgHeader wire layout (little-endian, packed, 16 bytes) ───────────────
-HDR_FMT  = "<HHBBIHHH"
-HDR_SIZE = struct.calcsize(HDR_FMT)  # 16
-
-# Payload formats (little-endian, packed). Multi-slave: control/telemetry carry
-# a leading slave_id, and motor_idx is LOCAL to that slave.
-FMT_MASTER_STATUS = "<BBBIII"    # 15 bytes
-FMT_SLAVE_STATUS  = "<BBBI"      #  7 bytes: slave_id, motors_alive, motor_state, uptime
-FMT_MOTOR_STATE   = "<BBBffffHH" # 23 bytes: slave_id, motor_idx, state, pos,vel,tau,temp, fault, lcs
-FMT_CONTROL_REQ   = "<BBBB"      #  4 bytes: slave_id, motor_idx, cmd, reserved
-FMT_CONTROL_RESP  = "<BBBBBH"    #  7 bytes: slave_id, motor_idx, cmd, result, new_state, req_seq
-FMT_MOTOR_CMD     = "<BBfffff"   # 22 bytes: slave_id, motor_idx, pos, vel, kp, kd, tau_ff
-
-assert HDR_SIZE == 16,                            f"HDR {HDR_SIZE}"
-assert struct.calcsize(FMT_MASTER_STATUS) == 15,  "MasterStatus"
-assert struct.calcsize(FMT_SLAVE_STATUS)  == 7,   "SlaveStatus"
-assert struct.calcsize(FMT_MOTOR_STATE)   == 23,  "MotorState"
-assert struct.calcsize(FMT_CONTROL_REQ)   == 4,   "ControlReq"
-assert struct.calcsize(FMT_CONTROL_RESP)  == 7,   "ControlResp"
-assert struct.calcsize(FMT_MOTOR_CMD)     == 22,  "MotorCmd"
+# dashboard.py (and this module's display) reference MOTOR_STATE_NAMES — keep it
+# as an alias of the library's lifecycle table.
+MOTOR_STATE_NAMES = LIFECYCLE_NAMES
 
 # ── Python-side sine parameters ───────────────────────────────────────────────
 # The sweep is sized PER MOTOR to its soft limits: amplitude = OVERSHOOT × the
@@ -151,108 +108,20 @@ def _motor_label(idx: int) -> str:
     return f"id={idx + 1}"
 
 # ═══════════════════════════════════════════════════════════════════
-#  CRC16-CCITT  (poly=0x1021, init=0xFFFF — must match firmware)
+#  MOTOR_STATE decode: library wire-parse + app-level global-index glue
 # ═══════════════════════════════════════════════════════════════════
-
-def _crc16_update(crc: int, data: bytes) -> int:
-    for byte in data:
-        crc ^= byte << 8
-        for _ in range(8):
-            crc = ((crc << 1) ^ 0x1021) if (crc & 0x8000) else (crc << 1)
-            crc &= 0xFFFF
-    return crc
-
-def crc16(data: bytes) -> int:
-    return _crc16_update(0xFFFF, data)
-
-# ═══════════════════════════════════════════════════════════════════
-#  Frame encode / decode
-# ═══════════════════════════════════════════════════════════════════
-
-_seq = 0
-
-def encode_frame(msg_type: int, src: int, dst: int,
-                 payload: bytes = b"") -> bytes:
-    global _seq
-    ts_ms = (time.monotonic_ns() // 1_000_000) & 0xFFFFFFFF
-    hdr = struct.pack(HDR_FMT,
-                      msg_type, _seq, src, dst,
-                      ts_ms, len(payload), 0, 0)
-    frame = bytearray(hdr) + payload
-    checksum = crc16(bytes(frame))
-    frame[14] = checksum & 0xFF
-    frame[15] = (checksum >> 8) & 0xFF
-    _seq = (_seq + 1) & 0xFFFF
-    return bytes(frame)
-
-
-_MAX_PAYLOAD = 256
-
-def decode_frame(buf: bytearray):
-    """
-    Try to decode one frame from buf (mutated in place on resync).
-
-    Returns (msg_type, seq, ts_ms, payload_bytes, consumed) on success.
-    Returns None if buf doesn't yet contain a complete valid frame.
-    Drops one byte and retries on bad CRC or implausible pay_len.
-    """
-    while len(buf) >= HDR_SIZE:
-        msg_type, seq, src, dst, ts_ms, pay_len, flags, crc_wire = \
-            struct.unpack_from(HDR_FMT, buf, 0)
-
-        if pay_len > _MAX_PAYLOAD:
-            del buf[0]
-            continue
-
-        total = HDR_SIZE + pay_len
-        if len(buf) < total:
-            return None
-
-        check = bytearray(buf[:total])
-        check[14] = 0
-        check[15] = 0
-        if crc16(bytes(check)) != crc_wire:
-            del buf[0]
-            continue
-
-        payload = bytes(buf[HDR_SIZE:total])
-        return (msg_type, seq, ts_ms, payload, total)
-
-    return None
-
-# ═══════════════════════════════════════════════════════════════════
-#  Payload parsers
-# ═══════════════════════════════════════════════════════════════════
-
-def parse_master_status(p: bytes) -> dict:
-    if len(p) < struct.calcsize(FMT_MASTER_STATUS):
-        return {}
-    rs, sa, ma, up, le, rf = struct.unpack_from(FMT_MASTER_STATUS, p)
-    return dict(robot_state=rs, slave_alive=sa, motors_alive=ma,
-                uptime_ms=up, link_errors=le, rx_frames=rf)
-
-def parse_slave_status(p: bytes) -> dict:
-    if len(p) < struct.calcsize(FMT_SLAVE_STATUS):
-        return {}
-    sid, ma, ms, up = struct.unpack_from(FMT_SLAVE_STATUS, p)
-    return dict(slave_id=sid, motors_alive=ma, motor_state=ms, uptime_ms=up)
 
 def parse_motor_state(p: bytes) -> dict:
-    if len(p) < struct.calcsize(FMT_MOTOR_STATE):
+    """Wrap the library decoder with this client's flattened global index and
+    latest-position cache. Wire decoding lives in host/jetson/protocol.py."""
+    d = _proto_parse_motor_state(p)
+    if not d:
         return {}
-    sid, idx, st, pos, vel, tau, temp, ff, lcs = struct.unpack_from(FMT_MOTOR_STATE, p)
-    g = _global_of(sid, idx)
+    g = _global_of(d["slave_id"], d["motor_idx"])
     if g is not None:
-        _motor_pos[g] = pos
-    return dict(slave_id=sid, motor_idx=idx, gidx=g, state=st, pos=pos, vel=vel,
-                tau=tau, temp=temp, fault_flags=ff, last_cmd_seq=lcs)
-
-def parse_control_resp(p: bytes) -> dict:
-    if len(p) < struct.calcsize(FMT_CONTROL_RESP):
-        return {}
-    sid, idx, cmd, result, new_st, req_seq = struct.unpack_from(FMT_CONTROL_RESP, p)
-    return dict(slave_id=sid, motor_idx=idx, cmd=cmd, result=result,
-                new_state=new_st, req_seq=req_seq)
+        _motor_pos[g] = d["pos"]
+    d["gidx"] = g
+    return d
 
 # ═══════════════════════════════════════════════════════════════════
 #  Display helpers
@@ -308,7 +177,9 @@ def print_frame(msg_type: int, seq: int, payload: bytes) -> None:
               f"pos={d.get('pos', 0.0):+.3f} "
               f"vel={d.get('vel', 0.0):+.3f} "
               f"tau={d.get('tau', 0.0):+.3f} "
-              f"lcs={d.get('last_cmd_seq', 0)}")
+              f"cause={CAUSE_NAMES.get(d.get('cause', 0), '?')} "
+              f"fb={d.get('fb_age', 0)}ms "
+              f"flags=0x{d.get('cmd_flags', 0):02x}")
 
     elif msg_type == MSG_CONTROL_RESP:
         d = parse_control_resp(payload)

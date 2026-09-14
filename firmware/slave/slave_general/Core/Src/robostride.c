@@ -298,6 +298,25 @@ HAL_StatusTypeDef can_disable_motor(uint8_t id, uint16_t master_id)
 }
 
 // ============================================================================
+// COMM TYPE 4 (variant): Clear motor fault — stop frame with Byte0 = 1.
+// The RS motor latches its own faults; a normal enable (Type 3) is refused
+// until they are cleared with this.
+// ============================================================================
+HAL_StatusTypeDef can_clear_fault(uint8_t id, uint16_t master_id)
+{
+    txCanIdEx.mode = 4;
+    txCanIdEx.id = id;
+    txCanIdEx.data = master_id;
+    txCanIdEx.res = 0;
+
+    uint8_t msg[8] = {0x0};
+    msg[0] = 0x1;   // Byte0 = 1: clear latched fault
+    rs_can_tx_header.DLC = 8;
+
+    return can_tx(msg);
+}
+
+// ============================================================================
 // COMM TYPE 6: Set Mechanical Zero
 // ============================================================================
 HAL_StatusTypeDef can_set_mech_zero(uint8_t id, uint16_t master_id)

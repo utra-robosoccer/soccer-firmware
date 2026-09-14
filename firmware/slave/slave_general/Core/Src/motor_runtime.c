@@ -46,15 +46,15 @@ static uint16_t f_to_u16(float x, float lo, float hi)
     return (uint16_t)((x - lo) * 65535.0f / (hi - lo));
 }
 
-static uint16_t pack_faults(const motor_t *m)
+static uint8_t pack_faults(const motor_t *m)
 {
-    uint16_t f = 0;
-    f |= (uint16_t)m->motor_errors.undervoltage;
-    f |= (uint16_t)m->motor_errors.driver_fault   << 1u;
-    f |= (uint16_t)m->motor_errors.overheat        << 2u;
-    f |= (uint16_t)m->motor_errors.encoder_fault   << 3u;
-    f |= (uint16_t)m->motor_errors.stall_overload  << 4u;
-    f |= (uint16_t)m->motor_errors.uncalibrated    << 5u;
+    uint8_t f = 0;
+    f |= (uint8_t)m->motor_errors.undervoltage;
+    f |= (uint8_t)(m->motor_errors.driver_fault   << 1u);
+    f |= (uint8_t)(m->motor_errors.overheat        << 2u);
+    f |= (uint8_t)(m->motor_errors.encoder_fault   << 3u);
+    f |= (uint8_t)(m->motor_errors.stall_overload  << 4u);
+    f |= (uint8_t)(m->motor_errors.uncalibrated    << 5u);
     return f;
 }
 
@@ -103,31 +103,55 @@ void motor_runtime_update(uint32_t now_ms)
 {
     for (uint8_t i = 0; i < N_MOTORS; i++) {
         uint8_t cid = motor_configs[i].can_id;
-        const motor_t *m = get_motor_by_id(cid);
-        if (m != NULL) {
-            float wrapped           = wrap_pi(m->pos);
-            motors_rt[i].pos        = wrapped;
-            motors_rt[i].pos_offset = m->pos - wrapped;
-            motors_rt[i].vel        = m->rpm;
-            motors_rt[i].tau        = m->torq;
-            motors_rt[i].temp       = m->temperature;
-            motors_rt[i].fault_flags = pack_faults(m);
-        }
 
-        /* Per-motor torque trip: while actively driving (hold, live MIT, or
-           creeping home during zeroing), if the measured torque exceeds this
-           motor's max_tau, cut it to IDLE. ZEROING is guarded too so a joint
-           that jams or collides with the body mid-homing cannot keep pushing:
-           the creep waypoint marches toward 0 even when the joint is blocked,
-           so the position error (and torque) builds unbounded otherwise. Free
-           creep peaks well under max_tau (soft MOTOR_ZERO_KP), so this does not
-           false-trip a normal homing. apply_mit() is a no-op once idle, so the
-           trip latches until the host re-arms the motor. */
-        if ((motors_rt[i].state == MOTOR_ARMED_HOLD ||
-             motors_rt[i].state == MOTOR_ARMED_MIT  ||
-             motors_rt[i].state == MOTOR_ZEROING) &&
-            fabsf(motors_rt[i].tau) > motors_rt[i].cfg->max_tau) {
+        /* ONE coherent snapshot per motor per tick — feeds both the control logic
+           below AND the telemetry mirror cached into motors_rt[], so what we
+           report is exactly the state the logic acted on. pack_tele() then reads
+           only motors_rt[] (no second read of the live motors[]). */
+        motor_t snap;
+        motor_get_snapshot(i, &snap);
+
+        float wrapped            = wrap_pi(snap.pos);
+        motors_rt[i].pos         = wrapped;
+        motors_rt[i].pos_offset  = snap.pos - wrapped;
+        motors_rt[i].vel         = snap.rpm;
+        motors_rt[i].tau         = snap.torq;
+        motors_rt[i].temp        = snap.temperature;
+        motors_rt[i].motor_fault = pack_faults(&snap);
+        motors_rt[i].fault_word  = snap.fault_word;   /* telemetry mirror */
+        motors_rt[i].last_fb_ms  = snap.last_fb_ms;   /* fb_age basis      */
+
+        /* ── Fault detection while driving (hold, live MIT, or homing). Any trip
+           idles the motor and LATCHES a cause (cleared only on re-arm/disable).
+           Checked in priority order; the first to fire idles the motor, so the
+           chained else-ifs then see IDLE and skip.
+
+           CAN_TIMEOUT first: if this motor's feedback is stale, its tau and fault
+           bits are stale too and must not be trusted. OVERTORQUE guards ZEROING
+           as well — the creep waypoint marches toward 0 even when the joint is
+           blocked, so a jam would otherwise build torque unbounded; free creep
+           peaks well under max_tau so this does not false-trip a normal homing.
+           MOTOR_FAULT means the RS motor's own protection fired (it isn't running
+           MIT anyway) — idle, latch the cause, and one-shot read 0x3022 for the
+           detail (ISR latches the reply into the live fault_word). All are
+           one-shot: once idled the motor is no longer "driving", so no re-fire. */
+        uint8_t driving = (motors_rt[i].state == MOTOR_ARMED_HOLD ||
+                           motors_rt[i].state == MOTOR_ARMED_MIT  ||
+                           motors_rt[i].state == MOTOR_ZEROING);
+        if (driving &&
+            (uint32_t)(now_ms - snap.last_fb_ms) >= MOTOR_CAN_FB_TIMEOUT_MS) {
             idle_motor(i);
+            motors_rt[i].cause = CAUSE_CAN_TIMEOUT;
+        } else if (driving && motors_rt[i].motor_fault != 0u) {
+            idle_motor(i);
+            motors_rt[i].cause = CAUSE_MOTOR_FAULT;
+            motor_set_fault_word(i, 0xFFFFFFFFu);   /* sentinel in live motors[] */
+            motors_rt[i].fault_word = 0xFFFFFFFFu;   /* mirror it this tick too   */
+            can_read_single_param(cid, CAN_MASTER_ID, 0x3022u);
+        } else if (driving &&
+                   fabsf(motors_rt[i].tau) > motors_rt[i].cfg->max_tau) {
+            idle_motor(i);
+            motors_rt[i].cause = CAUSE_OVERTORQUE;
         }
 
         switch (motors_rt[i].state) {
@@ -143,7 +167,9 @@ void motor_runtime_update(uint32_t now_ms)
                          motors_rt[i].cfg->default_kd);
                 if ((now_ms - motors_rt[i].watchdog_ms) > MOTOR_WATCHDOG_MS) {
                     can_disable_motor(cid, CAN_MASTER_ID);
-                    motors_rt[i].state = MOTOR_IDLE;
+                    motors_rt[i].state    = MOTOR_IDLE;
+                    motors_rt[i].hold_vel = 0.0f;
+                    motors_rt[i].cause    = CAUSE_WATCHDOG;
                 }
                 break;
 
@@ -206,6 +232,7 @@ void motor_runtime_update(uint32_t now_ms)
                     (now_ms - motors_rt[i].watchdog_ms) > MOTOR_WATCHDOG_MS) {
                     can_disable_motor(cid, CAN_MASTER_ID);
                     motors_rt[i].state = MOTOR_IDLE;
+                    motors_rt[i].cause = CAUSE_WATCHDOG;
                 }
                 break;
             }
@@ -227,22 +254,50 @@ void motor_runtime_update(uint32_t now_ms)
             default:
                 break;
         }
+
+        /* cmd_flags — recomputed every tick, never latched. Only meaningful while
+           armed: CLAMPED_* reflect the most recent MIT command's clamping;
+           CMD_STALE means we're executing a held/watchdog setpoint, not a fresh
+           command this window. */
+        {
+            uint8_t cf = 0u;
+            if (motors_rt[i].state == MOTOR_ARMED_HOLD ||
+                motors_rt[i].state == MOTOR_ARMED_MIT) {
+                cf = motors_rt[i].got_fresh_cmd
+                         ? motors_rt[i].last_apply_clamp
+                         : (uint8_t)SPI_CMDFLAG_CMD_STALE;
+            }
+            motors_rt[i].got_fresh_cmd = 0u;
+            motors_rt[i].cmd_flags     = cf;
+        }
     }
 }
 
-HAL_StatusTypeDef motor_runtime_arm(uint8_t idx, uint16_t cmd_seq)
+HAL_StatusTypeDef motor_runtime_arm(uint8_t idx)
 {
     if (idx >= N_MOTORS)                          return HAL_ERROR;
     if (motors_rt[idx].state != MOTOR_IDLE)       return HAL_ERROR;
     if (!motors_rt[idx].alive)                    return HAL_ERROR;
 
     uint8_t cid = motor_configs[idx].can_id;
-    const motor_t *m = get_motor_by_id(cid);
-    if (m == NULL) return HAL_ERROR;
 
-    float wrapped = wrap_pi(m->pos);
+    motor_t snap;
+    motor_get_snapshot(idx, &snap);
+
+    /* ARM clears any latched fault. If the motor's OWN fault was latched, its
+       controller refuses the Type-3 enable until cleared, so send the CAN
+       fault-clear (Type-4, Byte0=1) first. */
+    if (snap.fault_word != 0u) {
+        can_clear_fault(cid, CAN_MASTER_ID);
+        HAL_Delay(5u);
+    }
+    motor_set_fault_word(idx, 0u);
+    motors_rt[idx].fault_word = 0u;        /* mirror the clear */
+    motors_rt[idx].cause      = CAUSE_NONE;
+
+    float wrapped = wrap_pi(snap.pos);
     motors_rt[idx].pos        = wrapped;
-    motors_rt[idx].pos_offset = m->pos - wrapped;
+    motors_rt[idx].pos_offset = snap.pos - wrapped;
     motors_rt[idx].hold_pos   = wrapped;   /* hold where it is, in home frame */
     motors_rt[idx].hold_vel   = 0.0f;
 
@@ -269,26 +324,43 @@ HAL_StatusTypeDef motor_runtime_arm(uint8_t idx, uint16_t cmd_seq)
              motors_rt[idx].cfg->default_kd);
 
     motors_rt[idx].state       = MOTOR_ARMED_HOLD;
-    motors_rt[idx].last_cmd_seq = cmd_seq;
     motors_rt[idx].watchdog_ms = HAL_GetTick();
     return HAL_OK;
 }
 
-HAL_StatusTypeDef motor_runtime_disable(uint8_t idx, uint16_t cmd_seq)
+HAL_StatusTypeDef motor_runtime_disable(uint8_t idx)
 {
     if (idx >= N_MOTORS) return HAL_ERROR;
     idle_motor(idx);
-    motors_rt[idx].last_cmd_seq = cmd_seq;
+    motors_rt[idx].cause = CAUSE_NONE;      /* commanded stop, not a fault */
+    motor_set_fault_word(idx, 0u);
+    motors_rt[idx].fault_word = 0u;         /* mirror the clear */
     return HAL_OK;
 }
 
-HAL_StatusTypeDef motor_runtime_goto_zero(uint8_t idx, uint16_t cmd_seq)
+HAL_StatusTypeDef motor_runtime_goto_zero(uint8_t idx)
 {
     if (idx >= N_MOTORS)                    return HAL_ERROR;
     if (motors_rt[idx].state != MOTOR_IDLE) return HAL_ERROR;
     if (!motors_rt[idx].alive)              return HAL_ERROR;
 
     uint8_t cid = motor_configs[idx].can_id;
+
+    /* Snapshot for the fault-word check and the unwind decision below. A second
+       snapshot is taken AFTER the mech-zero/enable sequence for the waypoint
+       init, because those operations change the motor's reported angle. */
+    motor_t snap;
+    motor_get_snapshot(idx, &snap);
+
+    /* GOTO_ZERO also enables the motor — clear any latched fault first (same as
+       arm), or the motor refuses the enable while its own fault is latched. */
+    if (snap.fault_word != 0u) {
+        can_clear_fault(cid, CAN_MASTER_ID);
+        HAL_Delay(5u);
+    }
+    motor_set_fault_word(idx, 0u);
+    motors_rt[idx].fault_word = 0u;         /* mirror the clear */
+    motors_rt[idx].cause      = CAUSE_NONE;
 
     /* Unwind a motor pinned at the ±4π position-report limit BEFORE trying to
        creep it home. Such a motor can't be controlled — commands saturate at
@@ -297,13 +369,10 @@ HAL_StatusTypeDef motor_runtime_goto_zero(uint8_t idx, uint16_t cmd_seq)
        in place loses nothing and brings the frame back near 0. (|offset| ≳ 3π
        targets the ±4π case only; a ±2π winding is still safely controllable.) */
     {
-        const motor_t *mw = get_motor_by_id(cid);
-        if (mw != NULL) {
-            float off = mw->pos - wrap_pi(mw->pos);
-            if (off > 9.0f || off < -9.0f) {
-                can_set_mech_zero(cid, CAN_MASTER_ID);
-                HAL_Delay(5u);
-            }
+        float off = snap.pos - wrap_pi(snap.pos);
+        if (off > 9.0f || off < -9.0f) {
+            can_set_mech_zero(cid, CAN_MASTER_ID);
+            HAL_Delay(5u);
         }
     }
 
@@ -322,13 +391,15 @@ HAL_StatusTypeDef motor_runtime_goto_zero(uint8_t idx, uint16_t cmd_seq)
     HAL_Delay(10u);
 
     /* Initialise waypoint at current position so the rate-limited ramp starts
-       correctly. Wrap to the home frame so zeroing creeps the short way toward 0
-       instead of unwinding a full turn from a wrapped power-up reading. */
-    const motor_t *mz = get_motor_by_id(cid);
-    if (mz != NULL) {
-        float wrapped = wrap_pi(mz->pos);
+       correctly. Re-snapshot here: the mech-zero/enable above may have changed
+       the reported angle. Wrap to the home frame so zeroing creeps the short way
+       toward 0 instead of unwinding a full turn from a wrapped power-up reading. */
+    motor_t snap_after;
+    motor_get_snapshot(idx, &snap_after);
+    {
+        float wrapped = wrap_pi(snap_after.pos);
         motors_rt[idx].pos        = wrapped;
-        motors_rt[idx].pos_offset = mz->pos - wrapped;
+        motors_rt[idx].pos_offset = snap_after.pos - wrapped;
     }
     motors_rt[idx].hold_pos = motors_rt[idx].pos;
     motors_rt[idx].hold_vel = 0.0f;
@@ -338,7 +409,6 @@ HAL_StatusTypeDef motor_runtime_goto_zero(uint8_t idx, uint16_t cmd_seq)
              MOTOR_ZERO_KP, MOTOR_ZERO_KD);
 
     motors_rt[idx].state        = MOTOR_ZEROING;
-    motors_rt[idx].last_cmd_seq = cmd_seq;
     motors_rt[idx].watchdog_ms  = HAL_GetTick();
     return HAL_OK;
 }
@@ -366,31 +436,49 @@ void motor_runtime_apply_mit(uint8_t idx, float pos, float vel)
        is smooth — no discontinuous jump in the kd term at the peak. */
     float lo = r->cfg->soft_min;
     float hi = r->cfg->soft_max;
+    uint8_t clamp = 0u;
     if (pos > hi) {
         pos = hi;
-        if (vel > 0.0f) vel = 0.0f;
+        clamp |= SPI_CMDFLAG_CLAMPED_POS;
+        if (vel > 0.0f) { vel = 0.0f; clamp |= SPI_CMDFLAG_CLAMPED_TAU; }
     } else if (pos < lo) {
         pos = lo;
-        if (vel < 0.0f) vel = 0.0f;
+        clamp |= SPI_CMDFLAG_CLAMPED_POS;
+        if (vel < 0.0f) { vel = 0.0f; clamp |= SPI_CMDFLAG_CLAMPED_TAU; }
     }
+
+    /* Record clamp result for this tick's cmd_flags. CLAMPED_TAU marks the
+       velocity feedforward (the kd torque term) being cancelled at the limit. */
+    r->last_apply_clamp = clamp;
+    r->got_fresh_cmd    = 1u;
 
     r->hold_pos = pos;
     r->hold_vel = vel;
     r->state    = MOTOR_ARMED_MIT;
 }
 
-void motor_runtime_pack_tele(SpiMotorTele *out, uint8_t idx)
+void motor_runtime_pack_tele(MotorState *out, uint8_t idx)
 {
     if (idx >= N_MOTORS || out == NULL) return;
+    /* Reads ONLY motors_rt[], populated from the single per-tick snapshot in
+       motor_runtime_update() — so telemetry reflects exactly the state the
+       control logic acted on, and there's no second read of the live motors[]. */
     const MotorRuntime *r = &motors_rt[idx];
-    out->motor_idx    = idx;
-    out->state        = (uint8_t)r->state;
-    out->fault_flags  = r->fault_flags;
-    out->pos_raw      = f_to_u16(r->pos,  MOTOR_P_MIN, MOTOR_P_MAX);
-    out->vel_raw      = f_to_u16(r->vel,  MOTOR_V_MIN, MOTOR_V_MAX);
-    out->tau_raw      = f_to_u16(r->tau,  MOTOR_T_MIN, MOTOR_T_MAX);
-    out->last_cmd_seq = r->last_cmd_seq;
-    out->temp_c       = (uint8_t)(r->temp < 0.0f ? 0u : (uint8_t)r->temp);
+
+    out->pos_raw     = f_to_u16(r->pos, MOTOR_P_MIN, MOTOR_P_MAX);
+    out->vel_raw     = f_to_u16(r->vel, MOTOR_V_MIN, MOTOR_V_MAX);
+    out->tau_raw     = f_to_u16(r->tau, MOTOR_T_MIN, MOTOR_T_MAX);
+    out->temp_c      = (uint8_t)(r->temp < 0.0f ? 0u : (uint8_t)r->temp);
+    out->state       = SPI_STATE_PACK(r->state, r->cause);
+    out->motor_fault = r->motor_fault;
+    out->cmd_flags   = r->cmd_flags;
+    out->fault_word  = r->fault_word;
+
+    /* fb_age: ms since THIS motor's last Type-2 feedback (from the cached
+       snapshot stamp), saturating at 255. */
+    uint32_t age     = HAL_GetTick() - r->last_fb_ms;
+    out->fb_age      = (age > 255u) ? 255u : (uint8_t)age;
+    out->_rsvd       = 0u;
 }
 
 uint8_t motor_runtime_motors_alive(void)

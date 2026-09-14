@@ -70,8 +70,6 @@ float spd_dbg = 1.0f;
 uint8_t random_count = 'A';
 volatile uint8_t spi_error_flag = 0;
 
-uint8_t motor_temp_tele_buf[PAYLOAD_LENGTH] = {0};
-
 //Callback functions redefinitions
 void spi_dbg_helper()
 {
@@ -148,91 +146,6 @@ void spi_write_next_tx_buf(const uint8_t* motor_new_data_buf, uint8_t* motor_tel
 	}
 //	SCB_CleanDCache_by_Addr(motor_tele_buf, PAYLOAD_LENGTH);
 	data_tx_ready_flag = 1; //signal -> ok to send motor_tele in the next frame
-}
-
-// --- Helper Functions ---
-static int float_to_uint(float x, float x_min, float x_max, unsigned int bits)
-{
-    /// Converts a float to an int, given range and number of bits ///
-    float span = x_max - x_min;
-    if(x < x_min) x = x_min;
-    else if(x > x_max) x = x_max;
-    return (int) ((x - x_min) * ((float)((1 << bits) / span)));
-}
-
-static float uint_to_float(int x_int, float x_min, float x_max, int bits)
-{
-    /// converts unsigned int to float, given range and number of bits ///
-    float span = x_max - x_min;
-    float offset = x_min;
-    return ((float)x_int) * span / ((float)((1 << bits) - 1)) + offset;
-}
-
-//This function updates all the motors inside the motor chain
-//update all motor using motor update buf, wait for feedback, and write feedback to a temper
-//using little endian to read from the motor update buffer
-/*Buffer is arranged as following:
- *
- * Motor chain - MOTOR 1
- * 0x0  MOTOR 1 ID
- * 0x1 	LSB POS
- * 0x2  MSB POS
- * 0x3  LSB SPD
- * 0x4  MSB SPD
- *
- * .
- * .
- * .
- *
- * Last motor
- * 0x<idx * 5>  MOTOR ID
- * 0x<idx * 5 + 1> 	LSB POS
- * 0x<idx * 5 + 2>  MSB POS
- * 0x<idx * 5 + 3>  LSB SPD
- * 0x<idx * 5 + 4>  MSB SPD
- *
- */
-HAL_StatusTypeDef spi_update_all_motors()
-{
-	for (int i = 0; i < MAX_MOTOR_COUNT; i ++){
-		motor_t* target_motor = get_motor_by_id(motor_update_buf[5 * i]);
-		if (target_motor == NULL) {
-			continue;
-		}
-		uint16_t raw_new_pos =  motor_update_buf[5 * i + 2] << 8 | motor_update_buf[5 * i + 1];
-		uint16_t raw_new_spd =  motor_update_buf[5 * i + 4] << 8 | motor_update_buf[5 * i + 3];
-//		char uart_msg[100];
-//		sprintf(uart_msg,"raw new pos = %X | raw new rpm = %X\r\n", (uint16_t)raw_new_pos, (uint16_t)raw_new_spd);
-//		HAL_UART_Transmit(&huart2, uart_msg, strlen(uart_msg), 10000);
-
-		float new_pos = uint_to_float(raw_new_pos, P_MIN, P_MAX, 16);
-		float new_spd = uint_to_float(raw_new_spd, V_MIN, V_MAX, 16);
-
-		target_motor -> set_pos = new_pos;
-		target_motor -> set_rpm = new_spd;
-
-		//for the rest we leave it as fixed, tbc later
-		target_motor -> set_kd = 1.0f;
-		target_motor -> set_kp = 15.0f;
-		target_motor -> set_torq = 0.0f;
-		if(motor_set_mit(target_motor -> id,
-						target_motor -> set_torq,
-						target_motor -> set_pos,
-						target_motor -> set_rpm,
-						target_motor -> set_kp,
-						target_motor -> set_kd) != HAL_OK) return HAL_ERROR;
-		//Should correctly update the motor
-		uint16_t motor_cur_pos = float_to_uint(target_motor -> pos, P_MIN, P_MAX, 16);
-		uint16_t motor_cur_rpm = float_to_uint(target_motor -> rpm, P_MIN, P_MAX, 16);
-		motor_temp_tele_buf[5*i] = target_motor -> id;
-		motor_temp_tele_buf[5*i + 1] = motor_cur_pos & 0xFF;
-		motor_temp_tele_buf[5*i + 2] = (motor_cur_pos>>8) & 0xFF;
-		motor_temp_tele_buf[5*i + 3] = motor_cur_rpm & 0xFF;
-		motor_temp_tele_buf[5*i + 4] = (motor_cur_rpm>>8) & 0xFF;
-	}
-
-	spi_write_next_tx_buf((uint8_t*)motor_temp_tele_buf, motor_tele_buf);
-	return HAL_OK;
 }
 
 

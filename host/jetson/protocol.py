@@ -1,236 +1,250 @@
+"""Canonical host-side protocol library for the soccer master link.
+
+Single source of truth for the master↔host USB wire format. Matches the firmware
+in ``firmware/common/include/protocol.h`` byte-for-byte: a raw
+``[MsgHeader(16 B)][payload]`` frame streamed over USB CDC, with CRC16-CCITT
+(poly 0x1021, init 0xFFFF) computed over the header (crc field zeroed) followed
+by the payload. This link is **not** COBS-framed.
+
+The slave→master telemetry ``MotorState`` atom is forwarded verbatim by the
+master (pass-through); the host decodes raw→engineering units here using the
+GLOBAL transport bounds generated from the active config
+(``tools/motor_config_gen.py``) — not per-model tables, because the slave encodes
+over those same global bounds.
+"""
 from __future__ import annotations
 
 from dataclasses import dataclass
-from enum import IntEnum
 import struct
-from typing import Optional
+import time
+
+# Global SPI transport bounds, generated from the active config. The slave
+# encodes pos/vel/tau over THESE bounds, so the host must decode with them.
+# Fallback = widest model (RS02) if the generated module isn't importable.
+try:
+    from motor_config_gen import (  # type: ignore
+        MOTOR_P_MIN, MOTOR_P_MAX, MOTOR_V_MIN, MOTOR_V_MAX, MOTOR_T_MIN, MOTOR_T_MAX,
+    )
+except Exception:  # pragma: no cover - fallback for standalone use
+    MOTOR_P_MIN, MOTOR_P_MAX = -12.57, 12.57
+    MOTOR_V_MIN, MOTOR_V_MAX = -44.0, 44.0
+    MOTOR_T_MIN, MOTOR_T_MAX = -17.0, 17.0
 
 
-FRAME_DELIMITER = 0x00
-MAX_PAYLOAD_LEN = 256
+# ── node ids ──────────────────────────────────────────────────────────────────
+NODE_JETSON  = 1
+NODE_MASTER  = 2
+NODE_SLAVE_0 = 3
 
-HEADER_FORMAT = "<HHBBIHHH"
-MOTOR_CMD_FORMAT = "<fffff"
-MOTOR_STATE_FORMAT = "<ffffIH"
+# ── message types ─────────────────────────────────────────────────────────────
+MSG_PING          = 0x01
+MSG_MASTER_STATUS = 0x02
+MSG_SLAVE_STATUS  = 0x03
+MSG_MOTOR_STATE   = 0x04
+MSG_CONTROL_REQ   = 0x05
+MSG_CONTROL_RESP  = 0x06
+MSG_MOTOR_CMD     = 0x07
 
-HEADER_SIZE = struct.calcsize(HEADER_FORMAT)
-MOTOR_CMD_SIZE = struct.calcsize(MOTOR_CMD_FORMAT)
-MOTOR_STATE_SIZE = struct.calcsize(MOTOR_STATE_FORMAT)
+MSG_NAMES = {
+    MSG_PING: "PING", MSG_MASTER_STATUS: "MASTER_STATUS",
+    MSG_SLAVE_STATUS: "SLAVE_STATUS", MSG_MOTOR_STATE: "MOTOR_STATE",
+    MSG_CONTROL_REQ: "CONTROL_REQ", MSG_CONTROL_RESP: "CONTROL_RESP",
+    MSG_MOTOR_CMD: "MOTOR_CMD",
+}
 
-CRC16_INIT = 0xFFFF
-CRC16_POLY = 0x1021
+# ── lifecycle (low nibble of MotorState.state) ────────────────────────────────
+LIFECYCLE_NAMES = {
+    0: "BOOT", 1: "DISCOVERING", 2: "IDLE", 3: "ARMED_HOLD", 4: "FAULT",
+    5: "DISABLED", 6: "ZEROING", 7: "ARMED_MIT",
+}
+# ── fault cause (high nibble of MotorState.state) ─────────────────────────────
+CAUSE_NONE, CAUSE_OVERTORQUE, CAUSE_CAN_TIMEOUT, CAUSE_WATCHDOG, CAUSE_MOTOR_FAULT = range(5)
+CAUSE_NAMES = {
+    0: "NONE", 1: "OVERTORQUE", 2: "CAN_TIMEOUT", 3: "WATCHDOG", 4: "MOTOR_FAULT",
+}
 
+# ── cmd_flags bits (recomputed each tick by the slave) ────────────────────────
+CMDFLAG_CLAMPED_POS = 1 << 0
+CMDFLAG_CLAMPED_TAU = 1 << 1
+CMDFLAG_CMD_STALE   = 1 << 2
 
-class ProtocolError(ValueError):
-    pass
+# ── control commands / results ────────────────────────────────────────────────
+CTRL_ARM_HOLD  = 0x01
+CTRL_DISABLE   = 0x02
+CTRL_SET_ZERO  = 0x03
+CTRL_GOTO_ZERO = 0x04
+CTRL_RESULT_NAMES = {0: "OK", 1: "ERR_STATE", 2: "ERR_STUB", 3: "ERR_MOTOR"}
 
+ROBOT_STATE_NAMES = {0: "INIT", 1: "READY", 2: "DEGRADED"}
 
-class MsgType(IntEnum):
-    PING = 1
-    DISCOVER = 2
-    MOTOR_STATE_REQ = 3
-    ARM_HOLD = 4
-    DISABLE = 5
-    MOTOR_STATE = 6
+# ── wire layouts (little-endian, packed) ──────────────────────────────────────
+HDR_FMT  = "<HHBBIHHH"          # type,seq,src,dst,ts_ms,len,flags,crc  → 16 B
+HDR_SIZE = struct.calcsize(HDR_FMT)
 
+FMT_MASTER_STATUS = "<BBBIII"   # robot_state,slave_alive,motors_alive,uptime,link_errs,rx_frames (15)
+FMT_SLAVE_STATUS  = "<BBBII"    # slave_id,motors_alive,motor_state,uptime,crc_errors (11)
+FMT_CONTROL_REQ   = "<BBBB"     # slave_id,motor_idx,cmd,reserved (4)
+FMT_CONTROL_RESP  = "<BBBBBH"   # slave_id,motor_idx,cmd,result,new_state,req_seq (7)
+FMT_MOTOR_CMD     = "<BBfffff"  # slave_id,motor_idx,pos,vel,kp,kd,tau_ff (22)
 
-class NodeId(IntEnum):
-    JETSON = 1
-    MASTER = 2
-    SLAVE = 3
-    BROADCAST = 255
+MOTORSTATE_FMT  = "<HHHBBBBIBB"  # 16 B telemetry atom
+MOTORSTATE_SIZE = struct.calcsize(MOTORSTATE_FMT)
+FMT_MOTOR_STATE_HDR = "<BB"      # slave_id, motor_idx before the atom
 
-
-class MotorLifecycleState(IntEnum):
-    UNDISCOVERED = 0
-    DISCOVERING = 1
-    IDLE = 2
-    ARMING_HOLD = 3
-    ARMED_HOLD = 4
-    MIT_CONTROL = 5
-    ZEROING = 6
-    DISABLING = 7
-    DISABLED = 8
-    FAULT = 9
-
-
-@dataclass(frozen=True)
-class MsgHeader:
-    type: MsgType
-    seq: int
-    source: int
-    target: int
-    ts_us: int
-    length: int
-    flags: int = 0
-    crc: int = 0
-
-    def pack(self, *, crc: Optional[int] = None) -> bytes:
-        return struct.pack(
-            HEADER_FORMAT,
-            int(self.type),
-            self.seq,
-            self.source,
-            self.target,
-            self.ts_us,
-            self.length,
-            self.flags,
-            self.crc if crc is None else crc,
-        )
-
-    @classmethod
-    def unpack(cls, data: bytes) -> "MsgHeader":
-        if len(data) != HEADER_SIZE:
-            raise ProtocolError(f"header must be {HEADER_SIZE} bytes")
-        msg_type, seq, source, target, ts_us, length, flags, crc = struct.unpack(HEADER_FORMAT, data)
-        return cls(MsgType(msg_type), seq, source, target, ts_us, length, flags, crc)
+assert HDR_SIZE == 16, HDR_SIZE
+assert MOTORSTATE_SIZE == 16, MOTORSTATE_SIZE
+assert struct.calcsize(FMT_SLAVE_STATUS) == 11
+assert struct.calcsize(FMT_MASTER_STATUS) == 15
 
 
-@dataclass(frozen=True)
-class MotorCmd:
-    pos: float
-    vel: float
-    kp: float
-    kd: float
-    tau: float
-
-    def pack(self) -> bytes:
-        return struct.pack(MOTOR_CMD_FORMAT, self.pos, self.vel, self.kp, self.kd, self.tau)
-
-    @classmethod
-    def unpack(cls, data: bytes) -> "MotorCmd":
-        if len(data) != MOTOR_CMD_SIZE:
-            raise ProtocolError(f"MotorCmd must be {MOTOR_CMD_SIZE} bytes")
-        return cls(*struct.unpack(MOTOR_CMD_FORMAT, data))
+def _decode(raw: int, lo: float, hi: float) -> float:
+    """Inverse of the slave's f_to_u16: raw 0..65535 → [lo, hi]."""
+    return lo + raw * (hi - lo) / 65535.0
 
 
 @dataclass(frozen=True)
 class MotorState:
-    pos: float
-    vel: float
-    tau: float
-    temp: float
-    fault: int
-    last_cmd_seq: int
+    """One motor's 16-byte telemetry atom, forwarded verbatim by the master.
 
-    def pack(self) -> bytes:
-        return struct.pack(
-            MOTOR_STATE_FORMAT,
-            self.pos,
-            self.vel,
-            self.tau,
-            self.temp,
-            self.fault,
-            self.last_cmd_seq,
-        )
+    ``pos_raw`` is the HOME-FRAME wrapped ``[-pi, pi]`` position scaled over the
+    ``±4π`` transport bound — NOT the motor's multi-turn angle. ``vel_raw`` /
+    ``tau_raw`` are scaled over the global transport bounds (widest model).
+    """
+    pos_raw: int
+    vel_raw: int
+    tau_raw: int
+    temp_c: int
+    state: int          # [3:0] lifecycle | [7:4] fault cause
+    motor_fault: int    # 6 compact Type-2 fault bits
+    cmd_flags: int
+    fault_word: int     # 0x3022 latched on fault; 0 clear; 0xFFFFFFFF read-fail
+    fb_age: int         # ms since this motor's last Type-2, saturating 255
+    rsvd: int
 
     @classmethod
     def unpack(cls, data: bytes) -> "MotorState":
-        if len(data) != MOTOR_STATE_SIZE:
-            raise ProtocolError(f"MotorState must be {MOTOR_STATE_SIZE} bytes")
-        return cls(*struct.unpack(MOTOR_STATE_FORMAT, data))
+        return cls(*struct.unpack_from(MOTORSTATE_FMT, data, 0))
+
+    @property
+    def lifecycle(self) -> int: return self.state & 0x0F
+    @property
+    def cause(self) -> int: return self.state >> 4
+    @property
+    def lifecycle_name(self) -> str: return LIFECYCLE_NAMES.get(self.lifecycle, f"?{self.lifecycle}")
+    @property
+    def cause_name(self) -> str: return CAUSE_NAMES.get(self.cause, f"?{self.cause}")
+
+    @property
+    def pos(self) -> float: return _decode(self.pos_raw, MOTOR_P_MIN, MOTOR_P_MAX)
+    @property
+    def vel(self) -> float: return _decode(self.vel_raw, MOTOR_V_MIN, MOTOR_V_MAX)
+    @property
+    def tau(self) -> float: return _decode(self.tau_raw, MOTOR_T_MIN, MOTOR_T_MAX)
+    @property
+    def temp(self) -> float: return float(self.temp_c)
+
+    @property
+    def clamped_pos(self) -> bool: return bool(self.cmd_flags & CMDFLAG_CLAMPED_POS)
+    @property
+    def clamped_tau(self) -> bool: return bool(self.cmd_flags & CMDFLAG_CLAMPED_TAU)
+    @property
+    def cmd_stale(self) -> bool: return bool(self.cmd_flags & CMDFLAG_CMD_STALE)
 
 
-@dataclass(frozen=True)
-class Message:
-    header: MsgHeader
-    payload: bytes = b""
-
-
-def crc16_ccitt(data: bytes, crc: int = CRC16_INIT) -> int:
+# ── CRC16-CCITT (must match firmware proto_crc16) ─────────────────────────────
+def _crc16_update(crc: int, data: bytes) -> int:
     for byte in data:
         crc ^= byte << 8
         for _ in range(8):
-            if crc & 0x8000:
-                crc = ((crc << 1) ^ CRC16_POLY) & 0xFFFF
-            else:
-                crc = (crc << 1) & 0xFFFF
+            crc = ((crc << 1) ^ 0x1021) if (crc & 0x8000) else (crc << 1)
+            crc &= 0xFFFF
     return crc
 
 
-def cobs_encode(data: bytes) -> bytes:
-    out = bytearray([0])
-    code_index = 0
-    code = 1
-
-    for byte in data:
-        if byte == 0:
-            out[code_index] = code
-            code_index = len(out)
-            out.append(0)
-            code = 1
-        else:
-            out.append(byte)
-            code += 1
-            if code == 0xFF:
-                out[code_index] = code
-                code_index = len(out)
-                out.append(0)
-                code = 1
-
-    out[code_index] = code
-    return bytes(out)
+def crc16(data: bytes) -> int:
+    return _crc16_update(0xFFFF, data)
 
 
-def cobs_decode(data: bytes) -> bytes:
-    out = bytearray()
-    index = 0
-
-    while index < len(data):
-        code = data[index]
-        if code == 0:
-            raise ProtocolError("COBS payload contains delimiter")
-        index += 1
-
-        end = index + code - 1
-        if end > len(data):
-            raise ProtocolError("COBS code overruns payload")
-        out.extend(data[index:end])
-        index = end
-
-        if code != 0xFF and index < len(data):
-            out.append(0)
-
-    return bytes(out)
+# ── frame encode / decode ─────────────────────────────────────────────────────
+_seq = 0
+_MAX_PAYLOAD = 256
 
 
-def encode_message(
-    msg_type: MsgType,
-    *,
-    seq: int,
-    source: int,
-    target: int,
-    ts_us: int,
-    payload: bytes = b"",
-    flags: int = 0,
-) -> bytes:
-    if len(payload) > MAX_PAYLOAD_LEN:
-        raise ProtocolError("payload too large")
-
-    header = MsgHeader(msg_type, seq, source, target, ts_us, len(payload), flags, 0)
-    packet_without_crc = header.pack(crc=0) + payload
-    crc = crc16_ccitt(packet_without_crc)
-    packet = header.pack(crc=crc) + payload
-    return cobs_encode(packet) + bytes([FRAME_DELIMITER])
+def encode_frame(msg_type: int, src: int, dst: int, payload: bytes = b"") -> bytes:
+    global _seq
+    ts_ms = (time.monotonic_ns() // 1_000_000) & 0xFFFFFFFF
+    hdr = struct.pack(HDR_FMT, msg_type, _seq, src, dst, ts_ms, len(payload), 0, 0)
+    frame = bytearray(hdr) + payload
+    checksum = crc16(bytes(frame))
+    frame[14] = checksum & 0xFF
+    frame[15] = (checksum >> 8) & 0xFF
+    _seq = (_seq + 1) & 0xFFFF
+    return bytes(frame)
 
 
-def decode_frame(frame: bytes) -> Message:
-    if frame.endswith(bytes([FRAME_DELIMITER])):
-        frame = frame[:-1]
-    if not frame:
-        raise ProtocolError("empty frame")
+def decode_frame(buf: bytearray):
+    """Decode one frame from ``buf`` (mutated in place on resync).
 
-    packet = cobs_decode(frame)
-    if len(packet) < HEADER_SIZE:
-        raise ProtocolError("packet shorter than header")
+    Returns ``(msg_type, seq, ts_ms, payload, consumed)`` or ``None`` if no
+    complete valid frame is present yet. Drops one byte and retries on bad CRC
+    or implausible payload length.
+    """
+    while len(buf) >= HDR_SIZE:
+        msg_type, seq, src, dst, ts_ms, pay_len, flags, crc_wire = \
+            struct.unpack_from(HDR_FMT, buf, 0)
+        if pay_len > _MAX_PAYLOAD:
+            del buf[0]
+            continue
+        total = HDR_SIZE + pay_len
+        if len(buf) < total:
+            return None
+        check = bytearray(buf[:total])
+        check[14] = 0
+        check[15] = 0
+        if crc16(bytes(check)) != crc_wire:
+            del buf[0]
+            continue
+        payload = bytes(buf[HDR_SIZE:total])
+        return (msg_type, seq, ts_ms, payload, total)
+    return None
 
-    header = MsgHeader.unpack(packet[:HEADER_SIZE])
-    payload = packet[HEADER_SIZE:]
-    if len(payload) != header.length:
-        raise ProtocolError("payload length mismatch")
 
-    expected_crc = crc16_ccitt(header.pack(crc=0) + payload)
-    if header.crc != expected_crc:
-        raise ProtocolError("CRC mismatch")
+# ── payload parsers ───────────────────────────────────────────────────────────
+def parse_master_status(p: bytes) -> dict:
+    if len(p) < struct.calcsize(FMT_MASTER_STATUS):
+        return {}
+    rs, sa, ma, up, le, rf = struct.unpack_from(FMT_MASTER_STATUS, p)
+    return dict(robot_state=rs, slave_alive=sa, motors_alive=ma,
+                uptime_ms=up, link_errors=le, rx_frames=rf)
 
-    return Message(header, payload)
+
+def parse_slave_status(p: bytes) -> dict:
+    if len(p) < struct.calcsize(FMT_SLAVE_STATUS):
+        return {}
+    sid, ma, ms, up, crc_err = struct.unpack_from(FMT_SLAVE_STATUS, p)
+    return dict(slave_id=sid, motors_alive=ma, motor_state=ms,
+                uptime_ms=up, crc_errors=crc_err)
+
+
+def parse_motor_state(p: bytes) -> dict:
+    """Decode a MotorStatePayload: [slave_id][motor_idx][MotorState atom].
+
+    Returns the addressing fields plus the decoded atom (engineering units and
+    the ``MotorState`` object under ``motor``)."""
+    if len(p) < struct.calcsize(FMT_MOTOR_STATE_HDR) + MOTORSTATE_SIZE:
+        return {}
+    sid, idx = struct.unpack_from(FMT_MOTOR_STATE_HDR, p, 0)
+    ms = MotorState.unpack(p[struct.calcsize(FMT_MOTOR_STATE_HDR):])
+    return dict(slave_id=sid, motor_idx=idx, motor=ms,
+                state=ms.lifecycle, cause=ms.cause,
+                pos=ms.pos, vel=ms.vel, tau=ms.tau, temp=ms.temp,
+                motor_fault=ms.motor_fault, cmd_flags=ms.cmd_flags,
+                fault_word=ms.fault_word, fb_age=ms.fb_age)
+
+
+def parse_control_resp(p: bytes) -> dict:
+    if len(p) < struct.calcsize(FMT_CONTROL_RESP):
+        return {}
+    sid, idx, cmd, result, new_st, req_seq = struct.unpack_from(FMT_CONTROL_RESP, p)
+    return dict(slave_id=sid, motor_idx=idx, cmd=cmd, result=result,
+                new_state=new_st, req_seq=req_seq)

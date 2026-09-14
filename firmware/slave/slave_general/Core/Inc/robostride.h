@@ -88,6 +88,13 @@ typedef struct {
     float kd;
     float torq; // Nm
 
+    // Telemetry health. Read only via motor_get_snapshot() (a critical-section
+    // struct copy), so no volatile is needed here — the copy's memory barrier
+    // orders the ISR's writes. last_fb_ms is ISR-written; fault_word is written
+    // by the ISR (0x3022 latch) and by main via motor_set_fault_word().
+    uint32_t last_fb_ms;   // HAL_GetTick() at last Type-2 feedback
+    uint32_t fault_word;   // latched 0x3022 read (0=clear, 0xFFFFFFFF=read-fail)
+
     // Motor set point
     float set_pos;
     float set_rpm;
@@ -128,6 +135,7 @@ HAL_StatusTypeDef can_enable_motor(uint8_t id, uint16_t master_id);
 
 // Comm Type 4
 HAL_StatusTypeDef can_disable_motor(uint8_t id, uint16_t master_id);
+HAL_StatusTypeDef can_clear_fault(uint8_t id, uint16_t master_id);  // Type-4, Byte0=1
 
 // Comm Type 6
 HAL_StatusTypeDef can_set_mech_zero(uint8_t id, uint16_t master_id);

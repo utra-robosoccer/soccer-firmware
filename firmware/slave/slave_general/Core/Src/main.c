@@ -73,6 +73,7 @@ static uint32_t phase1_next_poll_ms = 0;
 static uint32_t phase1_last_print_ms = 0;
 static uint32_t phase1_last_feedback_count = 0;
 static uint32_t phase1_led_off_ms = 0;
+static uint8_t  phase1_echo_seq = 0;   /* seq byte of the most recent command frame */
 
 /* USER CODE END PV */
 
@@ -196,12 +197,9 @@ int main(void)
   MX_UART4_Init();
   /* USER CODE BEGIN 2 */
 
-  /* Align CAN motor array IDs with motor_configs */
-  for (uint8_t i = 0; i < N_MOTORS; i++) {
-    memset(&motors[i], 0, sizeof(motors[i]));
-    motors[i].id        = motor_configs[i].can_id;
-    motors[i].master_id = CAN_MASTER_ID;
-  }
+  /* Bind CAN ids into the (private) motors[] before the bus starts, so the RX
+     ISR's id lookup can match feedback. */
+  motor_chain_bind_ids();
 
   if (can_bus_init() != HAL_OK) {
     Error_Handler();
@@ -242,15 +240,26 @@ int main(void)
 
       if ((now - phase1_last_print_ms) >= PHASE1_PRINT_PERIOD_MS) {
         phase1_last_print_ms = now;
-        phase1_print_motor_state(&motors[0]);
+        motor_t snap0;
+        motor_get_snapshot(0, &snap0);          /* coherent read for the debug print */
+        phase1_print_motor_state(&snap0);
       }
 
-      uint8_t tele[PAYLOAD_LENGTH] = {0};
-      tele[0] = motor_runtime_motors_alive();
+      /* Build the whole telemetry frame in one atomic pass, then CRC it, before
+         handing it to the DMA double-buffer. Layout (protocol.h):
+         [alive_mask][echo_seq][MotorState × N][health_rsvd[8]][crc16]. */
+      uint8_t frame[PAYLOAD_LENGTH];
+      memset(frame, 0, sizeof(frame));            /* zeroes health_rsvd + padding */
+      frame[0] = motor_runtime_motors_alive();
+      frame[1] = phase1_echo_seq;
+      MotorState *ms = (MotorState *)&frame[SPI_TELE_HDR_BYTES];
       for (uint8_t _i = 0; _i < N_MOTORS; _i++) {
-        motor_runtime_pack_tele((SpiMotorTele *)(&tele[1]) + _i, _i);
+        motor_runtime_pack_tele(&ms[_i], _i);
       }
-      spi_write_next_tx_buf(tele, motor_tele_buf);
+      uint16_t crc = proto_crc16(frame, (size_t)(PAYLOAD_LENGTH - SPI_TELE_CRC_BYTES));
+      frame[PAYLOAD_LENGTH - 2] = (uint8_t)(crc & 0xFFu);   /* little-endian */
+      frame[PAYLOAD_LENGTH - 1] = (uint8_t)(crc >> 8);
+      spi_write_next_tx_buf(frame, motor_tele_buf);
     }
 
     if (phase1_led_off_ms != 0U && (int32_t)(now - phase1_led_off_ms) >= 0) {
@@ -262,6 +271,7 @@ int main(void)
     if (data_receive_flag) {
       data_receive_flag = 0;
       uint8_t cmd = motor_update_buf[0];
+      phase1_echo_seq = motor_update_buf[1];   /* echo back in next telemetry frame */
       /* Any command proves the master link is alive — refresh EVERY motor's
          watchdog. Otherwise a long blocking op on one motor (e.g. zeroing
          several motors in a row, each ~60 ms) lets an already-armed motor's
@@ -271,18 +281,19 @@ int main(void)
       switch (cmd & 0x0Fu) {
         case SPI_CMD_ARM: {
           uint8_t idx = SPI_CMD_MOTOR_IDX(cmd);
-          motor_runtime_arm(idx, 0u);
+          motor_runtime_arm(idx);
           break;
         }
         case SPI_CMD_GOTO_ZERO: {
           uint8_t idx = SPI_CMD_MOTOR_IDX(cmd);
-          motor_runtime_goto_zero(idx, 0u);
+          motor_runtime_goto_zero(idx);
           break;
         }
         case SPI_CMD_MIT: {
           for (uint8_t _i = 0; _i < N_MOTORS; _i++) {
             SpiMitCmd mc;
-            memcpy(&mc, motor_update_buf + 1 + _i * (uint8_t)sizeof(SpiMitCmd),
+            /* MIT payload rides after the [cmd][seq] header (SPI_CMD_HDR_BYTES). */
+            memcpy(&mc, motor_update_buf + SPI_CMD_HDR_BYTES + _i * (uint8_t)sizeof(SpiMitCmd),
                    sizeof(SpiMitCmd));
             if (mc.valid) {
               /* Clamp to the motor's soft angle limits on the slave side. */
@@ -299,7 +310,7 @@ int main(void)
           break;
         case SPI_CMD_DISARM:
           for (uint8_t _i = 0; _i < N_MOTORS; _i++)
-            motor_runtime_disable(_i, 0u);
+            motor_runtime_disable(_i);
           break;
         default:
           break;

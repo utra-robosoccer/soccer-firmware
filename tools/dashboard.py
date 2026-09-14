@@ -40,7 +40,7 @@ from motor_config_gen import (MOTOR_DEFAULT_KD, MOTOR_DEFAULT_KP, MOTORS, N_MOTO
 # ── shared state ──────────────────────────────────────────────────────────────
 
 class _MotorSnap:
-    __slots__ = ("state", "pos", "vel", "tau", "temp", "fault", "updated")
+    __slots__ = ("state", "pos", "vel", "tau", "temp", "fault", "cause", "fb_age", "updated")
     def __init__(self):
         self.state   = 2            # IDLE
         self.pos     = float("nan")
@@ -48,6 +48,8 @@ class _MotorSnap:
         self.tau     = float("nan")
         self.temp    = float("nan")
         self.fault   = 0
+        self.cause   = 0
+        self.fb_age  = 0
         self.updated = 0.0
 
 _lock   = threading.Lock()
@@ -246,7 +248,9 @@ def _ingest(mt: int, pl: bytes) -> None:
                 s.vel     = d["vel"]
                 s.tau     = d["tau"]
                 s.temp    = d["temp"]
-                s.fault   = d["fault_flags"]
+                s.fault   = d["motor_fault"]
+                s.cause   = d["cause"]
+                s.fb_age  = d["fb_age"]
                 s.updated = time.monotonic()
             # Motor just dropped out of its armed state (e.g. slave torque trip
             # → IDLE) while a sine was running: stop the host-side sine.

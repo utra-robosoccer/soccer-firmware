@@ -24,13 +24,12 @@
 #define BYTES_PER_MOTOR       5
 #define USB_BYTES_PER_MOTOR  sizeof(motor_cmd_t)
 
-/* SPI packet from a slave: 1 alive byte + (that slave's motor count) *
-   SpiMotorTele (13 bytes each). Per-slave sizes differ; buffers are allocated
-   for the widest slave and the per-slave length is computed at runtime from
-   slave_motor_counts[]. */
-#define SPI_TELE_BYTES   13u
-#define SPI_MAX_PKT_SIZE (1u + MAX_MOTORS_PER_SLAVE * SPI_TELE_BYTES)
-#define SPI_PKT_SIZE(n)  (1u + (uint16_t)(n) * SPI_TELE_BYTES)
+/* One full-duplex transfer per slave carries the CRC-framed telemetry frame
+   (protocol.h SPI_TELE_FRAME_SIZE) in the RX direction and the command frame in
+   the TX prefix. Per-slave sizes differ; buffers are sized for the widest slave
+   and the per-slave length is computed at runtime from slave_motor_counts[]. */
+#define SPI_MAX_PKT_SIZE SPI_TELE_FRAME_SIZE(MAX_MOTORS_PER_SLAVE)
+#define SPI_PKT_SIZE(n)  SPI_TELE_FRAME_SIZE(n)
 
 typedef enum {
     DEV1 = 0,

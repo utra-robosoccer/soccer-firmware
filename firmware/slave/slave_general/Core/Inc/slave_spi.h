@@ -24,10 +24,10 @@
 #define SPI_CMD_GOTO_ZERO_IDX(idx) (SPI_CMD_GOTO_ZERO | ((uint8_t)(idx) << 4u))
 #define SPI_CMD_MOTOR_IDX(cmd)     ((uint8_t)((cmd) >> 4u))
 
-/* Payload = 1 header byte (motors_alive mask) + N_MOTORS × SpiMotorTele  */
-#define SPI_TELE_SIZE  ((uint16_t)sizeof(SpiMotorTele))   /* 13 bytes */
-#define PAYLOAD_LENGTH (1u + N_MOTORS * SPI_TELE_SIZE)    /* 1 + N_MOTORS*13 */
-/* DMA buffers must hold the full payload; round up to a 32-byte multiple. */
+/* slave→master telemetry frame (see protocol.h SPI_TELE_FRAME_SIZE):
+   [alive_mask u8][echo_seq u8][MotorState × N][health_rsvd[8]][crc16 u16] */
+#define PAYLOAD_LENGTH SPI_TELE_FRAME_SIZE(N_MOTORS)
+/* DMA buffers must hold the full frame; round up to a 32-byte multiple. */
 #define BUFFER_SIZE    (((PAYLOAD_LENGTH) + 31u) & ~31u)
 
 extern uint8_t* volatile  motor_update_buf; //This belongs to the Rx side
@@ -41,7 +41,6 @@ extern uint8_t random_count; // just for spi dbg
 
 void spi_dma_init(SPI_HandleTypeDef *hspi);
 void spi_write_next_tx_buf(const uint8_t* motor_new_data_buf, uint8_t* motor_tele_buf);
-HAL_StatusTypeDef spi_update_all_motors();
 
 
 

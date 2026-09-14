@@ -47,7 +47,8 @@ fi
 
 CLEAN=0
 CONFIG_SLAVE=""
-# Parse leading options in any order: --clean / -c, --config <slaveN>
+SETUP_OVERRIDE=""
+# Parse leading options in any order: --clean / -c, --config <slaveN>, --setup <name>
 while [ $# -gt 0 ]; do
     case "$1" in
         --clean|-c) CLEAN=1; shift ;;
@@ -56,13 +57,18 @@ while [ $# -gt 0 ]; do
             CONFIG_SLAVE="$1"
             [ -n "$CONFIG_SLAVE" ] || { printf "error: --config needs a slave name (e.g. slave1)\n" >&2; exit 1; }
             shift ;;
+        --setup)
+            shift
+            SETUP_OVERRIDE="$1"
+            [ -n "$SETUP_OVERRIDE" ] || { printf "error: --setup needs a setup name (e.g. robot)\n" >&2; exit 1; }
+            shift ;;
         *) break ;;
     esac
 done
 
 if [ $# -eq 0 ]; then
     printf "error: no project path given\n" >&2
-    printf "Usage: %s [--clean] [--config <slaveN>] <project-path> [Debug|Release]\n" "$0" >&2
+    printf "Usage: %s [--clean] [--config <slaveN>] [--setup <name>] <project-path> [Debug|Release]\n" "$0" >&2
     exit 1
 fi
 
@@ -112,15 +118,25 @@ printf "CubeIDE: %s\n" "$CUBEIDE"
 printf "Project: %s  config: %s\n" "$PROJ_NAME" "$BUILD_CONFIG"
 
 # ── optional per-slave config regeneration ───────────────────────────────────
-# --config <slaveN> regenerates the slave's motor_config.h from configs/<slaveN>.yaml
-# so one shared source tree builds a per-slave binary.
+# --config <slaveN> regenerates the slave's motor_config.h from the active setup
+# (configs/<setup>/<slaveN>.yaml) so one shared source tree builds a per-slave
+# binary. The active setup comes from --setup, else $SOCCER_SETUP, else the
+# configs/active pointer file.
 if [ -n "$CONFIG_SLAVE" ]; then
-    CONFIG_YAML="$REPO_ROOT/configs/${CONFIG_SLAVE}.yaml"
-    if [ ! -f "$CONFIG_YAML" ]; then
-        printf "error: config '%s' not found (looked for %s)\n" "$CONFIG_SLAVE" "$CONFIG_YAML" >&2
+    SETUP="${SETUP_OVERRIDE:-${SOCCER_SETUP:-}}"
+    if [ -z "$SETUP" ] && [ -f "$REPO_ROOT/configs/active" ]; then
+        SETUP="$(tr -d '[:space:]' < "$REPO_ROOT/configs/active")"
+    fi
+    if [ -z "$SETUP" ]; then
+        printf "error: no active setup; write configs/active (e.g. 'echo bench > configs/active') or pass --setup <name>\n" >&2
         exit 1
     fi
-    printf "Config: regenerating motor_config.h from configs/%s.yaml\n" "$CONFIG_SLAVE"
+    CONFIG_YAML="$REPO_ROOT/configs/$SETUP/${CONFIG_SLAVE}.yaml"
+    if [ ! -f "$CONFIG_YAML" ]; then
+        printf "error: config '%s' not found for setup '%s' (looked for %s)\n" "$CONFIG_SLAVE" "$SETUP" "$CONFIG_YAML" >&2
+        exit 1
+    fi
+    printf "Config: setup '%s' — regenerating motor_config.h from configs/%s/%s.yaml\n" "$SETUP" "$SETUP" "$CONFIG_SLAVE"
     python3 "$REPO_ROOT/scripts/gen_motor_config.py" --slave "$CONFIG_YAML" || exit 1
 fi
 

@@ -35,15 +35,12 @@ uint32_t master_rx_frames   = 0;
 /* ── per-slave runtime state ─────────────────────────────────────────────── */
 static uint8_t      slave_alive[NUM_SLAVES];
 static uint8_t      slave_motors_alive[NUM_SLAVES];
-static SpiMotorTele latest_tele[NUM_SLAVES][MAX_MOTORS_PER_SLAVE];
+static MotorState   latest_tele[NUM_SLAVES][MAX_MOTORS_PER_SLAVE];
+static uint32_t     slave_crc_errors[NUM_SLAVES];   /* telemetry frames failing CRC */
+static uint8_t      spi_seq[NUM_SLAVES];             /* per-slave command seq counter  */
 static uint16_t     tx_seq = 0;
 
 /* ── helpers ─────────────────────────────────────────────────────────────── */
-static float u16_to_f(uint16_t raw, float lo, float hi)
-{
-    return lo + (float)raw * (hi - lo) / 65535.0f;
-}
-
 /* usb_printf goes through the ring buffer so it no longer drops */
 void usb_printf(const char *fmt, ...)
 {
@@ -71,42 +68,49 @@ static inline void CS_SELECT(SpiDevId dev) {
     }
 }
 
-/* ── SPI exchange with one slave (length sized to that slave's motor count) ── */
-static HAL_StatusTypeDef spi_exchange(SpiDevId dev, uint8_t n_motors, uint8_t cmd,
+/* ── SPI exchange with one slave (length sized to that slave's motor count) ──
+   One full-duplex transfer: the command frame ([cmd][seq][SpiMitCmd×N]) rides
+   in the TX prefix; the CRC-framed telemetry frame comes back in RX. The frame
+   CRC doubles as an integrity check AND a presence check — an absent slave
+   clocks back garbage that fails CRC, so no separate handshake is needed.
+   Returns HAL_OK only on a CRC-valid frame; a CRC failure increments the
+   slave's crc-error counter and returns HAL_ERROR. */
+static HAL_StatusTypeDef spi_exchange(SpiDevId dev, uint8_t n_motors,
+                                       uint8_t cmd, uint8_t seq,
                                        const uint8_t *mit_payload,
                                        uint8_t *motors_alive_out,
-                                       SpiMotorTele *tele_out)
+                                       uint8_t *echo_seq_out,
+                                       MotorState *tele_out)
 {
     uint8_t tx[SPI_MAX_PKT_SIZE];
     uint8_t rx[SPI_MAX_PKT_SIZE];
     uint16_t len = SPI_PKT_SIZE(n_motors);
     memset(tx, 0, len);
     tx[0] = cmd;
+    tx[1] = seq;
     if (cmd == SPI_CMD_MIT && mit_payload != NULL) {
-        memcpy(&tx[1], mit_payload, (size_t)n_motors * sizeof(SpiMitCmd));
+        memcpy(&tx[SPI_CMD_HDR_BYTES], mit_payload,
+               (size_t)n_motors * sizeof(SpiMitCmd));
     }
 
     CS_SELECT(dev);
     HAL_StatusTypeDef st = HAL_SPI_TransmitReceive(master_hspi, tx, rx,
                                                     len, HAL_MAX_DELAY);
     CS_ALL_HIGH();
+    if (st != HAL_OK) return st;
 
-    if (st == HAL_OK) {
-        *motors_alive_out = rx[0];
-        memcpy(tele_out, &rx[1], (size_t)n_motors * sizeof(SpiMotorTele));
+    uint16_t rx_crc = (uint16_t)(rx[len - 2] | ((uint16_t)rx[len - 1] << 8));
+    uint16_t calc   = proto_crc16(rx, (size_t)(len - SPI_TELE_CRC_BYTES));
+    if (rx_crc != calc) {
+        slave_crc_errors[(uint8_t)dev]++;
+        return HAL_ERROR;              /* bad/absent frame → caller marks offline */
     }
-    return st;
-}
 
-/* A present slave always packs motor_idx = 0,1,2,...,n-1. An absent slave (no
-   CS response) clocks back garbage, so this both validates the frame and serves
-   as a presence check — no separate handshake needed. */
-static uint8_t tele_valid(const SpiMotorTele *tele, uint8_t n)
-{
-    for (uint8_t i = 0; i < n; i++) {
-        if (tele[i].motor_idx != i) return 0u;
-    }
-    return 1u;
+    *motors_alive_out = rx[0];
+    *echo_seq_out     = rx[1];
+    memcpy(tele_out, &rx[SPI_TELE_HDR_BYTES],
+           (size_t)n_motors * sizeof(MotorState));
+    return HAL_OK;
 }
 
 /* ── emit protocol frames over USB TX ring ───────────────────────────────── */
@@ -151,9 +155,10 @@ static void emit_slave_status(uint8_t s, uint32_t now_ms)
     pay.slave_id     = s;
     pay.motors_alive = slave_motors_alive[s];
     pay.motor_state  = (slave_motors_alive[s] & 0x01u)
-                         ? (uint8_t)latest_tele[s][0].state
+                         ? SPI_STATE_LIFE(latest_tele[s][0].state)
                          : (uint8_t)MOTOR_BOOT;
     pay.uptime_ms    = now_ms;
+    pay.crc_errors   = slave_crc_errors[s];
 
     uint8_t frame[MSG_HEADER_SIZE + sizeof(SlaveStatus)];
     uint16_t n = proto_build(frame, sizeof(frame),
@@ -166,17 +171,13 @@ static void emit_slave_status(uint8_t s, uint32_t now_ms)
 
 static void emit_motor_state(uint8_t s, uint8_t idx, uint32_t now_ms)
 {
-    const SpiMotorTele *t = &latest_tele[s][idx];
-    MotorStatePayload pay = {0};
-    pay.slave_id     = s;
-    pay.motor_idx    = idx;
-    pay.state        = t->state;
-    pay.pos          = u16_to_f(t->pos_raw, MOTOR_P_MIN, MOTOR_P_MAX);
-    pay.vel          = u16_to_f(t->vel_raw, MOTOR_V_MIN, MOTOR_V_MAX);
-    pay.tau          = u16_to_f(t->tau_raw, MOTOR_T_MIN, MOTOR_T_MAX);
-    pay.temp         = (float)t->temp_c;
-    pay.fault_flags  = t->fault_flags;
-    pay.last_cmd_seq = t->last_cmd_seq;
+    /* Pass-through: forward the raw MotorState atom to the host, which decodes
+       raw→units with the generated transport bounds. The master no longer
+       touches motor data in either direction. */
+    MotorStatePayload pay;
+    pay.slave_id  = s;
+    pay.motor_idx = idx;
+    pay.motor     = latest_tele[s][idx];
 
     uint8_t frame[MSG_HEADER_SIZE + sizeof(MotorStatePayload)];
     uint16_t n = proto_build(frame, sizeof(frame),
@@ -270,6 +271,8 @@ void MotorMaster_Init(SPI_HandleTypeDef *hspi, UART_HandleTypeDef *huart)
     memset(pending_mit, 0, sizeof(pending_mit));
     memset(mit_pending, 0, sizeof(mit_pending));
     memset(latest_tele, 0, sizeof(latest_tele));
+    memset(slave_crc_errors, 0, sizeof(slave_crc_errors));
+    memset(spi_seq, 0, sizeof(spi_seq));
 }
 
 void MotorMaster_SetMitCmd(uint8_t slave_id, uint8_t idx, float pos, float vel,
@@ -336,28 +339,32 @@ static void poll_one_slave(uint8_t s)
     }
 
     uint8_t alive = 0;
-    SpiMotorTele tele[MAX_MOTORS_PER_SLAVE];
-    HAL_StatusTypeDef st = spi_exchange((SpiDevId)s, n, cmd, mit_payload, &alive, tele);
+    uint8_t echo  = 0;
+    MotorState tele[MAX_MOTORS_PER_SLAVE];
+    HAL_StatusTypeDef st = spi_exchange((SpiDevId)s, n, cmd, spi_seq[s]++,
+                                        mit_payload, &alive, &echo, tele);
+    (void)echo;   /* frame round-trip token; not forwarded to host this pass */
     if (cmd == SPI_CMD_MIT) {
         for (uint8_t i = 0; i < n; i++) pending_mit[s][i].valid = 0u;
     }
 
-    if (st == HAL_OK && tele_valid(tele, n)) {
+    if (st == HAL_OK) {   /* CRC verified inside spi_exchange = valid + present */
         /* Confirm one-shot bits against telemetry, not just SPI delivery: the
            slave may be blocked in arm/goto_zero init (~40 ms) while the master
-           has moved on, so retry every tick until the state change shows up. */
+           has moved on, so retry every tick until the state change shows up.
+           state carries the fault cause in its high nibble — mask to lifecycle. */
         if (sent_arm) {
-            if (tele[sent_arm_idx].state == MOTOR_ARMED_HOLD)
+            if (SPI_STATE_LIFE(tele[sent_arm_idx].state) == MOTOR_ARMED_HOLD)
                 pending_arm_bits[s] &= ~(uint8_t)(1u << sent_arm_idx);
         }
         if (sent_goto_zero) {
-            uint8_t zs = tele[sent_goto_zero_idx].state;
+            uint8_t zs = SPI_STATE_LIFE(tele[sent_goto_zero_idx].state);
             if (zs == MOTOR_ZEROING || zs == MOTOR_ARMED_HOLD)
                 pending_goto_zero_bits[s] &= ~(uint8_t)(1u << sent_goto_zero_idx);
         }
         slave_alive[s]        = 1u;
         slave_motors_alive[s] = alive;
-        memcpy(latest_tele[s], tele, (size_t)n * sizeof(SpiMotorTele));
+        memcpy(latest_tele[s], tele, (size_t)n * sizeof(MotorState));
     } else {
         /* Absent slave / garbage frame — mark offline and drop pending one-shots
            so they don't pile up against a board that isn't there. */

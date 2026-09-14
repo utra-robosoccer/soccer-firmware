@@ -1,30 +1,42 @@
 #!/usr/bin/env python3
 """Generate motor configuration files from slave YAML descriptions.
 
+Active setup
+------------
+Which physical setup is in use (e.g. bench vs robot) is selected in ONE place:
+the file ``configs/active`` (a single line naming a subdirectory of configs/),
+overridable per-invocation by the ``SOCCER_SETUP`` env var. Slave configs live
+in ``configs/<setup>/slaveN.yaml``. A bare slave name like ``slave0`` resolves
+against the active setup, so the whole toolchain follows one switch.
+
 Two modes:
 
-  --slave  <one.yaml>         (default for a bare positional argument)
+  --slave  <slaveN | path.yaml>   (default for a bare positional argument)
       Emits firmware/common/include/motor_config.h for THAT ONE slave
       (N_MOTORS, transport bounds, MotorModel enum, motor_can_ranges[],
       motor_configs[], motor_can_range_by_id()). The slave firmware build
       compiles its own slave's config — see scripts/build.sh --config.
 
-  --system <a.yaml> <b.yaml> ...
-      Emits, covering ALL slaves in the system:
+  --system [<a.yaml> <b.yaml> ...]
+      With no args, uses every slave*.yaml in the active setup. Emits, covering
+      ALL slaves in the system:
         - firmware/common/include/system_config.h  (master: NUM_SLAVES,
           per-slave motor counts + CAN-id LUTs, global transport bounds)
         - tools/motor_config_gen.py                (host: per-slave SLAVES[]
           plus a flattened view for the dashboard / test_client)
 
 Usage:
-    python3 scripts/gen_motor_config.py --slave  configs/slave0.yaml
-    python3 scripts/gen_motor_config.py --system configs/slave0.yaml configs/slave1.yaml
-    python3 scripts/gen_motor_config.py configs/slave0.yaml        # == --slave
+    python3 scripts/gen_motor_config.py                    # regen everything for active setup
+    python3 scripts/gen_motor_config.py --slave  slave0    # active setup's slave0
+    python3 scripts/gen_motor_config.py --system           # active setup, all slaves
+    python3 scripts/gen_motor_config.py --slave  configs/robot/slave0.yaml   # explicit path
+    SOCCER_SETUP=robot python3 scripts/gen_motor_config.py # one-off setup override
 
 The firmware build does not run Python, so generated files are committed
 alongside the source. Re-run after editing a YAML, then rebuild.
 """
 
+import glob
 import os
 import sys
 
@@ -276,7 +288,7 @@ def gen_python(cfgs, names):
     # Per-slave grouped structure.
     slave_blocks = []
     for s, (cfg, name) in enumerate(zip(cfgs, names)):
-        slave_name = cfg.get("slave", os.path.splitext(name)[0])
+        slave_name = cfg.get("slave", os.path.splitext(os.path.basename(name))[0])
         motor_lines = []
         for m in cfg["motors"]:
             motor_lines.append(
@@ -307,6 +319,10 @@ def gen_python(cfgs, names):
         )
     model_block = ",\n".join(model_lines)
 
+    # Global SPI transport bounds — must equal the C MOTOR_*_MIN/MAX the slave
+    # encodes telemetry with; the host decodes raw pos/vel/tau with these.
+    p_min, p_max, v_max, t_max = _transport_bounds(cfgs)
+
     src_list = " ".join(f"configs/{n}" for n in names)
 
     return f'''\
@@ -327,6 +343,16 @@ SLAVES = [
 MODEL_RANGES = {{
 {model_block},
 }}
+
+# ── Global SPI transport encoding bounds (widest model across slaves) ──────────
+# The slave encodes pos/vel/tau_raw over THESE bounds (not per-model); decode raw
+# telemetry with them. pos_raw is home-frame wrapped [-pi, pi] over the +-4pi bound.
+MOTOR_P_MIN = {float(p_min)!r}
+MOTOR_P_MAX = {float(p_max)!r}
+MOTOR_V_MIN = {float(-v_max)!r}
+MOTOR_V_MAX = {float(v_max)!r}
+MOTOR_T_MIN = {float(-t_max)!r}
+MOTOR_T_MAX = {float(t_max)!r}
 
 # ── Flattened view (global index = position in this list) ──────────────────────
 # Each motor dict gains "slave" (slave index) and keeps its local "idx".
@@ -358,9 +384,69 @@ def _resolve(path):
     return path
 
 
+CONFIGS_DIR = os.path.join(REPO_ROOT, "configs")
+
+
+def _configs_rel(src):
+    """Path relative to configs/, e.g. 'bench/slave0.yaml' — used in banners."""
+    return os.path.relpath(src, CONFIGS_DIR)
+
+
+def active_setup():
+    """Name of the active physical setup (a subdir under configs/).
+
+    Precedence: $SOCCER_SETUP overrides the configs/active pointer file.
+    Returns None if neither is set."""
+    env = os.environ.get("SOCCER_SETUP")
+    if env and env.strip():
+        return env.strip()
+    ptr = os.path.join(CONFIGS_DIR, "active")
+    if os.path.isfile(ptr):
+        with open(ptr) as fh:
+            name = fh.read().strip()
+        return name or None
+    return None
+
+
+def _require_setup():
+    s = active_setup()
+    if not s:
+        sys.exit("no active setup selected: write one to configs/active "
+                 "(e.g. `echo bench > configs/active`) or set SOCCER_SETUP")
+    setup_dir = os.path.join(CONFIGS_DIR, s)
+    if not os.path.isdir(setup_dir):
+        sys.exit(f"active setup {s!r} has no directory (expected configs/{s}/)")
+    return s
+
+
+def resolve_config(token):
+    """Resolve a slave-config token to an absolute path.
+
+    An existing file (absolute or repo-relative) is used as-is; otherwise a bare
+    name like 'slave0' resolves to configs/<active setup>/slave0.yaml."""
+    cand = token if os.path.isabs(token) else os.path.join(REPO_ROOT, token)
+    if os.path.isfile(cand):
+        return cand
+    name = token if token.endswith(".yaml") else token + ".yaml"
+    setup = _require_setup()
+    p = os.path.join(CONFIGS_DIR, setup, name)
+    if os.path.isfile(p):
+        return p
+    sys.exit(f"config {token!r} not found (looked for {cand} and {p})")
+
+
+def active_slaves():
+    """Every slave*.yaml in the active setup dir, sorted (slave0, slave1, ...)."""
+    setup = _require_setup()
+    files = sorted(glob.glob(os.path.join(CONFIGS_DIR, setup, "slave*.yaml")))
+    if not files:
+        sys.exit(f"no slave*.yaml found in configs/{setup}/")
+    return files
+
+
 def do_slave(src):
     src = _resolve(src)
-    src_name = os.path.basename(src)
+    src_name = _configs_rel(src)
     cfg = load(src)
     validate(cfg)
     header_path = os.path.join(REPO_ROOT, "firmware/common/include/motor_config.h")
@@ -371,7 +457,7 @@ def do_slave(src):
 
 def do_system(srcs):
     srcs = [_resolve(s) for s in srcs]
-    names = [os.path.basename(s) for s in srcs]
+    names = [_configs_rel(s) for s in srcs]
     cfgs = []
     for s in srcs:
         cfg = load(s)
@@ -392,21 +478,26 @@ def do_system(srcs):
 def main():
     args = sys.argv[1:]
     if not args:
-        do_slave("configs/slave0.yaml")
+        # Regenerate everything for the active setup: system files from all its
+        # slaves, plus the default per-slave header (slave0).
+        setup = _require_setup()
+        slaves = active_slaves()
+        print(f"Active setup: {setup}  ({len(slaves)} slave(s))")
+        do_system(slaves)
+        do_slave(slaves[0])
         return
     if args[0] == "--slave":
         if len(args) != 2:
-            sys.exit("usage: gen_motor_config.py --slave <one.yaml>")
-        do_slave(args[1])
+            sys.exit("usage: gen_motor_config.py --slave <slaveN | path.yaml>")
+        do_slave(resolve_config(args[1]))
     elif args[0] == "--system":
-        if len(args) < 2:
-            sys.exit("usage: gen_motor_config.py --system <a.yaml> [b.yaml ...]")
-        do_system(args[1:])
+        srcs = args[1:]
+        do_system([resolve_config(s) for s in srcs] if srcs else active_slaves())
     elif args[0].startswith("--"):
         sys.exit(f"unknown option {args[0]!r}; use --slave or --system")
     else:
-        # Backward-compatible positional: single slave header.
-        do_slave(args[0])
+        # Backward-compatible positional: single slave header (bare name or path).
+        do_slave(resolve_config(args[0]))
 
 
 if __name__ == "__main__":
