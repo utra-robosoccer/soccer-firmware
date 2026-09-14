@@ -11,8 +11,8 @@ Keys:
   1..N  SELECT active motor (N = configured motor count)
   a     ARM_HOLD   active motor
   z     GOTO_ZERO  active motor  (crawl to zero, then hold)
-  s     SINE       active motor  (toggle a sine sized to the motor's soft limits
-                                  @ 0.25 Hz via MIT_CMD — arm first; slave clamps)
+  s     SINE       active motor  (toggle a sine whose peaks stay 5° inside the
+                                  motor's soft limits @ 0.4 Hz via MIT_CMD — arm first)
   A     ARM_HOLD   ALL motors
   Z     GOTO_ZERO  ALL motors
   S     SINE       ALL motors    (starts sine on every motor — arm first)
@@ -70,14 +70,20 @@ from protocol import (                                       # noqa: E402
 MOTOR_STATE_NAMES = LIFECYCLE_NAMES
 
 # ── Python-side sine parameters ───────────────────────────────────────────────
-# The sweep is sized PER MOTOR to its soft limits: amplitude = OVERSHOOT × the
-# soft half-range, centred on the limit midpoint. This gently reaches and holds
-# each limit (the slave still enforces the clamp) instead of slamming a fixed
-# ±90° command through a much smaller clamped range. Lower frequency keeps the
-# mid-stroke velocity gentle so the motion is smooth.
-SINE_FREQ      = 0.25           # Hz
-SINE_OMEGA     = 2.0 * math.pi * SINE_FREQ
-SINE_OVERSHOOT = 1.2            # sweep amplitude as a multiple of the soft half-range
+# The sweep stays a fixed margin INSIDE each soft limit, centred on the limit
+# midpoint (peaks at soft_max - margin and soft_min + margin). This verifies
+# smooth motion WITHIN range without ever engaging the slave's clamp — a clean
+# baseline until the angle-limit behaviour is finalized.
+SINE_FREQ       = 0.4                            # Hz (waveform frequency)
+SINE_OMEGA      = 2.0 * math.pi * SINE_FREQ
+SINE_MARGIN_DEG = 5.0                            # keep the sweep this far inside each limit
+SINE_MARGIN_RAD = math.radians(SINE_MARGIN_DEG)
+# Command send rate. The master polls SPI at 200 Hz and coalesces MIT (latest
+# wins), so 200 Hz is the useful ceiling — faster is dropped. The pos/vel are
+# sampled at true wall-clock time, and sends are paced on a fixed deadline grid
+# (below) so per-iteration jitter is absorbed, not accumulated.
+SINE_RATE_HZ   = 200.0          # matches the master's SPI poll — the useful ceiling
+SINE_PERIOD_S  = 1.0 / SINE_RATE_HZ
 
 # MOTOR_DEFAULT_KP / MOTOR_DEFAULT_KD come from motor_config_gen (per motor).
 
@@ -162,7 +168,9 @@ def print_frame(msg_type: int, seq: int, payload: bytes) -> None:
         print(f"[{_t()}] {label:<16} "
               f"slave={d.get('slave_id', 0)} "
               f"motors_alive=0b{d.get('motors_alive', 0):b} "
-              f"crc_errors={d.get('crc_errors', 0)}")
+              f"tele_crc_err={d.get('crc_errors', 0)} "
+              f"cmd_crc_err={d.get('cmd_crc_errors', 0)} "
+              f"seq_gaps={d.get('seq_gaps', 0)}")
 
     elif msg_type == MSG_MOTOR_STATE:
         d = parse_motor_state(payload)
@@ -203,11 +211,10 @@ def print_frame(msg_type: int, seq: int, payload: bytes) -> None:
 
 def _sine_thread(idx: int, ser_ref, ser_lock: threading.Lock,
                  stop_event: threading.Event, center: float) -> None:
-    """Sends MIT motor commands at 100 Hz tracing a sine sized to this motor's
-    soft limits: centred on the limit midpoint with amplitude SINE_OVERSHOOT ×
-    the soft half-range. It overshoots the limit slightly so the slave's clamp
-    still engages (the motor reaches and holds the limit), but at a low
-    mid-stroke velocity so the motion is smooth rather than slamming.
+    """Streams MIT motor commands on a fixed SINE_RATE_HZ deadline grid, tracing a
+    sine that stays SINE_MARGIN_DEG inside this motor's soft limits (centred on the
+    limit midpoint; peaks at soft_max-margin / soft_min+margin) — so it verifies
+    smooth motion WITHIN range without engaging the slave's clamp.
 
     `idx` is the global flattened index; it is mapped to (slave, local) for the
     wire. The `center` argument is accepted for call-compatibility but ignored;
@@ -217,10 +224,11 @@ def _sine_thread(idx: int, ser_ref, ser_lock: threading.Lock,
     kd = MOTOR_DEFAULT_KD[idx]
     lo, hi   = MOTOR_SOFT_MIN[idx], MOTOR_SOFT_MAX[idx]
     mid      = 0.5 * (lo + hi)
-    amp      = SINE_OVERSHOOT * 0.5 * (hi - lo)
+    amp      = max(0.0, 0.5 * (hi - lo) - SINE_MARGIN_RAD)  # peaks 5° inside each limit
     t0 = time.monotonic()
+    next_send = t0                       # fixed-grid deadline for the next send
     while not stop_event.is_set():
-        t   = time.monotonic() - t0
+        t   = time.monotonic() - t0      # sample pos/vel at TRUE time (jitter-immune value)
         pos = mid + amp * math.sin(SINE_OMEGA * t)
         vel =       amp * SINE_OMEGA * math.cos(SINE_OMEGA * t)
         payload = struct.pack(FMT_MOTOR_CMD, slave_id, local_idx, pos, vel, kp, kd, 0.0)
@@ -230,7 +238,16 @@ def _sine_thread(idx: int, ser_ref, ser_lock: threading.Lock,
                 ser_ref.write(frame)
             except serial.SerialException:
                 break
-        time.sleep(0.01)  # 100 Hz
+        # Deadline-based pacing: advance the grid by exactly one period and sleep
+        # to it, so write latency / GIL jitter is absorbed rather than accumulated.
+        # If we've fallen a full period behind, resync the grid to now (drop the
+        # backlog instead of bursting — a stale setpoint would coalesce away anyway).
+        next_send += SINE_PERIOD_S
+        slack = next_send - time.monotonic()
+        if slack > 0.0:
+            time.sleep(slack)
+        else:
+            next_send = time.monotonic()
 
 # ═══════════════════════════════════════════════════════════════════
 #  Main loop
@@ -242,7 +259,7 @@ def _build_help() -> str:
         lines.append(f"          {m['idx'] + 1} = {_motor_label(m['idx'])}")
     lines += [
         "  a   ARM_HOLD   active        z   GOTO_ZERO  active",
-        "  s   SINE       active (sine sized to soft limits @ 0.25 Hz via MIT — arm first; slave clamps)",
+        "  s   SINE       active (sine peaks 5° inside soft limits @ 0.4 Hz via MIT — arm first)",
         "  A   ARM_HOLD   ALL    Z   GOTO_ZERO ALL    S   SINE ALL    D   DISABLE ALL",
         "  p   PING       check link    q   QUIT (disable all)    ?   this help",
     ]
@@ -308,10 +325,10 @@ def main() -> None:
             sine_threads[idx] = th
             th.start()
             lo, hi = MOTOR_SOFT_MIN[idx], MOTOR_SOFT_MAX[idx]
-            amp = SINE_OVERSHOOT * 0.5 * (hi - lo)
+            amp = max(0.0, 0.5 * (hi - lo) - SINE_MARGIN_RAD)
             print(f"[{_t()}] → SINE {_motor_label(idx)} STARTED  "
                   f"mid={0.5*(lo+hi):+.3f}  amp=±{amp:.3f} rad @ {SINE_FREQ} Hz "
-                  f"(soft limits [{lo:+.3f}, {hi:+.3f}])")
+                  f"(peaks {SINE_MARGIN_DEG:g}° inside soft limits [{lo:+.3f}, {hi:+.3f}])")
         sys.stdout.flush()
 
     def _disable_all() -> None:

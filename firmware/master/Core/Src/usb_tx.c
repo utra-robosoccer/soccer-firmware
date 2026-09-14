@@ -53,5 +53,37 @@ void usb_tx_pump(void)
     /* On USBD_BUSY: tail unchanged, data stays in ring for next call */
 }
 
+/* ── ISR-context response queue (fix 4: restore SPSC on the ring) ────────────
+ * ControlResp / PONG frames are built in USB-ISR context. To keep usb_tx_write a
+ * single producer (main only), the ISR enqueues finished frames here and main
+ * drains them through usb_tx_write in ProcessLoop. Single producer = the USB
+ * ISR, single consumer = main → lock-free, no locks on the ring. */
+#define RESP_SLOTS  8u
+#define RESP_MAX    40u    /* largest response frame (ControlResp = 16+7 = 23 B) */
+static uint8_t          resp_buf[RESP_SLOTS][RESP_MAX];
+static uint16_t         resp_len[RESP_SLOTS];
+static volatile uint8_t resp_head = 0;   /* USB ISR advances */
+static volatile uint8_t resp_tail = 0;   /* main advances    */
+
+/* Called from USB-ISR context (CDC_Receive_FS / HandleControlReq). */
+void usb_tx_post_from_isr(const uint8_t *data, uint16_t len)
+{
+    if (len == 0u || len > RESP_MAX || data == NULL) return;
+    uint8_t next = (uint8_t)((resp_head + 1u) % RESP_SLOTS);
+    if (next == resp_tail) return;        /* full → drop (responses best-effort) */
+    memcpy(resp_buf[resp_head], data, len);
+    resp_len[resp_head] = len;
+    resp_head = next;                     /* publish after the copy */
+}
+
+/* Called from main (ProcessLoop): drain queued responses into the TX ring. */
+void usb_tx_pump_responses(void)
+{
+    while (resp_tail != resp_head) {
+        usb_tx_write(resp_buf[resp_tail], resp_len[resp_tail]);
+        resp_tail = (uint8_t)((resp_tail + 1u) % RESP_SLOTS);
+    }
+}
+
 uint8_t usb_tx_busy(void) { return 0u; }  /* not used externally */
 void    usb_tx_cplt_cb(void) {}           /* no-op: pump polls TxState */

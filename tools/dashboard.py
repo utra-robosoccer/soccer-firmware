@@ -61,7 +61,8 @@ _lock   = threading.Lock()
 _snap   = [_MotorSnap() for _ in range(N_MOTORS)]   # by global flattened index
 _link   = {"rx": 0, "err": 0, "alive": 0, "uptime_ms": 0}
 _master = {"robot_state": 0, "slave_alive": 0}
-_slaves = [{"motors_alive": 0, "crc_errors": 0} for _ in range(N_SLAVES)]
+_slaves = [{"motors_alive": 0, "crc_errors": 0, "cmd_crc_errors": 0, "seq_gaps": 0}
+           for _ in range(N_SLAVES)]
 _events: deque = deque(maxlen=6)
 
 # Sine-streaming state, shared with the RX thread (populated in main()). Module
@@ -182,16 +183,20 @@ def _render(active: int, sine_active: list, port: str) -> Panel:
     sine_on = [i + 1 for i in range(N_MOTORS) if sine_active[i]]
     sine_info = f"  [magenta]sine: {sine_on}[/magenta]" if sine_on else ""
 
-    # Per-slave summary: ONLINE/OFFLINE + motors alive count.
+    # Per-slave summary: ONLINE/OFFLINE + motors alive + command-link health.
     parts = []
     for s_idx in range(N_SLAVES):
         online = bool(salive & (1 << s_idx))
         cnt    = SLAVE_MOTOR_COUNTS[s_idx]
         nalive = bin(slaves[s_idx]["motors_alive"]).count("1")
+        # Command-path error counters (tele CRC, slave-side cmd CRC, seq gaps).
+        errs = (slaves[s_idx]["crc_errors"], slaves[s_idx]["cmd_crc_errors"],
+                slaves[s_idx]["seq_gaps"])
+        etag = f" [red]crc/cmd/gap {errs[0]}/{errs[1]}/{errs[2]}[/red]" if any(errs) else ""
         if online:
-            parts.append(f"[green]slave{s_idx} ONLINE {nalive}/{cnt}[/green]")
+            parts.append(f"[green]slave{s_idx} ONLINE {nalive}/{cnt}[/green]{etag}")
         else:
-            parts.append(f"[dim red]slave{s_idx} OFFLINE[/dim red]")
+            parts.append(f"[dim red]slave{s_idx} OFFLINE[/dim red]{etag}")
     rs_name = tc.ROBOT_STATE_NAMES.get(robot, "?")
     rs_style = {"READY": "bold green", "DEGRADED": "bold yellow",
                 "INIT": "bold blue"}.get(rs_name, "white")
@@ -281,8 +286,10 @@ def _ingest(mt: int, pl: bytes) -> None:
         d = tc.parse_slave_status(pl)
         if d and 0 <= d["slave_id"] < N_SLAVES:
             with _lock:
-                _slaves[d["slave_id"]]["motors_alive"] = d["motors_alive"]
-                _slaves[d["slave_id"]]["crc_errors"]   = d["crc_errors"]
+                _slaves[d["slave_id"]]["motors_alive"]   = d["motors_alive"]
+                _slaves[d["slave_id"]]["crc_errors"]     = d["crc_errors"]
+                _slaves[d["slave_id"]]["cmd_crc_errors"] = d["cmd_crc_errors"]
+                _slaves[d["slave_id"]]["seq_gaps"]       = d["seq_gaps"]
 
     elif mt == tc.MSG_CONTROL_RESP:
         d = tc.parse_control_resp(pl)

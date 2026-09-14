@@ -135,10 +135,13 @@ typedef struct PROTO_PACKED {
 } MasterStatus;
 
 typedef struct PROTO_PACKED {
-    uint8_t  slave_id;      /* which slave this status is for         */
-    uint8_t  motors_alive;  /* bit i = motor i alive                  */
+    uint8_t  slave_id;        /* which slave this status is for              */
+    uint8_t  motors_alive;    /* bit i = motor i alive                       */
     uint32_t uptime_ms;
-    uint32_t crc_errors;    /* SPI telemetry frames failing CRC       */
+    uint32_t crc_errors;      /* SPI telemetry frames failing CRC (master)   */
+    uint32_t cmd_crc_errors;  /* SPI command frames the slave rejected on CRC
+                                 (slave-side; relayed via slave_debug_rsvd)  */
+    uint32_t seq_gaps;        /* master: echoed cmd-seq gaps (dropped cmds)  */
 } SlaveStatus;
 
 /* Master → Jetson per-motor telemetry: the raw MotorState atom is forwarded
@@ -191,19 +194,27 @@ typedef struct PROTO_PACKED {
  *   crc16 = proto_crc16() over every preceding byte. slave_debug_rsvd is reserved
  *   for future per-slave debug/health and is covered by the CRC.
  *
- * master → slave command frame rides in the prefix of the same transfer:
- *   [cmd u8][seq u8][SpiMitCmd × N ...]
+ * master → slave command frame rides in the prefix of the same transfer,
+ * and is ALSO CRC-protected (the slave verifies before applying anything):
+ *   [cmd u8][seq u8][SpiMitCmd × N][crc16 u16]
  * The transfer length is the (larger) telemetry frame size. */
 #define SPI_TELE_HDR_BYTES          2u            /* alive_mask + echo_seq        */
-#define SPI_TELE_SLAVE_DEBUG_BYTES  8u            /* reserved per-slave debug     */
+#define SPI_TELE_SLAVE_DEBUG_BYTES  8u            /* per-slave debug (see below)  */
 #define SPI_TELE_CRC_BYTES          2u            /* crc16 trailer                */
 #define SPI_TELE_FRAME_SIZE(n) ((uint16_t)(SPI_TELE_HDR_BYTES + \
                                 (uint16_t)(n) * (uint16_t)sizeof(MotorState) + \
                                 SPI_TELE_SLAVE_DEBUG_BYTES + SPI_TELE_CRC_BYTES))
+/* Byte offset of slave_debug_rsvd[8] within the telemetry frame. Layout:
+ *   [0..3] = slave-side cmd_crc_errors (u32 LE); [4..7] reserved 0. */
+#define SPI_TELE_DEBUG_OFF(n)  ((uint16_t)(SPI_TELE_HDR_BYTES + \
+                                (uint16_t)(n) * (uint16_t)sizeof(MotorState)))
 
 #define SPI_CMD_HDR_BYTES      2u                 /* cmd + seq                    */
-#define SPI_CMD_FRAME_SIZE(n)  ((uint16_t)(SPI_CMD_HDR_BYTES + \
+#define SPI_CMD_CRC_BYTES      2u                 /* crc16 trailer                */
+/* Byte offset of the command-frame CRC (= size of the CRC-covered prefix). */
+#define SPI_CMD_CRC_OFF(n)     ((uint16_t)(SPI_CMD_HDR_BYTES + \
                                 (uint16_t)(n) * (uint16_t)sizeof(SpiMitCmd)))
+#define SPI_CMD_FRAME_SIZE(n)  ((uint16_t)(SPI_CMD_CRC_OFF(n) + SPI_CMD_CRC_BYTES))
 
 /* ── layout guards (catch C↔wire drift at compile time) ──────────────────── */
 #if defined(__STDC_VERSION__) && (__STDC_VERSION__ >= 201112L)

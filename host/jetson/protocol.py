@@ -85,7 +85,7 @@ HDR_FMT  = "<HHBBIHHH"          # type,seq,src,dst,ts_ms,len,ver_flags,crc  → 
 HDR_SIZE = struct.calcsize(HDR_FMT)
 
 FMT_MASTER_STATUS = "<BBIII"    # robot_state,slave_alive,uptime,link_errs,rx_frames (14)
-FMT_SLAVE_STATUS  = "<BBII"     # slave_id,motors_alive,uptime,crc_errors (10)
+FMT_SLAVE_STATUS  = "<BBIIII"   # slave_id,motors_alive,uptime,crc_errors,cmd_crc_errors,seq_gaps (18)
 FMT_CONTROL_REQ   = "<BBBB"     # slave_id,motor_idx,cmd,reserved (4)
 FMT_CONTROL_RESP  = "<BBBBBH"   # slave_id,motor_idx,cmd,result,new_state,req_seq (7)
 FMT_MOTOR_CMD     = "<BBfffff"  # slave_id,motor_idx,pos,vel,kp,kd,tau_ff (22)
@@ -96,7 +96,7 @@ FMT_MOTOR_STATE_HDR = "<BB"      # slave_id, motor_idx before the atom
 
 assert HDR_SIZE == 16, HDR_SIZE
 assert MOTORSTATE_SIZE == 16, MOTORSTATE_SIZE
-assert struct.calcsize(FMT_SLAVE_STATUS) == 10
+assert struct.calcsize(FMT_SLAVE_STATUS) == 18
 assert struct.calcsize(FMT_MASTER_STATUS) == 14
 
 
@@ -236,9 +236,9 @@ def parse_master_status(p: bytes) -> dict:
 def parse_slave_status(p: bytes) -> dict:
     if len(p) < struct.calcsize(FMT_SLAVE_STATUS):
         return {}
-    sid, ma, up, crc_err = struct.unpack_from(FMT_SLAVE_STATUS, p)
-    return dict(slave_id=sid, motors_alive=ma,
-                uptime_ms=up, crc_errors=crc_err)
+    sid, ma, up, crc_err, cmd_crc_err, seq_gaps = struct.unpack_from(FMT_SLAVE_STATUS, p)
+    return dict(slave_id=sid, motors_alive=ma, uptime_ms=up,
+                crc_errors=crc_err, cmd_crc_errors=cmd_crc_err, seq_gaps=seq_gaps)
 
 
 def parse_motor_state(p: bytes) -> dict:

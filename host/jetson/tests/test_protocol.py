@@ -127,6 +127,15 @@ class CrossLanguageFixture(unittest.TestCase):
         frame[-1] = crc >> 8
         self.assertEqual(bytes(frame), got["FRAME"], "SPI frame layout/CRC drift C<->Python")
 
+        # Command frame (master→slave): [cmd][seq][SpiMitCmd×2][crc16].
+        spimit = "<ffB"   # pos, vel, valid — 9 B, matches packed C SpiMitCmd
+        body = (struct.pack("<BB", 0x05, 0x2A)
+                + struct.pack(spimit, 1.5, -2.25, 1)
+                + struct.pack(spimit, -0.75, 3.5, 0))
+        ccrc = P.crc16(body)
+        cmdframe = body + bytes([ccrc & 0xFF, ccrc >> 8])
+        self.assertEqual(cmdframe, got["CMDFRAME"], "command-frame layout/CRC drift C<->Python")
+
 
 if __name__ == "__main__":
     unittest.main()

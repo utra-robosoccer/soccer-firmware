@@ -73,7 +73,8 @@ static uint32_t phase1_next_poll_ms = 0;
 static uint32_t phase1_last_print_ms = 0;
 static uint32_t phase1_last_feedback_count = 0;
 static uint32_t phase1_led_off_ms = 0;
-static uint8_t  phase1_echo_seq = 0;   /* seq byte of the most recent command frame */
+static uint8_t  phase1_echo_seq = 0;   /* seq byte of the most recent VALID command */
+static uint32_t cmd_crc_errors  = 0;   /* SPI command frames rejected on CRC */
 
 /* USER CODE END PV */
 
@@ -256,6 +257,14 @@ int main(void)
       for (uint8_t _i = 0; _i < N_MOTORS; _i++) {
         motor_runtime_pack_tele(&ms[_i], _i);
       }
+      /* slave_debug_rsvd[0..3] = cmd_crc_errors (u32 LE); [4..7] reserved 0.
+         Relays the slave-side command-CRC reject count to the master, which
+         surfaces it in SlaveStatus.cmd_crc_errors. */
+      uint8_t *dbg = &frame[SPI_TELE_DEBUG_OFF(N_MOTORS)];
+      dbg[0] = (uint8_t)(cmd_crc_errors & 0xFFu);
+      dbg[1] = (uint8_t)((cmd_crc_errors >> 8) & 0xFFu);
+      dbg[2] = (uint8_t)((cmd_crc_errors >> 16) & 0xFFu);
+      dbg[3] = (uint8_t)((cmd_crc_errors >> 24) & 0xFFu);
       uint16_t crc = proto_crc16(frame, (size_t)(PAYLOAD_LENGTH - SPI_TELE_CRC_BYTES));
       frame[PAYLOAD_LENGTH - 2] = (uint8_t)(crc & 0xFFu);   /* little-endian */
       frame[PAYLOAD_LENGTH - 1] = (uint8_t)(crc >> 8);
@@ -269,10 +278,30 @@ int main(void)
 
     /* SPI command handler — dispatch to motor_runtime state machine */
     if (data_receive_flag) {
+      /* Fix 1 (torn-parse): cmd_inbox_buf is a pointer the SPI ISR reswaps, so
+         parsing it in place could split a command across two transfers. Copy the
+         current command frame into a main-owned local under a brief IRQ mask
+         (COPY, not latch: after a swap the old buffer becomes the DMA's next
+         write target), then parse only the local. */
+      uint8_t cmd_local[SPI_CMD_FRAME_SIZE(N_MOTORS)];
+      __disable_irq();
+      memcpy(cmd_local, (const void *)cmd_inbox_buf, sizeof(cmd_local));
       data_receive_flag = 0;
-      uint8_t cmd = cmd_inbox_buf[0];
-      phase1_echo_seq = cmd_inbox_buf[1];   /* echo back in next telemetry frame */
-      /* Any command proves the master link is alive — refresh EVERY motor's
+      __enable_irq();
+
+      /* Fix 3 (command integrity): verify the command-frame CRC before applying
+         anything. On failure apply nothing this tick (a corrupt command must not
+         refresh watchdogs or move a motor) and count it; the master re-sends
+         every 5 ms and the watchdog covers sustained loss. */
+      uint16_t ccrc = proto_crc16(cmd_local, SPI_CMD_CRC_OFF(N_MOTORS));
+      uint16_t cwire = (uint16_t)(cmd_local[SPI_CMD_CRC_OFF(N_MOTORS)] |
+                        ((uint16_t)cmd_local[SPI_CMD_CRC_OFF(N_MOTORS) + 1] << 8));
+      if (ccrc != cwire) {
+        cmd_crc_errors++;
+      } else {
+      uint8_t cmd = cmd_local[0];
+      phase1_echo_seq = cmd_local[1];   /* echo the seq of this VALID command */
+      /* A valid command proves the master link is alive — refresh EVERY motor's
          watchdog. Otherwise a long blocking op on one motor (e.g. zeroing
          several motors in a row, each ~60 ms) lets an already-armed motor's
          watchdog expire mid-sequence and it falls back to IDLE. */
@@ -293,7 +322,7 @@ int main(void)
           for (uint8_t _i = 0; _i < N_MOTORS; _i++) {
             SpiMitCmd mc;
             /* MIT payload rides after the [cmd][seq] header (SPI_CMD_HDR_BYTES). */
-            memcpy(&mc, cmd_inbox_buf + SPI_CMD_HDR_BYTES + _i * (uint8_t)sizeof(SpiMitCmd),
+            memcpy(&mc, cmd_local + SPI_CMD_HDR_BYTES + _i * (uint8_t)sizeof(SpiMitCmd),
                    sizeof(SpiMitCmd));
             if (mc.valid) {
               /* Clamp to the motor's soft angle limits on the slave side. */
@@ -315,6 +344,7 @@ int main(void)
         default:
           break;
       }
+      }  /* CRC ok */
     }
   }
   /* USER CODE END 3 */

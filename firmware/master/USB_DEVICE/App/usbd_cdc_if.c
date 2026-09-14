@@ -306,13 +306,14 @@ static int8_t CDC_Receive_FS(uint8_t* Buf, uint32_t *Len)
               break;
 
           case MSG_PING: {
-              /* Echo PONG */
+              /* Echo PONG. This runs in USB-ISR context → post to the response
+                 queue; main drains it (keeps usb_tx_write single-producer). */
               uint8_t frame[MSG_HEADER_SIZE];
               uint16_t n = proto_build(frame, sizeof(frame),
                                        MSG_PING, hdr.seq,
                                        NODE_MASTER, (uint8_t)hdr.src,
                                        HAL_GetTick(), NULL, 0u);
-              if (n > 0u) usb_tx_write(frame, n);
+              if (n > 0u) usb_tx_post_from_isr(frame, n);
               break;
           }
 

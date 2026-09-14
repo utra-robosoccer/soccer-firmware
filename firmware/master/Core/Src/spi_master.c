@@ -6,9 +6,9 @@
 static SPI_HandleTypeDef  *master_hspi  = NULL;
 static UART_HandleTypeDef *master_huart = NULL;
 
-/* Loop cadences. Command delivery (SPI poll) runs fast so a 50 Hz Jetson
- * command stream is sampled well above Nyquist; telemetry/status to the host
- * are decoupled and emitted slower since the Jetson consumes at 50 Hz. */
+/* Loop cadences. Command delivery (SPI poll) runs at 200 Hz — the ceiling for
+ * the Jetson MIT stream, which the master coalesces (latest wins) above this
+ * rate; telemetry/status to the host are decoupled and emitted independently. */
 #define MASTER_POLL_PERIOD_MS   5u    /* 200 Hz SPI / command loop (per slave) */
 #define MASTER_TELE_PERIOD_MS   5u    /* 200 Hz MOTOR_STATE telemetry */
 #define MASTER_STATUS_PERIOD_MS 50u   /* 20 Hz MASTER/SLAVE_STATUS */
@@ -38,6 +38,13 @@ static uint8_t      slave_motors_alive[NUM_SLAVES];
 static MotorState   latest_atom[NUM_SLAVES][MAX_MOTORS_PER_SLAVE];
 static uint32_t     slave_crc_errors[NUM_SLAVES];   /* telemetry frames failing CRC */
 static uint8_t      spi_seq[NUM_SLAVES];             /* per-slave command seq counter  */
+/* seq/echo diagnostics (fix 5) and relayed slave-side command-CRC count (fix 3). */
+#define SEQ_STALL_POLLS 5u                           /* echo frozen this many polls = a gap */
+static uint8_t      prev_echo[NUM_SLAVES];           /* last echo seen                  */
+static uint8_t      have_prev_echo[NUM_SLAVES];      /* prev_echo valid yet             */
+static uint8_t      echo_stall[NUM_SLAVES];          /* consecutive polls w/ no advance */
+static uint32_t     slave_seq_gaps[NUM_SLAVES];      /* command-link stalls (echo froze) */
+static uint32_t     slave_cmd_crc_errors[NUM_SLAVES];/* from slave_debug_rsvd[0..3]     */
 static uint16_t     tx_seq = 0;
 
 /* ── helpers ─────────────────────────────────────────────────────────────── */
@@ -92,6 +99,11 @@ static HAL_StatusTypeDef spi_exchange(SpiDevId dev, uint8_t n_motors,
         memcpy(&tx[SPI_CMD_HDR_BYTES], mit_payload,
                (size_t)n_motors * sizeof(SpiMitCmd));
     }
+    /* Fix 3: CRC-protect the command frame (every command, incl. HOLD/NOP). The
+       slave verifies this before applying anything. */
+    uint16_t ccrc = proto_crc16(tx, SPI_CMD_CRC_OFF(n_motors));
+    tx[SPI_CMD_CRC_OFF(n_motors)]     = (uint8_t)(ccrc & 0xFFu);
+    tx[SPI_CMD_CRC_OFF(n_motors) + 1] = (uint8_t)(ccrc >> 8);
 
     CS_SELECT(dev);
     HAL_StatusTypeDef st = HAL_SPI_TransmitReceive(master_hspi, tx, rx,
@@ -110,6 +122,10 @@ static HAL_StatusTypeDef spi_exchange(SpiDevId dev, uint8_t n_motors,
     *echo_seq_out     = rx[1];
     memcpy(tele_out, &rx[SPI_TELE_HDR_BYTES],
            (size_t)n_motors * sizeof(MotorState));
+    /* Relayed slave-side command-CRC reject count (slave_debug_rsvd[0..3] LE). */
+    const uint8_t *dbg = &rx[SPI_TELE_DEBUG_OFF(n_motors)];
+    slave_cmd_crc_errors[(uint8_t)dev] = (uint32_t)dbg[0] | ((uint32_t)dbg[1] << 8) |
+                                         ((uint32_t)dbg[2] << 16) | ((uint32_t)dbg[3] << 24);
     return HAL_OK;
 }
 
@@ -151,10 +167,12 @@ static void emit_master_status(uint32_t now_ms)
 static void emit_slave_status(uint8_t s, uint32_t now_ms)
 {
     SlaveStatus pay = {0};
-    pay.slave_id     = s;
-    pay.motors_alive = slave_motors_alive[s];
-    pay.uptime_ms    = now_ms;
-    pay.crc_errors   = slave_crc_errors[s];
+    pay.slave_id       = s;
+    pay.motors_alive   = slave_motors_alive[s];
+    pay.uptime_ms      = now_ms;
+    pay.crc_errors     = slave_crc_errors[s];
+    pay.cmd_crc_errors = slave_cmd_crc_errors[s];   /* slave rejected these commands */
+    pay.seq_gaps       = slave_seq_gaps[s];         /* master saw these echo gaps    */
 
     uint8_t frame[MSG_HEADER_SIZE + sizeof(SlaveStatus)];
     uint16_t n = proto_build(frame, sizeof(frame),
@@ -249,7 +267,9 @@ void MotorMaster_HandleControlReq(const ControlReq *req, uint16_t req_seq)
                               NODE_MASTER, NODE_JETSON,
                               HAL_GetTick(),
                               (const uint8_t *)&resp, sizeof(resp));
-    if (n > 0u) usb_tx_write(frame, n);
+    /* Runs in USB-ISR context (via CDC_Receive_FS) → post to the response queue;
+       main drains it into the ring, keeping usb_tx_write single-producer. */
+    if (n > 0u) usb_tx_post_from_isr(frame, n);
 }
 
 /* ── Public API ──────────────────────────────────────────────────────────── */
@@ -269,6 +289,11 @@ void MotorMaster_Init(SPI_HandleTypeDef *hspi, UART_HandleTypeDef *huart)
     memset(latest_atom, 0, sizeof(latest_atom));
     memset(slave_crc_errors, 0, sizeof(slave_crc_errors));
     memset(spi_seq, 0, sizeof(spi_seq));
+    memset(prev_echo, 0, sizeof(prev_echo));
+    memset(have_prev_echo, 0, sizeof(have_prev_echo));
+    memset(echo_stall, 0, sizeof(echo_stall));
+    memset(slave_seq_gaps, 0, sizeof(slave_seq_gaps));
+    memset(slave_cmd_crc_errors, 0, sizeof(slave_cmd_crc_errors));
 }
 
 void MotorMaster_SetMitCmd(uint8_t slave_id, uint8_t idx, float pos, float vel,
@@ -308,66 +333,101 @@ static void poll_one_slave(uint8_t s)
     uint8_t n = slave_motor_counts[s];
 
     uint8_t cmd;
-    const uint8_t *mit_payload = NULL;
     uint8_t sent_arm_idx       = 0;
     uint8_t sent_goto_zero_idx = 0;
     uint8_t sent_arm           = 0;
     uint8_t sent_goto_zero     = 0;
+    uint8_t is_mit             = 0;
+    SpiMitCmd mit_local[MAX_MOTORS_PER_SLAVE];
+
+    /* Fix 2: command staging (pending_*, mit_pending, send_disarm) is written by
+       the USB ISR. Select the command, SNAPSHOT the MIT setpoints, and claim the
+       one-shot state in ONE short critical section so a mid-read ISR write can't
+       split a setpoint or lose a bit. The pending_arm/goto_zero bits are only READ
+       here; they're cleared on telemetry confirmation below, also under a mask. */
+    __disable_irq();
     if (send_disarm[s]) {
         cmd = SPI_CMD_DISARM; send_disarm[s] = 0u;
     } else if (pending_goto_zero_bits[s]) {
         sent_goto_zero_idx = (uint8_t)__builtin_ctz(pending_goto_zero_bits[s]);
         cmd = SPI_CMD_GOTO_ZERO_IDX(sent_goto_zero_idx);
-        sent_goto_zero = 1;             /* clear bit only on confirmed state */
+        sent_goto_zero = 1;
     } else if (pending_arm_bits[s]) {
         sent_arm_idx = (uint8_t)__builtin_ctz(pending_arm_bits[s]);
         cmd = SPI_CMD_ARM_IDX(sent_arm_idx);
-        sent_arm = 1;                   /* clear bit only on confirmed state */
+        sent_arm = 1;
     } else if (mit_pending[s]) {
         cmd = SPI_CMD_MIT;
-        mit_payload = (const uint8_t *)pending_mit[s];
+        memcpy(mit_local, pending_mit[s], (size_t)n * sizeof(SpiMitCmd));  /* coherent copy */
         mit_pending[s] = 0u;
-        /* valid flags cleared AFTER exchange so spi_exchange's memcpy sees them */
+        for (uint8_t i = 0; i < n; i++) pending_mit[s][i].valid = 0u;
+        is_mit = 1;
     } else if (master_armed[s]) {
         cmd = SPI_CMD_HOLD;
     } else {
         cmd = SPI_CMD_NOP;
     }
+    __enable_irq();
 
+    uint8_t seq_to_send = spi_seq[s]++;
     uint8_t alive = 0;
     uint8_t echo  = 0;
     MotorState tele[MAX_MOTORS_PER_SLAVE];
-    HAL_StatusTypeDef st = spi_exchange((SpiDevId)s, n, cmd, spi_seq[s]++,
-                                        mit_payload, &alive, &echo, tele);
-    (void)echo;   /* frame round-trip token; not forwarded to host this pass */
-    if (cmd == SPI_CMD_MIT) {
-        for (uint8_t i = 0; i < n; i++) pending_mit[s][i].valid = 0u;
-    }
+    HAL_StatusTypeDef st = spi_exchange((SpiDevId)s, n, cmd, seq_to_send,
+                                        is_mit ? (const uint8_t *)mit_local : NULL,
+                                        &alive, &echo, tele);
 
     if (st == HAL_OK) {   /* CRC verified inside spi_exchange = valid + present */
-        /* Confirm one-shot bits against telemetry, not just SPI delivery: the
-           slave may be blocked in arm/goto_zero init (~40 ms) while the master
-           has moved on, so retry every tick until the state change shows up.
-           state carries the fault cause in its high nibble — mask to lifecycle. */
-        if (sent_arm) {
-            if (SPI_STATE_LIFE(tele[sent_arm_idx].state) == MOTOR_ARMED_HOLD)
-                pending_arm_bits[s] &= ~(uint8_t)(1u << sent_arm_idx);
+        /* Fix 5 (diagnostics only): the echoed seq advances as the slave confirms
+           commands, but it rides the COALESCED telemetry stream and is pipelined
+           by the TX double-buffer, so per-poll it jitters (+1 or +2) — that's
+           normal, not loss. A GAP is a sustained STALL: the echo frozen while we
+           keep polling — the signature of a command link that stopped confirming
+           (a blocking slave op, or a dead link). Any advance resets the streak, so
+           idle reads 0. Single CRC-dropped commands are caught definitively by
+           cmd_crc_errors instead; no retransmit here (MIT is latest-value; one-shots
+           retry until confirmed below). */
+        if (have_prev_echo[s]) {
+            if (echo == prev_echo[s]) {
+                if (++echo_stall[s] >= SEQ_STALL_POLLS) { slave_seq_gaps[s]++; echo_stall[s] = 0u; }
+            } else {
+                echo_stall[s] = 0u;
+            }
+        }
+        prev_echo[s]      = echo;
+        have_prev_echo[s] = 1u;
+
+        /* Confirm one-shot bits against telemetry (retry until the state shows up).
+           Clear under a mask — the USB ISR may |= a new bit concurrently. state
+           carries the fault cause in its high nibble; mask to lifecycle. */
+        if (sent_arm && SPI_STATE_LIFE(tele[sent_arm_idx].state) == MOTOR_ARMED_HOLD) {
+            __disable_irq();
+            pending_arm_bits[s] &= ~(uint8_t)(1u << sent_arm_idx);
+            __enable_irq();
         }
         if (sent_goto_zero) {
             uint8_t zs = SPI_STATE_LIFE(tele[sent_goto_zero_idx].state);
-            if (zs == MOTOR_ZEROING || zs == MOTOR_ARMED_HOLD)
+            if (zs == MOTOR_ZEROING || zs == MOTOR_ARMED_HOLD) {
+                __disable_irq();
                 pending_goto_zero_bits[s] &= ~(uint8_t)(1u << sent_goto_zero_idx);
+                __enable_irq();
+            }
         }
         slave_alive[s]        = 1u;
         slave_motors_alive[s] = alive;
         memcpy(latest_atom[s], tele, (size_t)n * sizeof(MotorState));
     } else {
         /* Absent slave / garbage frame — mark offline and drop pending one-shots
-           so they don't pile up against a board that isn't there. */
-        slave_alive[s]            = 0u;
-        slave_motors_alive[s]     = 0u;
+           so they don't pile up against a board that isn't there. Mask the drops
+           vs the ISR; reset the seq-echo baseline so recovery doesn't false-count. */
+        slave_alive[s]        = 0u;
+        slave_motors_alive[s] = 0u;
+        have_prev_echo[s]     = 0u;
+        echo_stall[s]         = 0u;
+        __disable_irq();
         pending_arm_bits[s]       = 0u;
         pending_goto_zero_bits[s] = 0u;
+        __enable_irq();
     }
 }
 
@@ -378,7 +438,10 @@ void MotorMaster_ProcessLoop(void)
     static uint32_t next_status_ms = 0;
     uint32_t now = HAL_GetTick();
 
-    /* Drain USB TX ring buffer */
+    /* Move ISR-posted responses (ControlResp/PONG) into the ring — this is the
+       only place they enter usb_tx_write, keeping it single-producer — then drain
+       the ring to USB. */
+    usb_tx_pump_responses();
     usb_tx_pump();
 
     /* SPI poll — command delivery at 200 Hz, every slave each tick */

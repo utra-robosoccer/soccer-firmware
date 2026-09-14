@@ -54,5 +54,20 @@ int main(void)
     frame[sizeof(frame) - 2] = (uint8_t)(crc & 0xFFu);
     frame[sizeof(frame) - 1] = (uint8_t)(crc >> 8);
     print_hex("FRAME", frame, (unsigned)sizeof(frame));
+
+    /* Command frame (master→slave), N=2: [cmd][seq][SpiMitCmd×2][crc16]. Guards
+       the command-frame CRC offset/layout cross-language. Values are exact in
+       binary so C and Python pack identically. */
+    uint8_t cmdf[SPI_CMD_FRAME_SIZE(2)];
+    memset(cmdf, 0, sizeof(cmdf));
+    cmdf[0] = 0x05u;   /* SPI_CMD_MIT */
+    cmdf[1] = 0x2Au;   /* seq */
+    SpiMitCmd *mc = (SpiMitCmd *)&cmdf[SPI_CMD_HDR_BYTES];
+    mc[0].pos = 1.5f;   mc[0].vel = -2.25f; mc[0].valid = 1u;
+    mc[1].pos = -0.75f; mc[1].vel = 3.5f;   mc[1].valid = 0u;
+    uint16_t ccrc = proto_crc16(cmdf, SPI_CMD_CRC_OFF(2));
+    cmdf[SPI_CMD_CRC_OFF(2)]     = (uint8_t)(ccrc & 0xFFu);
+    cmdf[SPI_CMD_CRC_OFF(2) + 1] = (uint8_t)(ccrc >> 8);
+    print_hex("CMDFRAME", cmdf, (unsigned)sizeof(cmdf));
     return 0;
 }
