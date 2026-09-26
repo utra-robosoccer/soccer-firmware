@@ -1,0 +1,60 @@
+# Motor chain configuration for SLAVE-1.
+#
+# SCAFFOLD — placeholder motor list so the firmware builds. Replace the `motors:`
+# entries below with SLAVE-1's real chain (count, can_id, model, limits).
+# Each slave has its OWN CAN bus, so can_id values may overlap with slave0.
+#
+# Single source of truth for SLAVE-1. Generate per-slave + system configs with:
+#     python3 scripts/gen_motor_config.py --slave  configs/slave1.yaml
+#     python3 scripts/gen_motor_config.py --system configs/slave0.yaml configs/slave1.yaml
+#
+# Edit this file, regenerate, then rebuild firmware. Do not hand-edit generated files.
+
+slave: slave1
+
+# Per-model CAN "operation control mode" (Communication Type 1) ranges, taken
+# from the RobStride user manuals (Type 1 tables). Identical to slave0.
+shared_ranges:
+  p_min: -12.57   # rad  (-4*pi)
+  p_max:  12.57   # rad  (+4*pi)
+  kp_min:  0.0
+  kp_max:  500.0
+  kd_min:  0.0
+  kd_max:  5.0
+
+models:
+  RS00:
+    v_min: -33.0   # rad/s
+    v_max:  33.0
+    t_min: -14.0   # Nm
+    t_max:  14.0
+  RS02:
+    v_min: -44.0   # rad/s
+    v_max:  44.0
+    t_min: -17.0   # Nm
+    t_max:  17.0
+
+# Motors in chain order. motor_idx is the array index (0-based); can_id is the
+# RobStride node id on SLAVE-1's bus. soft limits / gains are conservative
+# defaults — tune per joint.
+motors:
+  - idx: 0
+    can_id: 6
+    model: RS02
+    joint_name: motor6
+    soft_min: -0.79
+    soft_max:  0.79
+    max_vel:   10.0
+    max_tau:   0.8
+    default_kp: 15.0
+    default_kd:  1.0
+  - idx: 1
+    can_id: 7
+    model: RS00
+    joint_name: motor7
+    soft_min: -0.79
+    soft_max:  0.79
+    max_vel:   10.0
+    max_tau:   0.8
+    default_kp: 15.0
+    default_kd:  1.0
