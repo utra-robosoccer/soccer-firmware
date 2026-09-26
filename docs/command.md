@@ -138,6 +138,88 @@ the telemetry atom — so the host sees, per tick, whether its command was clipp
 
 ---
 
+## Layer 5a — `GOTO_ZERO` (MOTOR_ZEROING), hardened
+
+`GOTO_ZERO` is a slave-owned homing move: a **constant-rate creep** (no trajectory
+profiling) that walks a waypoint from the current angle toward home (pos = 0) with
+soft gains (`MOTOR_ZERO_KP/KD`), then re-establishes the mechanical zero and locks
+`ARMED_HOLD`. Constants live in the `MOTOR_ZERO_*` group in `motor_config.h`
+(generated). Hardened state machine:
+
+```
+                       motor_runtime_goto_zero(idx)
+                                  │
+        ┌─────────────── ENTRY GATES (reject → HAL_ERROR, counted) ───────────────┐
+        │  • idx in range, state == IDLE, motor alive                             │
+        │  • 0 rad must lie inside [soft_min, soft_max]      (gate 5a)             │
+        │  • latched cause NOT in {OVERTORQUE, MOTOR_FAULT}  (gate 5b)             │
+        │      → those require an explicit ARM to clear first; WATCHDOG /          │
+        │        CAN_TIMEOUT / clean are auto-cleared here                         │
+        └──────────────────────────────────┬──────────────────────────────────────┘
+                                  │ accepted: enable, init waypoint,
+                                  │ arm stall watchdog (best=|start|, t=now)
+                                  ▼
+                            ┌───────────┐   leashed creep: advance waypoint only
+                            │ MOTOR_    │   while |hold_pos − pos| < ZERO_LEASH;
+                     ┌──────│ ZEROING   │──┐ else pause ramp + zero vel-FF
+   ramp done (hold_ │      └───────────┘  │ (blocked-joint force ≤ ~Kp·leash)
+   pos→0) AND       │            │        │
+   |pos|<TOL for    │            │        │ host stops commanding
+   SETTLE_TICKS     ▼            │        ▼
+              ┌────────────┐      │   ┌──────────────────────┐
+              │  ARRIVAL   │      │   │ watchdog (200 ms)     │
+              │ set-zero,  │      │   │ → IDLE (CAUSE_WATCHDOG)│
+              │ re-enable  │      │   └──────────────────────┘
+              └─────┬──────┘      │
+                    ▼             │ no progress toward home for STALL_MS
+              ┌───────────┐       ▼
+              │ ARMED_HOLD│   ┌───────────────────────────────────────────┐
+              └───────────┘   │ damp (Kp=0, Kd=ZERO_DAMP_KD, tau=0) then   │
+                              │ FAULT (CAUSE_ZERO_TIMEOUT)                 │
+                              └───────────────────────────────────────────┘
+```
+
+**Timeout = no progress, not a fixed clock.** The stall watchdog trips only when
+`|pos|` fails to close on home by `MOTOR_ZERO_PROGRESS_EPS` for
+`MOTOR_ZERO_STALL_MS`. This is what catches a blocked joint (a leash-pause that
+never clears makes no progress → trips), while a slow-but-converging creep keeps
+refreshing the timer and never false-fires. An earlier absolute budget
+(`2·|start|/RATE + 1 s`) was wrong on two counts: it collapsed to ~1 s whenever
+homing *started* near zero, and it couldn't distinguish "slow" (leash-paced) from
+"stuck." On trip the joint is *damped* (compliant hold), not dropped, then latched
+`CAUSE_ZERO_TIMEOUT`.
+
+**Arrival = settled, not merely near.** Gating on the noisy CAN velocity does not
+work here: at the soft homing gains the RS velocity-feedback noise floor (~0.2
+rad/s) sits right against the 0.3 rad/s creep rate, so no `|vel|` threshold
+separates a true hold from a slewing creep. Arrival instead requires the **waypoint
+ramp to have finished** (`hold_pos` clamped to 0) **and** `|pos| < MOTOR_ZERO_TOL`,
+sustained `MOTOR_ZERO_SETTLE_TICKS` in a row — you cannot be passing through fast
+once the commanded waypoint has stopped at 0 and you've tracked it for the window.
+
+**Home drifts by the settled residual per re-zero.** Set-zero on arrival recentres
+the motor's multi-turn report window at the *current* shaft angle (removing any
+winding so short-path commands don't run away near the ±4π wrap). That angle is
+within `MOTOR_ZERO_TOL` of the previous home but not identical, so repeated
+re-zeros walk home by up to one tolerance each. **Establishing an absolute
+reference is a separate, manual calibration procedure — `GOTO_ZERO` is a
+convenience home, not a metrology datum.**
+
+> **Run zeroing unloaded / supported.** The gains are deliberately soft, so the
+> steady-state position error under a holding load is `tau_g / Kp` (gravity torque
+> over the zeroing Kp). **Do not raise `MOTOR_ZERO_KP/KD` to fight gravity** — that
+> trades the safe, human-interruptible creep for a stiff move and still leaves a
+> load-dependent offset. Support or unload the joint before homing instead.
+
+**Reject visibility (gate 5a/5b, and the pre-existing gates):** a refused
+`GOTO_ZERO` increments a slave-side `zero_rejects` counter, relayed to the master
+over the reserved SPI debug region (`slave_debug_rsvd[4..7]`, CRC-covered, no wire
+change). The master logs a `[zero-reject] slave<n> … (count=N)` line when it
+climbs — the frozen v1 `SlaveStatus` has no spare field, so this log is the
+host-visible path. Rejection is **never silent**.
+
+---
+
 ## Layer 6 — Safety semantics (end-to-end)
 
 **The watchdog chain** (why nothing runs away):
@@ -150,6 +232,7 @@ the telemetry atom — so the host sees, per tick, whether its command was clipp
 | Bad USB CRC | master drops the frame (`master_link_errors`) | host retransmits (one-shots retry; MIT via next sample) |
 | Motor overload | slave torque trip | **IDLE** (`CAUSE_OVERTORQUE`) |
 | CAN feedback lost | slave `fb_age ≥ 100 ms` | **IDLE** (`CAUSE_CAN_TIMEOUT`) |
+| `GOTO_ZERO` makes no progress toward home (blocked / leash-pause) | slave stall watchdog (`MOTOR_ZERO_STALL_MS`) | **FAULT** (`CAUSE_ZERO_TIMEOUT`), damped |
 
 **Runaway is excluded by construction:** a setpoint is applied only if it is
 (a) CRC-valid *and* (b) parsed coherently from one transfer; every applied

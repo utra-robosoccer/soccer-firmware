@@ -27,6 +27,11 @@ extern "C" {
 #define MOTOR_ZERO_RATE 0.3f
 #define MOTOR_ZERO_KP  4.0f
 #define MOTOR_ZERO_KD  1.0f
+#define MOTOR_ZERO_LEASH 0.15f
+#define MOTOR_ZERO_SETTLE_TICKS 10u
+#define MOTOR_ZERO_DAMP_KD 3.0f
+#define MOTOR_ZERO_STALL_MS 1500u
+#define MOTOR_ZERO_PROGRESS_EPS 0.01f
 
 /* Motor models present on the bus */
 typedef enum {

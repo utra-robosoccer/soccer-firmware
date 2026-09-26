@@ -46,10 +46,18 @@ REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 # Goto-zero motion parameters (motion tuning, not per-motor identity).
 GOTO_ZERO = {
-    "MOTOR_ZERO_TOL": "0.05f",   # rad (~3 deg) — arrival threshold
+    "MOTOR_ZERO_TOL": "0.05f",   # rad (~3 deg) — arrival position threshold
     "MOTOR_ZERO_RATE": "0.3f",   # rad/s        — constant approach speed
     "MOTOR_ZERO_KP": "4.0f",     # position gain while zeroing
     "MOTOR_ZERO_KD": "1.0f",
+    # Hardening (see docs/command.md — MOTOR_ZEROING). Do not raise the gains
+    # above to fight gravity: steady-state error under load is tau_g/Kp by design;
+    # zeroing must be run unloaded/supported.
+    "MOTOR_ZERO_LEASH": "0.15f",       # rad   — max waypoint lead over pos; caps blocked-joint force to ~Kp*leash
+    "MOTOR_ZERO_SETTLE_TICKS": "10u",  # loop ticks in-tolerance (ramp done + |pos|<TOL) before arrival (~50 ms @ 5 ms loop)
+    "MOTOR_ZERO_DAMP_KD": "3.0f",      # Kd of the damping command on zero timeout (Kp=0, tau=0)
+    "MOTOR_ZERO_STALL_MS": "1500u",    # ms with no progress toward home before CAUSE_ZERO_TIMEOUT (catches a real stall)
+    "MOTOR_ZERO_PROGRESS_EPS": "0.01f",# rad   — |pos| must improve by this to count as progress (above position noise)
 }
 
 

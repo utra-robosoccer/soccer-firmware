@@ -58,9 +58,11 @@ LIFECYCLE_NAMES = {
     5: "DISABLED", 6: "ZEROING", 7: "ARMED_MIT",
 }
 # ── fault cause (high nibble of MotorState.state) ─────────────────────────────
-CAUSE_NONE, CAUSE_OVERTORQUE, CAUSE_CAN_TIMEOUT, CAUSE_WATCHDOG, CAUSE_MOTOR_FAULT = range(5)
+(CAUSE_NONE, CAUSE_OVERTORQUE, CAUSE_CAN_TIMEOUT, CAUSE_WATCHDOG,
+ CAUSE_MOTOR_FAULT, CAUSE_ZERO_TIMEOUT) = range(6)
 CAUSE_NAMES = {
     0: "NONE", 1: "OVERTORQUE", 2: "CAN_TIMEOUT", 3: "WATCHDOG", 4: "MOTOR_FAULT",
+    5: "ZERO_TIMEOUT",
 }
 
 # ── cmd_flags bits (recomputed each tick by the slave) ────────────────────────

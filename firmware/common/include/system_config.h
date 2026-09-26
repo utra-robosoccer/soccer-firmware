@@ -23,11 +23,6 @@ extern "C" {
 #define MOTOR_T_MIN  -17.0f
 #define MOTOR_T_MAX  17.0f
 
-/* Per-motor CAN-feedback staleness threshold (ms). Kept distinct from the
- * 200 ms master-link watchdog so "CAN died" and "upstream died" stay separable
- * as fault causes. */
-#define MOTOR_CAN_FB_TIMEOUT_MS  100u
-
 /* Number of active motors on each slave (chain order). */
 static const uint8_t slave_motor_counts[NUM_SLAVES] = { 3u };
 

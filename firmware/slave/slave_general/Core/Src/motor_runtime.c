@@ -174,16 +174,68 @@ void motor_runtime_update(uint32_t now_ms)
                 break;
 
             case MOTOR_ZEROING: {
-                float pos = motors_rt[i].pos;
-                float abs_pos = pos < 0.0f ? -pos : pos;
-                if (abs_pos < MOTOR_ZERO_TOL) {
-                    /* Arrived at home. Reset the motor's mechanical zero HERE so
-                       its multi-turn frame is 0 at home. Without this a motor
-                       that has wound up sits near the ±4π position-report limit,
-                       where the 16-bit position feedback wraps; the short-path
-                       pos_offset then flips sign mid-motion and MIT commands run
-                       away. Resetting at home removes the winding while keeping
-                       the physical home reference (we are at home right now). */
+                float pos     = motors_rt[i].pos;
+                float abs_pos = fabsf(pos);
+
+                /* (1) Progress/stall watchdog. A "stall" is *no progress toward
+                   home* for MOTOR_ZERO_STALL_MS — which correctly catches a
+                   leash-pause that never clears (a blocked joint) WITHOUT
+                   false-tripping a slow-but-converging creep or a motor already
+                   sitting at home. (An absolute-time budget can't tell "slow" from
+                   "stuck", and collapsed to ~1 s whenever homing started near
+                   zero.) Any improvement of |pos| by MOTOR_ZERO_PROGRESS_EPS
+                   refreshes the timer. On trip, damp the joint (Kp=0, Kd high,
+                   tau=0) so a partially-homed link is held compliant rather than
+                   dropped, then latch FAULT; damping is one-shot (FAULT stops
+                   further MIT, so the motor holds it until its own CAN timeout). */
+                if (abs_pos < motors_rt[i].zero_best_abs - MOTOR_ZERO_PROGRESS_EPS) {
+                    motors_rt[i].zero_best_abs    = abs_pos;
+                    motors_rt[i].zero_progress_ms = now_ms;
+                }
+                if ((now_ms - motors_rt[i].zero_progress_ms) > MOTOR_ZERO_STALL_MS) {
+                    send_mit(i, 0.0f, 0.0f, 0.0f, 0.0f, MOTOR_ZERO_DAMP_KD);
+                    motors_rt[i].state    = MOTOR_FAULT;
+                    motors_rt[i].cause    = CAUSE_ZERO_TIMEOUT;
+                    motors_rt[i].hold_vel = 0.0f;
+                    break;
+                }
+
+                /* (2) Watchdog — bail to IDLE if the host stopped commanding
+                   mid-creep. (Only reached while still ZEROING; the arrival branch
+                   below transitions out and breaks before this, so its blocking
+                   re-enable can't underflow the freshly-set watchdog_ms.) */
+                if ((now_ms - motors_rt[i].watchdog_ms) > MOTOR_WATCHDOG_MS) {
+                    can_disable_motor(cid, CAN_MASTER_ID);
+                    motors_rt[i].state = MOTOR_IDLE;
+                    motors_rt[i].cause = CAUSE_WATCHDOG;
+                    break;
+                }
+
+                /* (3) Arrival = SETTLED, not merely near. The waypoint ramp must
+                   have finished (hold_pos clamped to 0) AND the joint held within
+                   MOTOR_ZERO_TOL of it for MOTOR_ZERO_SETTLE_TICKS in a row. We
+                   gate on ramp-done + position, NOT instantaneous velocity: at the
+                   soft homing gains the RS velocity-feedback noise floor (~0.2
+                   rad/s) sits right against the 0.3 rad/s creep rate, so no vel
+                   threshold separates a true hold from a slewing creep. "Ramp
+                   finished and still within tol" is the reliable settled signal —
+                   you cannot be passing through fast once the commanded waypoint
+                   has stopped at 0 and you've tracked it for the settle window. */
+                if (fabsf(motors_rt[i].hold_pos) < 1e-4f && abs_pos < MOTOR_ZERO_TOL) {
+                    if (++motors_rt[i].zero_settle < MOTOR_ZERO_SETTLE_TICKS) {
+                        /* Hold at home while the joint settles. */
+                        send_mit(i, 0.0f, 0.0f, 0.0f, MOTOR_ZERO_KP, MOTOR_ZERO_KD);
+                        break;
+                    }
+                    /* Settled → arrival. Reset the motor's mechanical zero HERE so
+                       its multi-turn frame is 0 at home. Without this a motor that
+                       has wound up sits near the ±4π position-report limit, where
+                       the 16-bit position feedback wraps; the short-path pos_offset
+                       then flips sign mid-motion and MIT commands run away.
+                       Resetting at home removes the winding while keeping the
+                       physical home reference. Home therefore drifts by the settled
+                       residual (< MOTOR_ZERO_TOL) each re-zero — reference
+                       calibration is a separate manual procedure (docs/command.md). */
                     uint32_t ts;
                     can_disable_motor(cid, CAN_MASTER_ID);
                     HAL_Delay(5u);
@@ -207,33 +259,29 @@ void motor_runtime_update(uint32_t now_ms)
                     motors_rt[i].hold_vel    = 0.0f;
                     motors_rt[i].watchdog_ms = HAL_GetTick(); /* post-delay, not stale now_ms */
                     motors_rt[i].state       = MOTOR_ARMED_HOLD;
-                } else {
-                    /* Step waypoint toward zero at MOTOR_ZERO_RATE (rad/s),
-                       scaled by the real loop period so the creep speed is
-                       independent of loop frequency. */
-                    float sign = (pos > 0.0f) ? -1.0f : 1.0f;
+                    break;
+                }
+                motors_rt[i].zero_settle = 0u;   /* left the tolerance band — restart the settle count */
+
+                /* (4) Leashed creep. Advance the waypoint toward 0 at
+                   MOTOR_ZERO_RATE (scaled by the real loop period so the speed is
+                   loop-frequency-independent) ONLY while it isn't already leading
+                   the joint by more than MOTOR_ZERO_LEASH. If the joint lags
+                   further (obstruction/binding), pause the ramp and zero the
+                   velocity feed-forward so the commanded error — and thus the
+                   force — stays bounded at ~Kp*leash instead of winding up. */
+                float sign = (pos > 0.0f) ? -1.0f : 1.0f;
+                float lead = motors_rt[i].hold_pos - pos;   /* both in home frame */
+                float vff  = 0.0f;
+                if (fabsf(lead) < MOTOR_ZERO_LEASH) {
                     motors_rt[i].hold_pos += sign * MOTOR_ZERO_RATE * MOTOR_LOOP_DT_S;
                     /* Clamp — don't overshoot zero */
                     if (sign < 0.0f && motors_rt[i].hold_pos < 0.0f) motors_rt[i].hold_pos = 0.0f;
                     if (sign > 0.0f && motors_rt[i].hold_pos > 0.0f) motors_rt[i].hold_pos = 0.0f;
-                    send_mit(i, 0.0f,
-                             motors_rt[i].hold_pos,
-                             sign * MOTOR_ZERO_RATE,
-                             MOTOR_ZERO_KP, MOTOR_ZERO_KD);
+                    vff = sign * MOTOR_ZERO_RATE;
                 }
-                /* Only the creep phase honours the watchdog (bail if the host
-                   stops commanding mid-zero). After arrival above we are already
-                   ARMED_HOLD, and the arrival's blocking re-enable (~70 ms of
-                   HAL_Delay) makes the freshly-set watchdog_ms LATER than the
-                   stale now_ms captured before this loop iteration — the unsigned
-                   subtraction would underflow and falsely trip the just-armed
-                   motor to IDLE. Guarding on MOTOR_ZEROING skips that. */
-                if (motors_rt[i].state == MOTOR_ZEROING &&
-                    (now_ms - motors_rt[i].watchdog_ms) > MOTOR_WATCHDOG_MS) {
-                    can_disable_motor(cid, CAN_MASTER_ID);
-                    motors_rt[i].state = MOTOR_IDLE;
-                    motors_rt[i].cause = CAUSE_WATCHDOG;
-                }
+                send_mit(i, 0.0f, motors_rt[i].hold_pos, vff,
+                         MOTOR_ZERO_KP, MOTOR_ZERO_KD);
                 break;
             }
 
@@ -344,6 +392,22 @@ HAL_StatusTypeDef motor_runtime_goto_zero(uint8_t idx)
     if (motors_rt[idx].state != MOTOR_IDLE) return HAL_ERROR;
     if (!motors_rt[idx].alive)              return HAL_ERROR;
 
+    /* Gate 5a: home (0 rad) must lie inside the joint's soft limits, or zeroing
+       would creep straight into a limit it can never satisfy. Refuse up front —
+       a joint whose travel excludes 0 must be homed to a reachable reference by a
+       separate procedure, not by GOTO_ZERO. */
+    if (motor_configs[idx].soft_min > 0.0f || motor_configs[idx].soft_max < 0.0f)
+        return HAL_ERROR;
+
+    /* Gate 5b: GOTO_ZERO clears a latched fault as a side effect, but only for
+       transient link causes (WATCHDOG, CAN_TIMEOUT) and a clean motor. A
+       hardware/overtravel latch (OVERTORQUE, MOTOR_FAULT) must be acknowledged by
+       an explicit ARM first — auto-clearing it here would let a jammed joint be
+       re-driven blindly. Refuse; the reject is counted by the caller. */
+    if (motors_rt[idx].cause == CAUSE_OVERTORQUE ||
+        motors_rt[idx].cause == CAUSE_MOTOR_FAULT)
+        return HAL_ERROR;
+
     uint8_t cid = motor_configs[idx].can_id;
 
     /* Snapshot for the fault-word check and the unwind decision below. A second
@@ -352,8 +416,9 @@ HAL_StatusTypeDef motor_runtime_goto_zero(uint8_t idx)
     motor_t snap;
     motor_get_snapshot(idx, &snap);
 
-    /* GOTO_ZERO also enables the motor — clear any latched fault first (same as
-       arm), or the motor refuses the enable while its own fault is latched. */
+    /* Clear the (whitelisted) latched cause + fault word. GOTO_ZERO also enables
+       the motor, so send the CAN fault-clear first when the motor's own fault was
+       latched, or it refuses the enable. */
     if (snap.fault_word != 0u) {
         can_clear_fault(cid, CAN_MASTER_ID);
         HAL_Delay(5u);
@@ -403,6 +468,14 @@ HAL_StatusTypeDef motor_runtime_goto_zero(uint8_t idx)
     }
     motors_rt[idx].hold_pos = motors_rt[idx].pos;
     motors_rt[idx].hold_vel = 0.0f;
+
+    /* Arm the progress/stall watchdog: best distance = the start distance, timer
+       = now. It trips only if |pos| fails to close on home for
+       MOTOR_ZERO_STALL_MS, so a slow (leash-paced) but converging creep never
+       false-fires — unlike an absolute deadline. */
+    motors_rt[idx].zero_best_abs    = fabsf(motors_rt[idx].hold_pos);
+    motors_rt[idx].zero_progress_ms = HAL_GetTick();
+    motors_rt[idx].zero_settle      = 0u;
 
     /* First command: hold current position before the update loop starts stepping */
     send_mit(idx, 0.0f, motors_rt[idx].hold_pos, 0.0f,

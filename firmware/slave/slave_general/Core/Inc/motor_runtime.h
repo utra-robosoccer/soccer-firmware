@@ -43,6 +43,12 @@ typedef struct {
     uint8_t            last_apply_clamp; /* clamp bits from the most recent apply_mit */
     uint8_t            got_fresh_cmd; /* a fresh MIT arrived since the last tick   */
     uint32_t           watchdog_ms;
+    float              zero_best_abs;    /* MOTOR_ZEROING: smallest |pos| reached so
+                                            far — the progress/stall reference        */
+    uint32_t           zero_progress_ms; /* MOTOR_ZEROING: last tick |pos| improved;
+                                            stall = no progress for MOTOR_ZERO_STALL_MS */
+    uint16_t           zero_settle;   /* MOTOR_ZEROING: consecutive ticks with the
+                                         ramp done AND |pos|<TOL — arrival gate        */
     uint8_t            alive;
 } MotorRuntime;
 

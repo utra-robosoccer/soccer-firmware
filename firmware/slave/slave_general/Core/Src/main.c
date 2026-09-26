@@ -75,6 +75,7 @@ static uint32_t phase1_last_feedback_count = 0;
 static uint32_t phase1_led_off_ms = 0;
 static uint8_t  phase1_echo_seq = 0;   /* seq byte of the most recent VALID command */
 static uint32_t cmd_crc_errors  = 0;   /* SPI command frames rejected on CRC */
+static uint32_t zero_rejects    = 0;   /* GOTO_ZERO commands refused (gate/state) */
 
 /* USER CODE END PV */
 
@@ -257,14 +258,19 @@ int main(void)
       for (uint8_t _i = 0; _i < N_MOTORS; _i++) {
         motor_runtime_pack_tele(&ms[_i], _i);
       }
-      /* slave_debug_rsvd[0..3] = cmd_crc_errors (u32 LE); [4..7] reserved 0.
-         Relays the slave-side command-CRC reject count to the master, which
-         surfaces it in SlaveStatus.cmd_crc_errors. */
+      /* slave_debug_rsvd[0..3] = cmd_crc_errors (u32 LE); [4..7] = zero_rejects
+         (u32 LE). Both are relayed to the master over the reserved (CRC-covered)
+         debug region — no wire-layout change. The master surfaces cmd_crc_errors
+         in SlaveStatus and logs zero_rejects when it climbs. */
       uint8_t *dbg = &frame[SPI_TELE_DEBUG_OFF(N_MOTORS)];
       dbg[0] = (uint8_t)(cmd_crc_errors & 0xFFu);
       dbg[1] = (uint8_t)((cmd_crc_errors >> 8) & 0xFFu);
       dbg[2] = (uint8_t)((cmd_crc_errors >> 16) & 0xFFu);
       dbg[3] = (uint8_t)((cmd_crc_errors >> 24) & 0xFFu);
+      dbg[4] = (uint8_t)(zero_rejects & 0xFFu);
+      dbg[5] = (uint8_t)((zero_rejects >> 8) & 0xFFu);
+      dbg[6] = (uint8_t)((zero_rejects >> 16) & 0xFFu);
+      dbg[7] = (uint8_t)((zero_rejects >> 24) & 0xFFu);
       uint16_t crc = proto_crc16(frame, (size_t)(PAYLOAD_LENGTH - SPI_TELE_CRC_BYTES));
       frame[PAYLOAD_LENGTH - 2] = (uint8_t)(crc & 0xFFu);   /* little-endian */
       frame[PAYLOAD_LENGTH - 1] = (uint8_t)(crc >> 8);
@@ -315,7 +321,10 @@ int main(void)
         }
         case SPI_CMD_GOTO_ZERO: {
           uint8_t idx = SPI_CMD_MOTOR_IDX(cmd);
-          motor_runtime_goto_zero(idx);
+          /* A refused GOTO_ZERO (bad idx, not-IDLE, dead motor, 0 outside soft
+             limits, or a hardware/overtravel latch needing explicit ARM) is
+             counted so the reject is visible on the host, not silent. */
+          if (motor_runtime_goto_zero(idx) != HAL_OK) zero_rejects++;
           break;
         }
         case SPI_CMD_MIT: {

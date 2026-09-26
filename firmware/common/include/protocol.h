@@ -55,6 +55,7 @@ typedef enum {
     CAUSE_CAN_TIMEOUT = 2u,  /* this motor's Type-2 feedback went stale         */
     CAUSE_WATCHDOG    = 3u,  /* master-link (SPI command) watchdog expired      */
     CAUSE_MOTOR_FAULT = 4u,  /* RS motor's own Type-2 fault bits fired          */
+    CAUSE_ZERO_TIMEOUT= 5u,  /* goto-zero made no progress toward home (stall)   */
 } MotorFaultCause;
 
 /* MotorState.state packs lifecycle (low nibble) + fault cause (high nibble). */
@@ -222,7 +223,7 @@ _Static_assert(sizeof(MsgHeader) == MSG_HEADER_SIZE, "MsgHeader must be 16 bytes
 _Static_assert(sizeof(MotorState) == 16u,            "MotorState must be 16 bytes");
 _Static_assert(sizeof(SpiMitCmd) == 9u,              "SpiMitCmd must be 9 bytes");
 _Static_assert(MOTOR_ARMED_MIT   <= 0x0Fu,           "MotorLifecycle must fit 4 bits");
-_Static_assert(CAUSE_MOTOR_FAULT <= 0x0Fu,           "MotorFaultCause must fit 4 bits");
+_Static_assert(CAUSE_ZERO_TIMEOUT <= 0x0Fu,          "MotorFaultCause must fit 4 bits");
 #endif
 
 /* ── CRC16-CCITT ─────────────────────────────────────────────────────────── */

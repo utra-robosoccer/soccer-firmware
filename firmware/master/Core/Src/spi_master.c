@@ -45,6 +45,8 @@ static uint8_t      have_prev_echo[NUM_SLAVES];      /* prev_echo valid yet     
 static uint8_t      echo_stall[NUM_SLAVES];          /* consecutive polls w/ no advance */
 static uint32_t     slave_seq_gaps[NUM_SLAVES];      /* command-link stalls (echo froze) */
 static uint32_t     slave_cmd_crc_errors[NUM_SLAVES];/* from slave_debug_rsvd[0..3]     */
+static uint32_t     slave_zero_rejects[NUM_SLAVES];  /* from slave_debug_rsvd[4..7]     */
+static uint32_t     slave_zero_rejects_seen[NUM_SLAVES]; /* last value we logged        */
 static uint16_t     tx_seq = 0;
 
 /* ── helpers ─────────────────────────────────────────────────────────────── */
@@ -122,10 +124,13 @@ static HAL_StatusTypeDef spi_exchange(SpiDevId dev, uint8_t n_motors,
     *echo_seq_out     = rx[1];
     memcpy(tele_out, &rx[SPI_TELE_HDR_BYTES],
            (size_t)n_motors * sizeof(MotorState));
-    /* Relayed slave-side command-CRC reject count (slave_debug_rsvd[0..3] LE). */
+    /* Relayed slave-side debug counters: cmd-CRC rejects (bytes 0..3) and
+       GOTO_ZERO rejects (bytes 4..7), both u32 LE over the reserved region. */
     const uint8_t *dbg = &rx[SPI_TELE_DEBUG_OFF(n_motors)];
     slave_cmd_crc_errors[(uint8_t)dev] = (uint32_t)dbg[0] | ((uint32_t)dbg[1] << 8) |
                                          ((uint32_t)dbg[2] << 16) | ((uint32_t)dbg[3] << 24);
+    slave_zero_rejects[(uint8_t)dev]   = (uint32_t)dbg[4] | ((uint32_t)dbg[5] << 8) |
+                                         ((uint32_t)dbg[6] << 16) | ((uint32_t)dbg[7] << 24);
     return HAL_OK;
 }
 
@@ -294,6 +299,8 @@ void MotorMaster_Init(SPI_HandleTypeDef *hspi, UART_HandleTypeDef *huart)
     memset(echo_stall, 0, sizeof(echo_stall));
     memset(slave_seq_gaps, 0, sizeof(slave_seq_gaps));
     memset(slave_cmd_crc_errors, 0, sizeof(slave_cmd_crc_errors));
+    memset(slave_zero_rejects, 0, sizeof(slave_zero_rejects));
+    memset(slave_zero_rejects_seen, 0, sizeof(slave_zero_rejects_seen));
 }
 
 void MotorMaster_SetMitCmd(uint8_t slave_id, uint8_t idx, float pos, float vel,
@@ -473,6 +480,14 @@ void MotorMaster_ProcessLoop(void)
         emit_master_status(now);
         for (uint8_t s = 0; s < NUM_SLAVES; s++) {
             emit_slave_status(s, now);
+            /* Surface a climbing GOTO_ZERO reject count (relayed over the SPI
+               debug region) as a host-visible log line — SlaveStatus has no free
+               field in the frozen v1 wire layout, so this is the visibility path. */
+            if (slave_zero_rejects[s] != slave_zero_rejects_seen[s]) {
+                usb_printf("[zero-reject] slave%u refused GOTO_ZERO (count=%lu)\r\n",
+                           (unsigned)s, (unsigned long)slave_zero_rejects[s]);
+                slave_zero_rejects_seen[s] = slave_zero_rejects[s];
+            }
         }
     }
 }

@@ -111,7 +111,7 @@ _STATE_STYLE = {
 
 def _render(active: int, sine_active: list, port: str) -> Panel:
     with _lock:
-        snaps  = [(s.state, s.pos, s.vel, s.tau, s.temp, s.fault, s.updated, s.fb_age)
+        snaps  = [(s.state, s.pos, s.vel, s.tau, s.temp, s.fault, s.updated, s.fb_age, s.cause)
                   for s in _snap]
         rx     = _link["rx"]
         err    = _link["err"]
@@ -148,7 +148,7 @@ def _render(active: int, sine_active: list, port: str) -> Panel:
             tbl.add_section()
         online = bool(salive & (1 << s_idx))
         for cfg in slave["motors"]:
-            st, pos, vel, tau, temp, fault, updated, fb_age = snaps[gi]
+            st, pos, vel, tau, temp, fault, updated, fb_age, cause = snaps[gi]
             sel   = (gi == active)
             age   = _age_ms(now, updated, fb_age) if updated else float("inf")
             stale = (not online) or (age > STALE_MS)
@@ -157,8 +157,13 @@ def _render(active: int, sine_active: list, port: str) -> Panel:
                      Text(f"{age:4.0f}", style="bold red" if age > STALE_MS else "green"))
 
             sname   = tc.MOTOR_STATE_NAMES.get(st, f"?{st}")
+            sstyle  = _STATE_STYLE.get(sname, "")
+            # Append the latched fault cause so FAULT/IDLE-after-trip is legible
+            # (e.g. "FAULT:ZERO_TIMEOUT"), not just a bare state name. Style keys
+            # off the base name, so look it up before appending.
+            label   = sname + (":" + tc.CAUSE_NAMES.get(cause, f"?{cause}") if cause else "")
             state_t = (Text("OFFLINE", style="dim red") if not online
-                       else Text(sname, style=_STATE_STYLE.get(sname, "")))
+                       else Text(label, style=sstyle))
 
             tbl.add_row(
                 Text("▶", style="bold cyan") if sel else Text(""),
