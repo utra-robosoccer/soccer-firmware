@@ -168,10 +168,9 @@ places**:
   slot (semantic, not size) — only the fixture's distinct per-field values catch
   this, and only if the field is exercised. Docs are guarded by nothing.
 
-**Joint-name mapping is defined in two places** (both derived from the YAML, so
-consistent, but duplicated logic): `tools/motor_config_gen.py` `MOTORS`
-(generated; used by `test_client.py`/`dashboard.py` via `GLOBAL_OF`) **and**
-`tools/telemetry.py` `load_motor_table()` (re-reads the YAML directly).
+**Joint-name mapping** is defined once: `tools/motor_config_gen.py` `MOTORS`
+(generated from the YAML; used by `test_client.py`/`dashboard.py` via `GLOBAL_OF`).
+(The old `telemetry.py`, which re-read the YAML directly, has been removed.)
 
 ---
 
@@ -222,9 +221,9 @@ byte would turn that silent hole into a detectable mismatch.**
 | USB | **explicit** — `MotorStatePayload.slave_id` + `motor_idx` |
 | Jetson | `(slave_id, motor_idx)` → global flattened index → joint name/model via the YAML-derived table |
 
-The `(slave, idx) → joint` mapping is **spread across `motor_config_gen.py` and
-`telemetry.py`** (both from the YAML). There is no id inside the atom — identity
-is positional on SPI and explicit only at the USB envelope.
+The `(slave, idx) → joint` mapping lives in **`motor_config_gen.py`** (from the
+YAML). There is no id inside the atom — identity is positional on SPI and explicit
+only at the USB envelope.
 
 ---
 
@@ -239,7 +238,7 @@ is positional on SPI and explicit only at the USB envelope.
 
 ### Duplicated definitions to unify
 - `MotorState` layout lives in 4 hand-kept places (C struct, `pack_tele`, Python format, docs). Size + byte drift are guarded (assert + fixture); **field-semantic drift and docs are not.** Optional hardening: generate `protocol.py`'s format string from the C header, or add a field-order fixture assertion.
-- Joint mapping duplicated in `motor_config_gen.py` and `telemetry.py`. Pick one source (prefer importing `motor_config_gen`).
+- Joint mapping is now single-source in `motor_config_gen.py` (the duplicate `telemetry.py` reader was removed); other tools should import it rather than re-reading the YAML.
 
 ### Missing fields that block next steps
 - **End-to-end per-motor freshness.** `fb_age` covers only the CAN hop and *freezes* if the SPI link dies. To trust a single motor's data end-to-end you currently must also watch `SlaveStatus.slave_alive`. A per-motor **monotonic sequence or timestamp that the host can watch for "stopped advancing"** would make freshness self-contained. Candidate: repurpose `_rsvd` as a per-motor rolling `tele_seq`, or widen `fb_age`.

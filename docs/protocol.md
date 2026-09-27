@@ -183,6 +183,7 @@ C-packed frame against the Python-packed one. Keep both green.
 
 ## Where to see it live
 
-`python3 tools/telemetry.py <port>` shows one row per motor with all of the
+`python3 tools/dashboard.py <port>` shows one row per motor with all of the
 above decoded — state, cause, pos/vel/tau, faults, flags, and fb_age — reading
-the motor table straight from the active config.
+the motor table from the active config. (The old read-only `telemetry.py` viewer
+has been removed; a dedicated viewer will replace it.)
