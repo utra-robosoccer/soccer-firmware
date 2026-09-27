@@ -32,12 +32,11 @@ from rich.rule import Rule
 from rich.table import Table
 from rich.text import Text
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-import test_client as tc
-from motor_config_gen import (MOTOR_DEFAULT_KD, MOTOR_DEFAULT_KP, MOTORS, N_MOTORS,
-                              N_SLAVES, SLAVES, SLAVE_MOTOR_COUNTS)
-from protocol import age_ms as _age_ms   # end-to-end per-motor staleness (ms)
-from session_logger import SessionLogger
+import test_client as tc   # sibling app module (same apps/ dir)
+from master_link.motor_config_gen import (MOTOR_DEFAULT_KD, MOTOR_DEFAULT_KP, MOTORS,
+                                         N_MOTORS, N_SLAVES, SLAVES, SLAVE_MOTOR_COUNTS)
+from master_link.protocol import age_ms as _age_ms   # end-to-end per-motor staleness (ms)
+from master_link.session_logger import SessionLogger
 
 # A motor is stale once its end-to-end age exceeds this. After emission gating a
 # silent slave stops sending MOTOR_STATE, so age climbs — silence is meaningful.
@@ -382,7 +381,8 @@ def main() -> None:
     # One CSV per session, created now that the port is open. All outgoing writes
     # funnel through `link` (logs commands); telemetry is logged in _ingest.
     global _logger
-    repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    # __file__ = host/apps/dashboard.py → repo root is three levels up.
+    repo_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
     _logger = SessionLogger(os.path.join(repo_root, "logs"))
     link = _LoggingSerial(ser)
     _log(f"logging to [bold]{os.path.relpath(_logger.path, repo_root)}[/bold]")

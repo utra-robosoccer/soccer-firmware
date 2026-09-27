@@ -97,6 +97,11 @@ def main():
     except ImportError:
         sys.exit("matplotlib is required: pip install matplotlib")
 
+    # A non-interactive backend (Agg/PDF/…) can't open a window — plt.show() would
+    # be a no-op with a warning. Detect it so we save PNGs instead.
+    _NONINTERACTIVE = {"agg", "pdf", "ps", "svg", "template", "cairo"}
+    interactive = matplotlib.get_backend().lower() not in _NONINTERACTIVE
+
     tele, cmds, base = _load(args.logfile)
     if not tele:
         sys.exit(f"No telemetry rows in {args.logfile}")
@@ -135,13 +140,18 @@ def main():
 
         axes[-1].set_xlabel("t [s]")
         fig.tight_layout()
-        if args.save:
+        # Save when asked, or automatically when we can't show a window anyway.
+        if args.save or (not args.no_show and not interactive):
             out = f"{base}_motor{motor or 'NA'}.png"
             fig.savefig(out, dpi=120)
             print(f"wrote {out}")
 
     if not args.no_show:
-        plt.show()
+        if interactive:
+            plt.show()
+        else:
+            print("\nNo interactive matplotlib backend (Agg) — wrote PNGs above.\n"
+                  "For interactive windows: pip install PyQt5   (or pass --save).")
 
 
 if __name__ == "__main__":

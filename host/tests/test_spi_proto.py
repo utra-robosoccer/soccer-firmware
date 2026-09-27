@@ -14,7 +14,7 @@ import subprocess
 import unittest
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-ROOT = os.path.abspath(os.path.join(HERE, "..", "..", ".."))
+ROOT = os.path.abspath(os.path.join(HERE, "..", ".."))   # host/tests → host → repo root
 
 
 class SpiProtoGolden(unittest.TestCase):

@@ -5,7 +5,7 @@ read every field. The one unit that carries it all is the **`MotorState` atom** 
 16 bytes per motor.
 
 Source of truth: [`firmware/common/include/protocol.h`](../firmware/common/include/protocol.h)
-(C) and [`host/jetson/protocol.py`](../host/jetson/protocol.py) (Python). If you
+(C) and [`host/master_link/protocol.py`](../host/master_link/protocol.py) (Python). If you
 change one, change both — a test checks they agree byte-for-byte.
 
 ## The MotorState atom (16 bytes)
@@ -183,7 +183,7 @@ C-packed frame against the Python-packed one. Keep both green.
 
 ## Where to see it live
 
-`python3 tools/dashboard.py <port>` shows one row per motor with all of the
+`python3 host/apps/dashboard.py <port>` shows one row per motor with all of the
 above decoded — state, cause, pos/vel/tau, faults, flags, and fb_age — reading
 the motor table from the active config. (The old read-only `telemetry.py` viewer
 has been removed; a dedicated viewer will replace it.)

@@ -296,7 +296,7 @@ The dashboard shows all three per slave.
 ## Verification
 
 - **Both firmwares** build 0/0 (`scripts/build.sh --config slave0 …` and master).
-- **Host tests** (`python3 -m unittest discover -s host/jetson/tests`): the
+- **Host tests** (`python3 -m unittest discover -s host/tests`): the
   cross-language fixture passes **byte-identical for telemetry** (unchanged) and
   now also validates the **command-frame CRC layout** (`CMDFRAME`); the
   status-struct sizes assert (14 / 18).

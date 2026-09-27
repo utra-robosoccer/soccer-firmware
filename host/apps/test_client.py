@@ -35,23 +35,20 @@ import tty
 import serial
 
 # Motor table generated from the active setup's slave YAMLs (single source of truth).
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 try:
-    from motor_config_gen import (
+    from master_link.motor_config_gen import (
         N_MOTORS, MOTORS, MOTOR_DEFAULT_KP, MOTOR_DEFAULT_KD,
         MOTOR_SOFT_MIN, MOTOR_SOFT_MAX,
     )
 except ImportError:
-    sys.exit("motor_config_gen.py not found — run:\n"
+    sys.exit("master_link not importable — run:\n"
+             "    pip install -e host/\n"
              "    python3 scripts/gen_motor_config.py")
 
 # ═══════════════════════════════════════════════════════════════════
-#  Protocol — the canonical wire library (host/jetson/protocol.py)
+#  Protocol — the canonical wire library (master_link.protocol)
 # ═══════════════════════════════════════════════════════════════════
-_HOST_JETSON = os.path.join(
-    os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "host", "jetson")
-sys.path.insert(0, _HOST_JETSON)
-from protocol import (                                       # noqa: E402
+from master_link.protocol import (
     NODE_JETSON, NODE_MASTER, NODE_SLAVE_0,
     MSG_PING, MSG_MASTER_STATUS, MSG_SLAVE_STATUS, MSG_MOTOR_STATE,
     MSG_CONTROL_REQ, MSG_CONTROL_RESP, MSG_MOTOR_CMD, MSG_NAMES,

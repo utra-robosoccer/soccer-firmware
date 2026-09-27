@@ -161,14 +161,14 @@ places**:
 **Guards against drift:**
 - `_Static_assert(sizeof(MotorState)==16)` (`protocol.h:209`) → catches **C size**
   drift at compile time (loud).
-- The **cross-language fixture test** (`host/jetson/tests/test_protocol.py` +
+- The **cross-language fixture test** (`host/tests/test_protocol.py` +
   `firmware/common/test/gen_fixture.c`) packs known values in C and byte-compares
   against Python → catches **C↔Python byte/offset** drift (loud, in CI).
 - **Not guarded:** `pack_tele` writing the *wrong field* into a correctly-sized
   slot (semantic, not size) — only the fixture's distinct per-field values catch
   this, and only if the field is exercised. Docs are guarded by nothing.
 
-**Joint-name mapping** is defined once: `tools/motor_config_gen.py` `MOTORS`
+**Joint-name mapping** is defined once: `host/master_link/motor_config_gen.py` `MOTORS`
 (generated from the YAML; used by `test_client.py`/`dashboard.py` via `GLOBAL_OF`).
 (The old `telemetry.py`, which re-read the YAML directly, has been removed.)
 

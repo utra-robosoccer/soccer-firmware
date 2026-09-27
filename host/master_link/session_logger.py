@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Per-session CSV logger for the motor dashboard (and a future serial bridge).
 
-Owns ONE CSV per session: <log_dir>/YYYY-MM-DD_HH-MM-SS.csv, created on construction
+Owns ONE CSV per session: <log_dir>/YYYY-MM-DD/HH-MM-SS.csv, created on construction
 (i.e. when the dashboard connects). Thread-safe and buffered: log_tele()/log_cmd()
 only append to an in-memory list under a short lock; a background thread flushes to
 disk every ~flush_interval seconds and on close(). So disk I/O never stalls the
@@ -47,9 +47,11 @@ DEFAULT_MAX_ROWS = 200_000
 class SessionLogger:
     def __init__(self, log_dir="logs", flush_interval=1.0, clock=time.time,
                  max_rows=DEFAULT_MAX_ROWS):
-        os.makedirs(log_dir, exist_ok=True)
-        fname = datetime.now().strftime("%Y-%m-%d_%H-%M-%S") + ".csv"
-        self.path = os.path.join(log_dir, fname)
+        # One folder per day: <log_dir>/YYYY-MM-DD/HH-MM-SS.csv
+        now = datetime.now()
+        day_dir = os.path.join(log_dir, now.strftime("%Y-%m-%d"))
+        os.makedirs(day_dir, exist_ok=True)
+        self.path = os.path.join(day_dir, now.strftime("%H-%M-%S") + ".csv")
         self._clock = clock
         self._flush_interval = flush_interval
         self._max_rows = max_rows

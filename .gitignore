@@ -9,7 +9,12 @@ build/
 *.su
 __pycache__/
 *.py[cod]
+*.egg-info/
 .DS_Store
+
+# Python virtual environments
+.venv/
+venv/
 
 # Executables and binaries
 *.elf

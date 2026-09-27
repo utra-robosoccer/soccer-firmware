@@ -1,0 +1,15 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "master_link"
+version = "0.1.0"
+description = "Host-side link to the robot firmware: wire protocol, generated motor config, and data logging."
+requires-python = ">=3.8"
+# master_link itself is pure-stdlib; runtime deps for the apps (pyserial, etc.)
+# live in requirements.txt.
+dependencies = []
+
+[tool.setuptools]
+packages = ["master_link"]

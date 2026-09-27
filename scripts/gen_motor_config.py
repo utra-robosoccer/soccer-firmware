@@ -22,7 +22,7 @@ Two modes:
       ALL slaves in the system:
         - firmware/common/include/system_config.h  (master: NUM_SLAVES,
           per-slave motor counts + CAN-id LUTs, global transport bounds)
-        - tools/motor_config_gen.py                (host: per-slave SLAVES[]
+        - host/master_link/motor_config_gen.py      (host: per-slave SLAVES[]
           plus a flattened view for the dashboard / test_client)
 
 Usage:
@@ -473,7 +473,7 @@ def do_system(srcs):
         cfgs.append(cfg)
 
     sys_path = os.path.join(REPO_ROOT, "firmware/common/include/system_config.h")
-    py_path = os.path.join(REPO_ROOT, "tools/motor_config_gen.py")
+    py_path = os.path.join(REPO_ROOT, "host/master_link/motor_config_gen.py")
     with open(sys_path, "w") as fh:
         fh.write(gen_system_header(cfgs, names))
     with open(py_path, "w") as fh:

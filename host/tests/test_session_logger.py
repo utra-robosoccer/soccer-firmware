@@ -12,10 +12,9 @@ import time
 import unittest
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-ROOT = os.path.abspath(os.path.join(HERE, "..", "..", ".."))
-sys.path.insert(0, os.path.join(ROOT, "tools"))
+ROOT = os.path.abspath(os.path.join(HERE, "..", ".."))   # host/tests → host → repo root
 
-from session_logger import SessionLogger, FIELDS  # noqa: E402
+from master_link.session_logger import SessionLogger, FIELDS  # noqa: E402 (pip install -e host/)
 
 
 def _read(path):
@@ -30,7 +29,10 @@ class SessionLoggerTest(unittest.TestCase):
             try:
                 self.assertTrue(os.path.isfile(lg.path))
                 self.assertTrue(lg.path.endswith(".csv"))
-                self.assertEqual(os.path.dirname(lg.path), d)
+                # One folder per day: <tmpdir>/YYYY-MM-DD/HH-MM-SS.csv
+                self.assertEqual(os.path.dirname(os.path.dirname(lg.path)), d)
+                self.assertRegex(os.path.basename(os.path.dirname(lg.path)),
+                                 r"^\d{4}-\d{2}-\d{2}$")
                 with open(lg.path, newline="") as fh:
                     header = next(csv.reader(fh))
                 self.assertEqual(header, FIELDS)

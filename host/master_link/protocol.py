@@ -20,15 +20,11 @@ import time
 
 # Global SPI transport bounds, generated from the active config. The slave
 # encodes pos/vel/tau over THESE bounds, so the host must decode with them.
-# Fallback = widest model (RS02) if the generated module isn't importable.
-try:
-    from motor_config_gen import (  # type: ignore
-        MOTOR_P_MIN, MOTOR_P_MAX, MOTOR_V_MIN, MOTOR_V_MAX, MOTOR_T_MIN, MOTOR_T_MAX,
-    )
-except Exception:  # pragma: no cover - fallback for standalone use
-    MOTOR_P_MIN, MOTOR_P_MAX = -12.57, 12.57
-    MOTOR_V_MIN, MOTOR_V_MAX = -44.0, 44.0
-    MOTOR_T_MIN, MOTOR_T_MAX = -17.0, 17.0
+# No fallback: a missing/ungenerated motor_config_gen must fail loudly rather than
+# silently decode telemetry with wrong (widest-model) bounds.
+from .motor_config_gen import (
+    MOTOR_P_MIN, MOTOR_P_MAX, MOTOR_V_MIN, MOTOR_V_MAX, MOTOR_T_MIN, MOTOR_T_MAX,
+)
 
 
 # ── node ids ──────────────────────────────────────────────────────────────────

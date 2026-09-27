@@ -13,11 +13,9 @@ import sys
 import unittest
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-ROOT = os.path.abspath(os.path.join(HERE, "..", "..", ".."))
-sys.path.insert(0, os.path.join(ROOT, "tools"))          # motor_config_gen (transport bounds)
-sys.path.insert(0, os.path.join(ROOT, "host", "jetson"))  # protocol
+ROOT = os.path.abspath(os.path.join(HERE, "..", ".."))   # host/tests → host → repo root
 
-import protocol as P  # noqa: E402
+import master_link.protocol as P  # noqa: E402 (pip install -e host/)
 
 # Known fixture values — MUST match firmware/common/test/gen_fixture.c.
 _LIFE0, _CAUSE0 = 3, 1      # MOTOR_ARMED_HOLD, CAUSE_OVERTORQUE
