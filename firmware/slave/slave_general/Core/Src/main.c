@@ -41,15 +41,25 @@
 
 /* Private define ------------------------------------------------------------*/
 /* USER CODE BEGIN PD */
-#define PHASE1_POLL_PERIOD_MS MOTOR_LOOP_PERIOD_MS   /* 200 Hz CAN control loop */
-#define PHASE1_PRINT_PERIOD_MS 500U
-#define PHASE1_LED_PULSE_MS 40U
-#define PHASE1_STATUS_LED_GPIO_Port GPIOA
-#define PHASE1_STATUS_LED_Pin GPIO_PIN_5
-#if defined(__GNUC__)
-#define PHASE1_UNUSED_FN __attribute__((unused))
+/* Compile-time gate for ALL UART4 debug output (TX on pin PA0, 115200 8N1).
+   OFF by default: no debug console is wired in the normal build, and
+   HAL_UART_Transmit is blocking (~8 ms per line) inside the 200 Hz control loop.
+   Set to 1 (e.g. -DSLAVE_UART_DEBUG=1) for bring-up on a UART adapter on PA0. */
+#ifndef SLAVE_UART_DEBUG
+#define SLAVE_UART_DEBUG 0
+#endif
+#if SLAVE_UART_DEBUG
+#define DBG_PRINTF(...) printf(__VA_ARGS__)
 #else
-#define PHASE1_UNUSED_FN
+#define DBG_PRINTF(...) ((void)0)
+#endif
+
+#define LOOP_POLL_PERIOD_MS MOTOR_LOOP_PERIOD_MS   /* 200 Hz CAN control loop */
+#define STATUS_LED_PULSE_MS 40U
+#define STATUS_LED_GPIO_Port GPIOA
+#define STATUS_LED_Pin GPIO_PIN_5
+#if SLAVE_UART_DEBUG
+#define DBG_PRINT_PERIOD_MS 500U   /* min ms between debug motor-state prints */
 #endif
 
 /* USER CODE END PD */
@@ -66,14 +76,18 @@ SPI_HandleTypeDef hspi1;
 DMA_HandleTypeDef hdma_spi1_rx;
 DMA_HandleTypeDef hdma_spi1_tx;
 
+#if SLAVE_UART_DEBUG
 UART_HandleTypeDef huart4;
+#endif
 
 /* USER CODE BEGIN PV */
-static uint32_t phase1_next_poll_ms = 0;
-static uint32_t phase1_last_print_ms = 0;
-static uint32_t phase1_last_feedback_count = 0;
-static uint32_t phase1_led_off_ms = 0;
-static uint8_t  phase1_echo_seq = 0;   /* seq byte of the most recent VALID command */
+static uint32_t loop_next_poll_ms = 0;
+#if SLAVE_UART_DEBUG
+static uint32_t dbg_last_print_ms = 0;
+#endif
+static uint32_t last_feedback_count = 0;
+static uint32_t status_led_off_ms = 0;
+static uint8_t  cmd_echo_seq = 0;   /* seq byte of the most recent VALID command */
 static uint32_t cmd_crc_errors  = 0;   /* SPI command frames rejected on CRC */
 static uint32_t zero_rejects    = 0;   /* GOTO_ZERO commands refused (gate/state) */
 
@@ -85,7 +99,9 @@ static void MX_GPIO_Init(void);
 static void MX_DMA_Init(void);
 static void MX_CAN1_Init(void);
 static void MX_SPI1_Init(void);
+#if SLAVE_UART_DEBUG
 static void MX_UART4_Init(void);
+#endif
 /* USER CODE BEGIN PFP */
 
 /* USER CODE END PFP */
@@ -93,11 +109,14 @@ static void MX_UART4_Init(void);
 /* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
 int __io_putchar(int ch) {
+#if SLAVE_UART_DEBUG
     uint8_t c = (uint8_t)ch;
     HAL_UART_Transmit(&huart4, &c, 1, HAL_MAX_DELAY);
+#endif
     return ch;
 }
 
+#if SLAVE_UART_DEBUG
 static int32_t to_milli(float value)
 {
     return (int32_t)(value * 1000.0f);
@@ -119,7 +138,7 @@ static void append_milli(char *dst, size_t dst_len, int32_t milli)
     snprintf(dst, dst_len, "%s%ld.%03ld", sign, (long)whole, (long)frac);
 }
 
-static void phase1_print_motor_state(const motor_t *motor)
+static void dbg_print_motor_state(const motor_t *motor)
 {
     char pos[20];
     char vel[20];
@@ -159,6 +178,7 @@ static void phase1_print_motor_state(const motor_t *motor)
         HAL_UART_Transmit(&huart4, (uint8_t *)line, (uint16_t)len, 50);
     }
 }
+#endif /* SLAVE_UART_DEBUG */
 
 /* USER CODE END 0 */
 
@@ -196,7 +216,9 @@ int main(void)
   MX_DMA_Init();
   MX_CAN1_Init();
   MX_SPI1_Init();
+#if SLAVE_UART_DEBUG
   MX_UART4_Init();
+#endif
   /* USER CODE BEGIN 2 */
 
   /* Bind CAN ids into the (private) motors[] before the bus starts, so the RX
@@ -210,10 +232,12 @@ int main(void)
   spi_dma_init(&hspi1);
   motor_runtime_init();   /* discover motors via CAN, populate alive mask */
 
-  phase1_next_poll_ms   = HAL_GetTick();
-  phase1_last_print_ms  = HAL_GetTick();
-  phase1_last_feedback_count = can_feedback_count;
-  printf("slave: %u/%u motors alive\r\n",
+  loop_next_poll_ms   = HAL_GetTick();
+  last_feedback_count = can_feedback_count;
+#if SLAVE_UART_DEBUG
+  dbg_last_print_ms   = HAL_GetTick();
+#endif
+  DBG_PRINTF("slave: %u/%u motors alive\r\n",
          (unsigned)__builtin_popcount(motor_runtime_motors_alive()),
          (unsigned)N_MOTORS);
 
@@ -229,23 +253,25 @@ int main(void)
     uint32_t now = HAL_GetTick();
 
     /* 200 Hz CAN poll — motor_runtime handles MIT hold vs read-state per motor */
-    if ((int32_t)(now - phase1_next_poll_ms) >= 0) {
-      phase1_next_poll_ms += PHASE1_POLL_PERIOD_MS;
+    if ((int32_t)(now - loop_next_poll_ms) >= 0) {
+      loop_next_poll_ms += LOOP_POLL_PERIOD_MS;
       motor_runtime_update(now);
     }
 
     /* On each new CAN feedback: refresh SPI telemetry buffer */
-    if (can_feedback_count != phase1_last_feedback_count) {
-      phase1_last_feedback_count = can_feedback_count;
-      HAL_GPIO_WritePin(PHASE1_STATUS_LED_GPIO_Port, PHASE1_STATUS_LED_Pin, GPIO_PIN_SET);
-      phase1_led_off_ms = now + PHASE1_LED_PULSE_MS;
+    if (can_feedback_count != last_feedback_count) {
+      last_feedback_count = can_feedback_count;
+      HAL_GPIO_WritePin(STATUS_LED_GPIO_Port, STATUS_LED_Pin, GPIO_PIN_SET);
+      status_led_off_ms = now + STATUS_LED_PULSE_MS;
 
-      if ((now - phase1_last_print_ms) >= PHASE1_PRINT_PERIOD_MS) {
-        phase1_last_print_ms = now;
+#if SLAVE_UART_DEBUG
+      if ((now - dbg_last_print_ms) >= DBG_PRINT_PERIOD_MS) {
+        dbg_last_print_ms = now;
         motor_t snap0;
         motor_get_snapshot(0, &snap0);          /* coherent read for the debug print */
-        phase1_print_motor_state(&snap0);
+        dbg_print_motor_state(&snap0);
       }
+#endif
 
       /* Build the whole telemetry frame in one atomic pass, then CRC it, before
          handing it to the DMA double-buffer. Layout (protocol.h):
@@ -253,7 +279,7 @@ int main(void)
       uint8_t frame[PAYLOAD_LENGTH];
       memset(frame, 0, sizeof(frame));            /* zeroes slave_debug_rsvd + padding */
       frame[0] = motor_runtime_motors_alive();
-      frame[1] = phase1_echo_seq;
+      frame[1] = cmd_echo_seq;
       MotorState *ms = (MotorState *)&frame[SPI_TELE_HDR_BYTES];
       for (uint8_t _i = 0; _i < N_MOTORS; _i++) {
         motor_runtime_pack_tele(&ms[_i], _i);
@@ -277,9 +303,9 @@ int main(void)
       spi_write_next_tx_buf(frame, tele_stage_buf);
     }
 
-    if (phase1_led_off_ms != 0U && (int32_t)(now - phase1_led_off_ms) >= 0) {
-      HAL_GPIO_WritePin(PHASE1_STATUS_LED_GPIO_Port, PHASE1_STATUS_LED_Pin, GPIO_PIN_RESET);
-      phase1_led_off_ms = 0U;
+    if (status_led_off_ms != 0U && (int32_t)(now - status_led_off_ms) >= 0) {
+      HAL_GPIO_WritePin(STATUS_LED_GPIO_Port, STATUS_LED_Pin, GPIO_PIN_RESET);
+      status_led_off_ms = 0U;
     }
 
     /* SPI command handler — dispatch to motor_runtime state machine */
@@ -306,7 +332,7 @@ int main(void)
         cmd_crc_errors++;
       } else {
       uint8_t cmd = cmd_local[0];
-      phase1_echo_seq = cmd_local[1];   /* echo the seq of this VALID command */
+      cmd_echo_seq = cmd_local[1];   /* echo the seq of this VALID command */
       /* A valid command proves the master link is alive — refresh EVERY motor's
          watchdog. Otherwise a long blocking op on one motor (e.g. zeroing
          several motors in a row, each ~60 ms) lets an already-armed motor's
@@ -484,6 +510,7 @@ static void MX_SPI1_Init(void)
   * @param None
   * @retval None
   */
+#if SLAVE_UART_DEBUG
 static void MX_UART4_Init(void)
 {
 
@@ -511,6 +538,7 @@ static void MX_UART4_Init(void)
   /* USER CODE END UART4_Init 2 */
 
 }
+#endif /* SLAVE_UART_DEBUG */
 
 /**
   * Enable DMA controller clock
@@ -547,12 +575,12 @@ static void MX_GPIO_Init(void)
 
 /* USER CODE BEGIN MX_GPIO_Init_2 */
   GPIO_InitTypeDef GPIO_InitStruct = {0};
-  HAL_GPIO_WritePin(PHASE1_STATUS_LED_GPIO_Port, PHASE1_STATUS_LED_Pin, GPIO_PIN_RESET);
-  GPIO_InitStruct.Pin = PHASE1_STATUS_LED_Pin;
+  HAL_GPIO_WritePin(STATUS_LED_GPIO_Port, STATUS_LED_Pin, GPIO_PIN_RESET);
+  GPIO_InitStruct.Pin = STATUS_LED_Pin;
   GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
   GPIO_InitStruct.Pull = GPIO_NOPULL;
   GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
-  HAL_GPIO_Init(PHASE1_STATUS_LED_GPIO_Port, &GPIO_InitStruct);
+  HAL_GPIO_Init(STATUS_LED_GPIO_Port, &GPIO_InitStruct);
 /* USER CODE END MX_GPIO_Init_2 */
 }
 

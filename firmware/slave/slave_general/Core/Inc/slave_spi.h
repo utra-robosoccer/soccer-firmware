@@ -36,9 +36,6 @@ extern volatile uint8_t data_receive_flag;
 extern volatile uint8_t data_tx_ready_flag;
 extern volatile uint8_t spi_error_flag;
 
-extern uint8_t random_count; // just for spi dbg
-
-
 void spi_dma_init(SPI_HandleTypeDef *hspi);
 void spi_write_next_tx_buf(const uint8_t* src_frame, uint8_t* dst);
 

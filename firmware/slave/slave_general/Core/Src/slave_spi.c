@@ -66,19 +66,9 @@ uint8_t* volatile tele_stage_buf;  // inactive TX frame — main WRITES (telemet
 volatile uint8_t data_receive_flag = 0;
 volatile uint8_t data_tx_ready_flag = 0;
 
-float spd_dbg = 1.0f;
-uint8_t random_count = 'A';
 volatile uint8_t spi_error_flag = 0;
 
 //Callback functions redefinitions
-void spi_dbg_helper()
-{
-	random_count ++;
-
-	if (random_count > 0xFF){
-		random_count = 1;
-	}
-}
 void HAL_SPI_TxRxCpltCallback(SPI_HandleTypeDef *hspi)
 {
 	//Handling RX ping-pong: hand the just-filled half to main, keep the other for DMA
