@@ -37,6 +37,7 @@ import test_client as tc
 from motor_config_gen import (MOTOR_DEFAULT_KD, MOTOR_DEFAULT_KP, MOTORS, N_MOTORS,
                               N_SLAVES, SLAVES, SLAVE_MOTOR_COUNTS)
 from protocol import age_ms as _age_ms   # end-to-end per-motor staleness (ms)
+from session_logger import SessionLogger
 
 # A motor is stale once its end-to-end age exceeds this. After emission gating a
 # silent slave stops sending MOTOR_STATE, so age climbs — silence is meaningful.
@@ -64,6 +65,20 @@ _master = {"robot_state": 0, "slave_alive": 0}
 _slaves = [{"motors_alive": 0, "crc_errors": 0, "cmd_crc_errors": 0, "seq_gaps": 0}
            for _ in range(N_SLAVES)]
 _events: deque = deque(maxlen=6)
+
+# ── session logging (SessionLogger is serial/UI-free so it, _LoggingSerial and
+#    _log_out_frame can move into a standalone bridge process later) ─────────────
+_logger = None   # SessionLogger, set in main() once the port is open
+
+# CONTROL_REQ cmd value -> name, for logging outgoing control commands.
+_CTRL_NAMES = {tc.CTRL_ARM_HOLD: "ARM_HOLD", tc.CTRL_DISABLE: "DISABLE",
+               tc.CTRL_GOTO_ZERO: "GOTO_ZERO"}
+_sz = getattr(tc, "CTRL_SET_ZERO", None)
+if _sz is not None:
+    _CTRL_NAMES[_sz] = "SET_ZERO"
+
+# (slave, local) -> global flattened index, for tagging outgoing commands.
+_GIDX_OF = {(m["slave"], m["idx"]): i for i, m in enumerate(MOTORS)}
 
 # Sine-streaming state, shared with the RX thread (populated in main()). Module
 # scope so _ingest() can auto-stop a motor's sine when the slave drops it out of
@@ -272,6 +287,11 @@ def _ingest(mt: int, pl: bytes) -> None:
                 s.cause   = d["cause"]
                 s.fb_age  = d["fb_age"]
                 s.updated = time.monotonic()
+            if _logger is not None:
+                _logger.log_tele(motor=i, state=d["state"], cause=d["cause"],
+                                 flags=d["motor_fault"], pos=d["pos"], vel=d["vel"],
+                                 tau=d["tau"], slave=d.get("slave_id"),
+                                 local=d.get("motor_idx"))
             # Motor just dropped out of its armed state (e.g. slave torque trip
             # → IDLE) while a sine was running: stop the host-side sine.
             if prev_state in _ARMED_STATES and d["state"] not in _ARMED_STATES:
@@ -307,6 +327,49 @@ def _ingest(mt: int, pl: bytes) -> None:
         _log("[green]PONG[/green]")
 
 
+# ── outgoing-frame logging ─────────────────────────────────────────────────────
+
+def _log_out_frame(frame: bytes) -> None:
+    """Decode one outgoing frame and mirror it to the session log as a command."""
+    if _logger is None:
+        return
+    r = tc.decode_frame(bytearray(frame))
+    if r is None:
+        return
+    mt, _seq, _ts, pl, _consumed = r
+    if mt == tc.MSG_MOTOR_CMD:
+        slave, local, pos, vel, kp, kd, tau = struct.unpack(tc.FMT_MOTOR_CMD, pl)
+        _logger.log_cmd("MIT", motor=_GIDX_OF.get((slave, local)),
+                        slave=slave, local=local,
+                        pos=pos, vel=vel, kp=kp, kd=kd, tau=tau)
+    elif mt == tc.MSG_CONTROL_REQ:
+        slave, local, cmd, _res = struct.unpack(tc.FMT_CONTROL_REQ, pl)
+        _logger.log_cmd(_CTRL_NAMES.get(cmd, f"CTRL_{cmd}"),
+                        motor=_GIDX_OF.get((slave, local)), slave=slave, local=local)
+    elif mt == tc.MSG_PING:
+        _logger.log_cmd("PING")
+
+
+class _LoggingSerial:
+    """Serial write wrapper that mirrors every outgoing frame to the SessionLogger.
+
+    The single choke point both command paths funnel through — control/PING via
+    _ser_write, and streamed MIT via the sine thread's ser_ref. Logging is
+    best-effort and never blocks or breaks the control write. The caller already
+    holds the write lock (matching the existing `with ser_lock:` pattern), so this
+    does not lock. Bridge-ready: carries no UI state."""
+
+    def __init__(self, ser):
+        self._ser = ser
+
+    def write(self, data):
+        try:
+            _log_out_frame(data)
+        except Exception:
+            pass   # logging must never break a control write
+        return self._ser.write(data)
+
+
 # ── main ─────────────────────────────────────────────────────────────────────
 
 def main() -> None:
@@ -315,6 +378,14 @@ def main() -> None:
         ser = serial.Serial(port, 115200, timeout=0)
     except serial.SerialException as e:
         sys.exit(f"Cannot open {port}: {e}")
+
+    # One CSV per session, created now that the port is open. All outgoing writes
+    # funnel through `link` (logs commands); telemetry is logged in _ingest.
+    global _logger
+    repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    _logger = SessionLogger(os.path.join(repo_root, "logs"))
+    link = _LoggingSerial(ser)
+    _log(f"logging to [bold]{os.path.relpath(_logger.path, repo_root)}[/bold]")
 
     ser_lock     = threading.Lock()
     # Populate the module-level sine state in place so the RX thread shares it.
@@ -328,7 +399,7 @@ def main() -> None:
 
     def _ser_write(data: bytes) -> None:
         with ser_lock:
-            ser.write(data)
+            link.write(data)
 
     def _send_ctrl(idx: int, cmd: int, name: str) -> None:
         slave_id, local_idx = tc._slave_local(idx)
@@ -354,7 +425,7 @@ def main() -> None:
             sine_active[idx] = True
             th = threading.Thread(
                 target=tc._sine_thread,
-                args=(idx, ser, ser_lock, sine_stop[idx], center),
+                args=(idx, link, ser_lock, sine_stop[idx], center),
                 daemon=True,
             )
             sine_threads[idx] = th
@@ -438,7 +509,9 @@ def main() -> None:
             _stop_sine(i)
         termios.tcsetattr(fd, termios.TCSADRAIN, old_term)
         ser.close()
-        print("Dashboard closed.")
+        if _logger is not None:
+            _logger.close()             # flush remaining buffered rows + close CSV
+        print(f"Dashboard closed. Session log: {_logger.path if _logger else '(none)'}")
 
 
 if __name__ == "__main__":
