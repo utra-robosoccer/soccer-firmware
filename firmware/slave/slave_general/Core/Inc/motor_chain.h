@@ -8,7 +8,7 @@
 #ifndef INC_MOTOR_CHAIN_H_
 #define INC_MOTOR_CHAIN_H_
 
-#include <robostride.h>
+#include "motor_types.h"    /* motor_t domain model (not the whole CAN driver) */
 #include <stdint.h>
 #include <stdio.h>
 #include "stm32f4xx_hal.h"

@@ -25,3 +25,6 @@ __pycache__/
 # Eclipse workspace and settings
 .metadata/
 .settings/
+
+# Dashboard session logs
+logs/

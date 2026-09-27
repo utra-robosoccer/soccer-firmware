@@ -266,11 +266,11 @@ def _serial_rx(ser: serial.Serial, stop: threading.Event) -> None:
                 break
             mt, seq, ts_ms, pl, consumed = r
             del buf[:consumed]
-            _ingest(mt, pl)
+            _ingest(mt, pl, ts_ms)
         time.sleep(0.002)
 
 
-def _ingest(mt: int, pl: bytes) -> None:
+def _ingest(mt: int, pl: bytes, ts_ms: int = 0) -> None:
     if mt == tc.MSG_MOTOR_STATE:
         d = tc.parse_motor_state(pl)
         if d and d.get("gidx") is not None:
@@ -291,7 +291,7 @@ def _ingest(mt: int, pl: bytes) -> None:
                 _logger.log_tele(motor=i, state=d["state"], cause=d["cause"],
                                  flags=d["motor_fault"], pos=d["pos"], vel=d["vel"],
                                  tau=d["tau"], slave=d.get("slave_id"),
-                                 local=d.get("motor_idx"))
+                                 local=d.get("motor_idx"), master_ts_ms=ts_ms)
             # Motor just dropped out of its armed state (e.g. slave torque trip
             # → IDLE) while a sine was running: stop the host-side sine.
             if prev_state in _ARMED_STATES and d["state"] not in _ARMED_STATES:

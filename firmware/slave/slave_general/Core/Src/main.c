@@ -31,6 +31,7 @@
 #include "motor_chain.h"
 #include "slave_spi.h"
 #include "motor_runtime.h"
+#include "spi_proto.h"     /* SPI frame codec: build telemetry, parse commands */
 
 /* USER CODE END Includes */
 
@@ -273,33 +274,18 @@ int main(void)
       }
 #endif
 
-      /* Build the whole telemetry frame in one atomic pass, then CRC it, before
-         handing it to the DMA double-buffer. Layout (protocol.h):
-         [alive_mask][echo_seq][MotorState × N][slave_debug_rsvd[8]][crc16]. */
-      uint8_t frame[PAYLOAD_LENGTH];
-      memset(frame, 0, sizeof(frame));            /* zeroes slave_debug_rsvd + padding */
-      frame[0] = motor_runtime_motors_alive();
-      frame[1] = cmd_echo_seq;
-      MotorState *ms = (MotorState *)&frame[SPI_TELE_HDR_BYTES];
+      /* Sample each motor's live state (physical units), then let the codec
+         assemble + CRC the whole telemetry frame. Layout (protocol.h):
+         [alive_mask][echo_seq][MotorState × N][slave_debug_rsvd[8]][crc16].
+         cmd_crc_errors / zero_rejects ride the CRC-covered debug region. */
+      MotorSample samples[N_MOTORS];
       for (uint8_t _i = 0; _i < N_MOTORS; _i++) {
-        motor_runtime_pack_tele(&ms[_i], _i);
+        motor_runtime_sample(&samples[_i], _i);
       }
-      /* slave_debug_rsvd[0..3] = cmd_crc_errors (u32 LE); [4..7] = zero_rejects
-         (u32 LE). Both are relayed to the master over the reserved (CRC-covered)
-         debug region — no wire-layout change. The master surfaces cmd_crc_errors
-         in SlaveStatus and logs zero_rejects when it climbs. */
-      uint8_t *dbg = &frame[SPI_TELE_DEBUG_OFF(N_MOTORS)];
-      dbg[0] = (uint8_t)(cmd_crc_errors & 0xFFu);
-      dbg[1] = (uint8_t)((cmd_crc_errors >> 8) & 0xFFu);
-      dbg[2] = (uint8_t)((cmd_crc_errors >> 16) & 0xFFu);
-      dbg[3] = (uint8_t)((cmd_crc_errors >> 24) & 0xFFu);
-      dbg[4] = (uint8_t)(zero_rejects & 0xFFu);
-      dbg[5] = (uint8_t)((zero_rejects >> 8) & 0xFFu);
-      dbg[6] = (uint8_t)((zero_rejects >> 16) & 0xFFu);
-      dbg[7] = (uint8_t)((zero_rejects >> 24) & 0xFFu);
-      uint16_t crc = proto_crc16(frame, (size_t)(PAYLOAD_LENGTH - SPI_TELE_CRC_BYTES));
-      frame[PAYLOAD_LENGTH - 2] = (uint8_t)(crc & 0xFFu);   /* little-endian */
-      frame[PAYLOAD_LENGTH - 1] = (uint8_t)(crc >> 8);
+      uint8_t frame[PAYLOAD_LENGTH];
+      spi_proto_build_tele(frame, N_MOTORS,
+                           motor_runtime_motors_alive(), cmd_echo_seq,
+                           samples, cmd_crc_errors, zero_rejects);
       spi_write_next_tx_buf(frame, tele_stage_buf);
     }
 
@@ -321,44 +307,35 @@ int main(void)
       data_receive_flag = 0;
       __enable_irq();
 
-      /* Fix 3 (command integrity): verify the command-frame CRC before applying
-         anything. On failure apply nothing this tick (a corrupt command must not
-         refresh watchdogs or move a motor) and count it; the master re-sends
-         every 5 ms and the watchdog covers sustained loss. */
-      uint16_t ccrc = proto_crc16(cmd_local, SPI_CMD_CRC_OFF(N_MOTORS));
-      uint16_t cwire = (uint16_t)(cmd_local[SPI_CMD_CRC_OFF(N_MOTORS)] |
-                        ((uint16_t)cmd_local[SPI_CMD_CRC_OFF(N_MOTORS) + 1] << 8));
-      if (ccrc != cwire) {
+      /* Fix 3 (command integrity): the codec verifies the command-frame CRC and
+         extracts the header. On failure apply nothing this tick (a corrupt command
+         must not refresh watchdogs or move a motor) and count it; the master
+         re-sends every 5 ms and the watchdog covers sustained loss. */
+      ParsedCmd pc;
+      if (!spi_proto_parse(cmd_local, N_MOTORS, &pc)) {
         cmd_crc_errors++;
       } else {
-      uint8_t cmd = cmd_local[0];
-      cmd_echo_seq = cmd_local[1];   /* echo the seq of this VALID command */
+      cmd_echo_seq = pc.seq;   /* echo the seq of this VALID command */
       /* A valid command proves the master link is alive — refresh EVERY motor's
          watchdog. Otherwise a long blocking op on one motor (e.g. zeroing
          several motors in a row, each ~60 ms) lets an already-armed motor's
          watchdog expire mid-sequence and it falls back to IDLE. */
       for (uint8_t _w = 0; _w < N_MOTORS; _w++)
         motor_runtime_refresh_watchdog(_w);
-      switch (cmd & 0x0Fu) {
-        case SPI_CMD_ARM: {
-          uint8_t idx = SPI_CMD_MOTOR_IDX(cmd);
-          motor_runtime_arm(idx);
+      switch (pc.opcode) {
+        case SPI_CMD_ARM:
+          motor_runtime_arm(pc.motor_idx);
           break;
-        }
-        case SPI_CMD_GOTO_ZERO: {
-          uint8_t idx = SPI_CMD_MOTOR_IDX(cmd);
+        case SPI_CMD_GOTO_ZERO:
           /* A refused GOTO_ZERO (bad idx, not-IDLE, dead motor, 0 outside soft
              limits, or a hardware/overtravel latch needing explicit ARM) is
              counted so the reject is visible on the host, not silent. */
-          if (motor_runtime_goto_zero(idx) != HAL_OK) zero_rejects++;
+          if (motor_runtime_goto_zero(pc.motor_idx) != HAL_OK) zero_rejects++;
           break;
-        }
         case SPI_CMD_MIT: {
           for (uint8_t _i = 0; _i < N_MOTORS; _i++) {
             SpiMitCmd mc;
-            /* MIT payload rides after the [cmd][seq] header (SPI_CMD_HDR_BYTES). */
-            memcpy(&mc, cmd_local + SPI_CMD_HDR_BYTES + _i * (uint8_t)sizeof(SpiMitCmd),
-                   sizeof(SpiMitCmd));
+            spi_proto_read_mit(cmd_local, _i, &mc);
             if (mc.valid) {
               /* Clamp to the motor's soft angle limits on the slave side. */
               motor_runtime_apply_mit(_i, mc.pos, mc.vel);

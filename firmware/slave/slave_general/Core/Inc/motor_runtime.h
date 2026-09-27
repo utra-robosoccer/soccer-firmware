@@ -3,6 +3,7 @@
 
 #include "stm32f4xx_hal.h"
 #include "proto_common.h"
+#include "spi_proto.h"   /* MotorSample — the codec's neutral per-motor input */
 #include <stdint.h>
 
 #define MOTOR_WATCHDOG_MS 200u
@@ -79,8 +80,9 @@ void motor_runtime_refresh_watchdog(uint8_t idx);
    to the motor's soft angle limits (soft_min/soft_max). No-op if not armed. */
 void motor_runtime_apply_mit(uint8_t idx, float pos, float vel);
 
-/* Pack one motor's telemetry atom for the SPI TX frame */
-void motor_runtime_pack_tele(MotorState *out, uint8_t idx);
+/* Project one motor's live state into the codec's neutral MotorSample (physical
+   units + lifecycle/fault fields). The SPI wire encoding lives in spi_proto. */
+void motor_runtime_sample(MotorSample *out, uint8_t idx);
 
 /* Aggregate alive bitmask (bit i = motor i alive) */
 uint8_t motor_runtime_motors_alive(void);

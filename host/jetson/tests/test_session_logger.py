@@ -41,7 +41,8 @@ class SessionLoggerTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             lg = SessionLogger(log_dir=d, flush_interval=10.0, clock=lambda: 42.5)
             lg.log_tele(motor=2, state=7, cause=1, flags=0x0A,
-                        pos=0.5, vel=-1.25, tau=0.3, slave=0, local=2)
+                        pos=0.5, vel=-1.25, tau=0.3, slave=0, local=2,
+                        master_ts_ms=123456)
             lg.log_cmd("MIT", motor=1, slave=0, local=1,
                        pos=1.0, vel=2.0, kp=15.0, kd=1.0, tau=0.0)
             lg.log_cmd("ARM_HOLD", motor=0, slave=0, local=0)
@@ -59,8 +60,11 @@ class SessionLoggerTest(unittest.TestCase):
             self.assertEqual(float(t["pos"]), 0.5)
             self.assertEqual(float(t["tau"]), 0.3)
             self.assertEqual(t["host_ts"], "42.5")
+            self.assertEqual(t["master_ts_ms"], "123456")
             self.assertEqual(t["opcode"], "")           # blank for telemetry
             self.assertEqual(t["kp"], "")
+
+            self.assertEqual(c["master_ts_ms"], "")     # blank for commands
 
             self.assertEqual(c["kind"], "C")
             self.assertEqual(c["opcode"], "MIT")
@@ -88,6 +92,19 @@ class SessionLoggerTest(unittest.TestCase):
                 self.assertEqual(rows[0]["kind"], "T")
             finally:
                 lg.close()
+
+    def test_buffer_cap_drops_and_counts(self):
+        with tempfile.TemporaryDirectory() as d:
+            # flush_interval huge so the flusher never runs during the test → the
+            # cap is exercised purely in-buffer.
+            lg = SessionLogger(log_dir=d, flush_interval=10_000.0, max_rows=2)
+            try:
+                for _ in range(5):
+                    lg.log_cmd("PING")
+                self.assertEqual(lg.dropped, 3)          # 2 kept, 3 dropped
+            finally:
+                lg.close()
+            self.assertEqual(len(_read(lg.path)), 2)     # only the buffered 2 written
 
     def test_close_is_idempotent(self):
         with tempfile.TemporaryDirectory() as d:

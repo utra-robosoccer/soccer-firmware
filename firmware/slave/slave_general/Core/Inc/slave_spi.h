@@ -13,16 +13,9 @@
 #include "proto_common.h"
 #include "main.h"
 
-#define SPI_CMD_NOP       0x00
-#define SPI_CMD_ARM       0x01  /* bits[7:4] = motor index */
-#define SPI_CMD_HOLD      0x02
-#define SPI_CMD_DISARM    0x03
-#define SPI_CMD_GOTO_ZERO 0x04  /* bits[7:4] = motor index */
-#define SPI_CMD_MIT       0x05  /* pass-through MIT command, data in bytes [1..] */
-
-#define SPI_CMD_ARM_IDX(idx)       (SPI_CMD_ARM       | ((uint8_t)(idx) << 4u))
-#define SPI_CMD_GOTO_ZERO_IDX(idx) (SPI_CMD_GOTO_ZERO | ((uint8_t)(idx) << 4u))
-#define SPI_CMD_MOTOR_IDX(cmd)     ((uint8_t)((cmd) >> 4u))
+/* SPI command opcodes (SPI_CMD_*) and index macros are defined once in the
+   shared common/include/protocol.h (via proto_common.h) so master and slave
+   cannot drift. */
 
 /* slave→master telemetry frame (see protocol.h SPI_TELE_FRAME_SIZE):
    [alive_mask u8][echo_seq u8][MotorState × N][slave_debug_rsvd[8]][crc16 u16] */

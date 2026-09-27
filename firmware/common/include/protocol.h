@@ -217,6 +217,21 @@ typedef struct PROTO_PACKED {
                                 (uint16_t)(n) * (uint16_t)sizeof(SpiMitCmd)))
 #define SPI_CMD_FRAME_SIZE(n)  ((uint16_t)(SPI_CMD_CRC_OFF(n) + SPI_CMD_CRC_BYTES))
 
+/* ── SPI command opcodes (master → slave, low nibble of the cmd byte) ────────
+ * The high nibble carries the motor index for ARM / GOTO_ZERO. Shared by the
+ * master (which builds the command) and the slave (which parses it) — defined
+ * once here so the two sides cannot drift. */
+#define SPI_CMD_NOP       0x00u
+#define SPI_CMD_ARM       0x01u  /* bits[7:4] = motor index */
+#define SPI_CMD_HOLD      0x02u
+#define SPI_CMD_DISARM    0x03u
+#define SPI_CMD_GOTO_ZERO 0x04u  /* bits[7:4] = motor index */
+#define SPI_CMD_MIT       0x05u  /* pass-through MIT command, data in bytes [1..] */
+
+#define SPI_CMD_ARM_IDX(idx)       (SPI_CMD_ARM       | ((uint8_t)(idx) << 4u))
+#define SPI_CMD_GOTO_ZERO_IDX(idx) (SPI_CMD_GOTO_ZERO | ((uint8_t)(idx) << 4u))
+#define SPI_CMD_MOTOR_IDX(cmd)     ((uint8_t)((cmd) >> 4u))
+
 /* ── layout guards (catch C↔wire drift at compile time) ──────────────────── */
 #if defined(__STDC_VERSION__) && (__STDC_VERSION__ >= 201112L)
 _Static_assert(sizeof(MsgHeader) == MSG_HEADER_SIZE, "MsgHeader must be 16 bytes");

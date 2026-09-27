@@ -9,15 +9,9 @@
 #include <stdio.h>
 #include <stdint.h>
 
-#define SPI_CMD_NOP       0x00
-#define SPI_CMD_ARM       0x01  /* bits[7:4] = motor index */
-#define SPI_CMD_HOLD      0x02
-#define SPI_CMD_DISARM    0x03
-#define SPI_CMD_GOTO_ZERO 0x04  /* bits[7:4] = motor index */
-#define SPI_CMD_MIT       0x05  /* pass-through MIT command, data in bytes [1..] */
-
-#define SPI_CMD_ARM_IDX(idx)       (SPI_CMD_ARM       | ((uint8_t)(idx) << 4u))
-#define SPI_CMD_GOTO_ZERO_IDX(idx) (SPI_CMD_GOTO_ZERO | ((uint8_t)(idx) << 4u))
+/* SPI command opcodes (SPI_CMD_*) and index macros are defined once in the
+   shared common/include/protocol.h (via proto_common.h) so master and slave
+   cannot drift. */
 
 /* NUM_SLAVES, MAX_MOTORS_PER_SLAVE come from system_config.h (via proto_common.h). */
 #define NUM_SLV               NUM_SLAVES

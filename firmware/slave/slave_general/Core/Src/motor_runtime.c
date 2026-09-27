@@ -39,13 +39,6 @@ static void idle_motor(uint8_t idx)
     motors_rt[idx].hold_vel = 0.0f;
 }
 
-static uint16_t f_to_u16(float x, float lo, float hi)
-{
-    if (x < lo) x = lo;
-    if (x > hi) x = hi;
-    return (uint16_t)((x - lo) * 65535.0f / (hi - lo));
-}
-
 static uint8_t pack_faults(const motor_t *m)
 {
     uint8_t f = 0;
@@ -530,28 +523,26 @@ void motor_runtime_apply_mit(uint8_t idx, float pos, float vel)
     r->state    = MOTOR_ARMED_MIT;
 }
 
-void motor_runtime_pack_tele(MotorState *out, uint8_t idx)
+void motor_runtime_sample(MotorSample *out, uint8_t idx)
 {
     if (idx >= N_MOTORS || out == NULL) return;
     /* Reads ONLY motors_rt[], populated from the single per-tick snapshot in
        motor_runtime_update() — so telemetry reflects exactly the state the
-       control logic acted on, and there's no second read of the live motors[]. */
+       control logic acted on. Physical units only; spi_proto does the wire
+       scaling/packing. */
     const MotorRuntime *r = &motors_rt[idx];
 
-    out->pos_raw     = f_to_u16(r->pos, MOTOR_P_MIN, MOTOR_P_MAX);
-    out->vel_raw     = f_to_u16(r->vel, MOTOR_V_MIN, MOTOR_V_MAX);
-    out->tau_raw     = f_to_u16(r->tau, MOTOR_T_MIN, MOTOR_T_MAX);
-    out->temp_c      = (uint8_t)(r->temp < 0.0f ? 0u : (uint8_t)r->temp);
-    out->state       = SPI_STATE_PACK(r->state, r->cause);
+    out->pos         = r->pos;
+    out->vel         = r->vel;
+    out->tau         = r->tau;
+    out->temp        = r->temp;
+    out->life        = r->state;
+    out->cause       = r->cause;
     out->motor_fault = r->motor_fault;
     out->cmd_flags   = r->cmd_flags;
     out->fault_word  = r->fault_word;
-
-    /* fb_age: ms since THIS motor's last Type-2 feedback (from the cached
-       snapshot stamp), saturating at 255. */
-    uint32_t age     = HAL_GetTick() - r->last_fb_ms;
-    out->fb_age      = (age > 255u) ? 255u : (uint8_t)age;
-    out->reserved_v2 = 0u;
+    /* Raw ms since this motor's last Type-2 feedback; the codec saturates to u8. */
+    out->fb_age_ms   = HAL_GetTick() - r->last_fb_ms;
 }
 
 uint8_t motor_runtime_motors_alive(void)

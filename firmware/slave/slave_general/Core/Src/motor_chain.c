@@ -1,4 +1,5 @@
 #include "motor_chain.h"
+#include "robostride.h"   /* CAN codec: can_unpack_*, exCanIdInfo, rs_can_rx_header */
 
 #define PI 3.1415926f
 

@@ -29,21 +29,47 @@ def _f(x):
         return None
 
 
+def _median(xs):
+    xs = sorted(xs)
+    n = len(xs)
+    return None if n == 0 else (xs[n // 2] if n % 2 else 0.5 * (xs[n // 2 - 1] + xs[n // 2]))
+
+
 def _load(path):
+    """Return (tele, cmds, base) where base names the time column used.
+
+    Prefers master_ts_ms (firmware tick, ms -> s) over host_ts for telemetry when
+    present, since it is free of host receive jitter. Commands are host-timed
+    (no master tick), so they are mapped onto the master timeline via the median
+    (master_ts_ms/1000 - host_ts) offset measured from telemetry rows. All times
+    are seconds on one common base."""
+    rows = list(csv.DictReader(open(path, newline="")))
+    use_master = any(_f(r.get("master_ts_ms")) is not None
+                     for r in rows if r["kind"] == "T")
+    base = "master_ts_ms" if use_master else "host_ts"
+
+    offset = 0.0
+    if use_master:
+        offs = [_f(r["master_ts_ms"]) / 1000.0 - _f(r["host_ts"])
+                for r in rows if r["kind"] == "T"
+                and _f(r.get("master_ts_ms")) is not None and _f(r.get("host_ts")) is not None]
+        offset = _median(offs) or 0.0
+
     tele = defaultdict(list)   # motor -> list of (t, pos, vel, tau, cause)
     cmds = defaultdict(list)   # motor -> list of (t, opcode)
-    with open(path, newline="") as fh:
-        for row in csv.DictReader(fh):
-            ts = _f(row["host_ts"])
-            if ts is None:
+    for row in rows:
+        if row["kind"] == "T":
+            t = (_f(row["master_ts_ms"]) / 1000.0) if use_master else _f(row.get("host_ts"))
+            if t is None:
                 continue
-            motor = row["motor"]
-            if row["kind"] == "T":
-                tele[motor].append((ts, _f(row["pos"]), _f(row["vel"]),
-                                    _f(row["tau"]), int(_f(row["cause"]) or 0)))
-            elif row["kind"] == "C":
-                cmds[motor].append((ts, row["opcode"]))
-    return tele, cmds
+            tele[row["motor"]].append((t, _f(row["pos"]), _f(row["vel"]),
+                                       _f(row["tau"]), int(_f(row["cause"]) or 0)))
+        elif row["kind"] == "C":
+            h = _f(row.get("host_ts"))
+            if h is None:
+                continue
+            cmds[row["motor"]].append((h + offset, row["opcode"]))
+    return tele, cmds, base
 
 
 def _fault_onsets(samples):
@@ -71,9 +97,10 @@ def main():
     except ImportError:
         sys.exit("matplotlib is required: pip install matplotlib")
 
-    tele, cmds = _load(args.logfile)
+    tele, cmds, base = _load(args.logfile)
     if not tele:
         sys.exit(f"No telemetry rows in {args.logfile}")
+    print(f"time base: {base}")
 
     t0 = min(s[0] for m in tele.values() for s in m)
     base = os.path.splitext(args.logfile)[0]
