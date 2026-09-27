@@ -22,6 +22,20 @@ host/
 Device utilities that are not part of this stack live in `tools/` (e.g.
 `tools/robostride_usb_can/`).
 
+## System prerequisites
+
+Install with the system package manager (outside the venv):
+
+```sh
+sudo apt install python3-venv python3-tk
+```
+
+- `python3-venv` — to create the virtual environment below.
+- `python3-tk` — Tk backend for matplotlib, so `analysis/plot_log.py` can open
+  interactive windows. Without it, matplotlib falls back to a non-interactive
+  backend and `plot_log.py` auto-saves PNGs instead of showing them. (Alternatively,
+  `pip install PyQt5` in the venv provides the Qt backend.)
+
 ## Install
 
 From the repo root, create a virtual environment and install `master_link` editable:
