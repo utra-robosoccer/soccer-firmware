@@ -37,6 +37,7 @@ alongside the source. Re-run after editing a YAML, then rebuild.
 """
 
 import glob
+import hashlib
 import os
 import sys
 
@@ -290,7 +291,7 @@ static const uint8_t slave_motor_ids[NUM_SLAVES][MAX_MOTORS_PER_SLAVE] = {{
 #  --system : host Python constants (motor_config_gen.py)
 # ─────────────────────────────────────────────────────────────────────────────
 
-def gen_python(cfgs, names):
+def gen_python(cfgs, names, cfg_name="", cfg_hash=""):
     n_slaves = len(cfgs)
 
     # Per-slave grouped structure.
@@ -338,6 +339,11 @@ def gen_python(cfgs, names):
 # Sources: {", ".join(names)}
 # Regenerate: python3 scripts/gen_motor_config.py --system {src_list}
 """Motor configuration constants for host tools (generated, multi-slave)."""
+
+# Active setup name + sha256 over its slave YAMLs (sorted by filename). The runner
+# recomputes the hash from configs/<CONFIG_NAME>/ and warns if this file is stale.
+CONFIG_NAME = {cfg_name!r}
+CONFIG_HASH = {cfg_hash!r}
 
 N_SLAVES = {n_slaves}
 
@@ -463,6 +469,16 @@ def do_slave(src):
     print(f"Generated {os.path.relpath(header_path, REPO_ROOT)}  (slave: {src_name}, N_MOTORS={len(cfg['motors'])})")
 
 
+def config_hash(paths):
+    """sha256 over the given YAML files' contents, sorted by filename. The runtime
+    staleness check (host/master_link/config_meta.py) recomputes this identically."""
+    h = hashlib.sha256()
+    for p in sorted(paths, key=os.path.basename):
+        with open(p, "rb") as fh:
+            h.update(fh.read())
+    return h.hexdigest()
+
+
 def do_system(srcs):
     srcs = [_resolve(s) for s in srcs]
     names = [_configs_rel(s) for s in srcs]
@@ -472,12 +488,15 @@ def do_system(srcs):
         validate(cfg)
         cfgs.append(cfg)
 
+    cfg_name = os.path.dirname(names[0]) or os.path.splitext(os.path.basename(names[0]))[0]
+    cfg_hash = config_hash(srcs)
+
     sys_path = os.path.join(REPO_ROOT, "firmware/common/include/system_config.h")
     py_path = os.path.join(REPO_ROOT, "host/master_link/motor_config_gen.py")
     with open(sys_path, "w") as fh:
         fh.write(gen_system_header(cfgs, names))
     with open(py_path, "w") as fh:
-        fh.write(gen_python(cfgs, names))
+        fh.write(gen_python(cfgs, names, cfg_name, cfg_hash))
     counts = [len(c["motors"]) for c in cfgs]
     print(f"Generated {os.path.relpath(sys_path, REPO_ROOT)}  (NUM_SLAVES={len(cfgs)}, counts={counts})")
     print(f"Generated {os.path.relpath(py_path, REPO_ROOT)}")

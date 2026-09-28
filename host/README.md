@@ -15,7 +15,7 @@ host/
 │   ├── dashboard.py           interactive TUI: control + live telemetry + logging
 │   └── test_client.py         keyboard test client
 ├── analysis/          # offline log tools
-│   └── plot_log.py            plot a session log
+│   └── plot_motor_state.py            plot a session log
 └── tests/             # host unit tests
 ```
 
@@ -31,9 +31,9 @@ sudo apt install python3-venv python3-tk
 ```
 
 - `python3-venv` — to create the virtual environment below.
-- `python3-tk` — Tk backend for matplotlib, so `analysis/plot_log.py` can open
+- `python3-tk` — Tk backend for matplotlib, so `analysis/plot_motor_state.py` can open
   interactive windows. Without it, matplotlib falls back to a non-interactive
-  backend and `plot_log.py` auto-saves PNGs instead of showing them. (Alternatively,
+  backend and `plot_motor_state.py` auto-saves PNGs instead of showing them. (Alternatively,
   `pip install PyQt5` in the venv provides the Qt backend.)
 
 ## Install
@@ -62,7 +62,46 @@ python3 scripts/gen_motor_config.py --system
 ```sh
 python3 host/apps/dashboard.py /dev/ttyACM2     # control + live view (logs to logs/<date>/)
 python3 host/apps/test_client.py /dev/ttyACM2   # keyboard test client
-python3 host/analysis/plot_log.py logs/<date>/<time>.csv
+```
+
+(For plotting a run_policy session, see below — `plot_motor_state` takes a session
+folder or `.bin`, not the dashboard's live CSV.)
+
+### Headless policy runner (`run_policy`)
+
+Runs a policy in a deadline-scheduled loop and writes a **binary** session log
+(`logs/<date>/<time>_<policy>.bin`) — raw TX/RX frames, discards, events, and loop
+timing. The master port is auto-detected by USB VID:PID (override with `--port`).
+
+```sh
+python3 host/apps/run_policy.py --policy listen --rate 50     # auto-detect port
+python3 host/apps/run_policy.py --policy listen --port /dev/ttyACM2
+```
+
+`listen` sends nothing — use it to passively capture (e.g. moving a joint by hand).
+Stop with **Ctrl-C**: it disables any armed motors, writes a stop event, flushes the
+log, and prints a summary (frames RX/TX, discards, loop-timing mean/p99/max).
+
+> Note: nothing safes the motors if the runner is `kill -9`'d (the firmware has no
+> host-death timeout — see docs). Always stop with Ctrl-C.
+
+Plot a session directly — give the plotter a **session folder** or the **`.bin`**
+(it converts first if needed); you never pick a CSV:
+
+```sh
+python3 host/analysis/plot_motor_state.py logs/<date>/<time>_listen        # session folder
+python3 host/analysis/plot_motor_state.py logs/<date>/<time>_listen.bin    # or the .bin
+```
+
+`plot_motor_state` opens interactive windows when a GUI backend is available (see
+`python3-tk` under System prerequisites); otherwise it auto-saves `motor_<N>.png`
+into the session folder.
+
+To convert without plotting (a folder of CSVs beside the `.bin`):
+
+```sh
+python3 host/analysis/convert_log.py logs/<date>/<time>_listen.bin
+# → logs/<date>/<time>_listen/{motor_state,motor_cmd,status,control_resp,events,loop_timing}.csv
 ```
 
 ## Tests

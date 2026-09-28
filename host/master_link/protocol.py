@@ -188,37 +188,70 @@ def encode_frame(msg_type: int, src: int, dst: int, payload: bytes = b"") -> byt
     return bytes(frame)
 
 
-def decode_frame(buf: bytearray):
+def decode_frame(buf: bytearray, on_reject=None, on_frame=None):
     """Decode one frame from ``buf`` (mutated in place on resync).
 
     Returns ``(msg_type, seq, ts_ms, payload, consumed)`` or ``None`` if no
     complete valid frame is present yet. Drops one byte and retries on bad CRC
     or implausible payload length; consumes and counts a CRC-valid frame whose
     protocol version != PROTO_VERSION.
+
+    ``on_reject(reason, data)`` — optional callback for logging. Called with
+    reason ``"discard"`` and the coalesced run of bytes dropped during resync
+    (bad CRC / implausible length), and with reason ``"version"`` and the whole
+    raw frame for a CRC-valid frame whose version != PROTO_VERSION.
+    ``on_frame(raw)`` — optional callback given the accepted frame's raw bytes
+    (header+payload) just before it is consumed, for raw logging. Both default to
+    None, preserving the original behaviour exactly.
     """
     global version_errors
+    discarded = bytearray()
+
+    def _flush_discard():
+        if discarded and on_reject is not None:
+            on_reject("discard", bytes(discarded))
+        del discarded[:]
+
     while len(buf) >= HDR_SIZE:
         msg_type, seq, src, dst, ts_ms, pay_len, ver_flags, crc_wire = \
             struct.unpack_from(HDR_FMT, buf, 0)
         if pay_len > _MAX_PAYLOAD:
+            discarded.append(buf[0])
             del buf[0]
             continue
         total = HDR_SIZE + pay_len
         if len(buf) < total:
-            return None
+            # Not all here yet. If this looks like a real, current-version frame still
+            # arriving, wait for the rest; otherwise it's garbage claiming a long
+            # length — drop a byte and keep resyncing rather than stalling until that
+            # many bytes happen to arrive.
+            if (ver_flags & 0xFF) == PROTO_VERSION:
+                _flush_discard()
+                return None
+            discarded.append(buf[0])
+            del buf[0]
+            continue
         check = bytearray(buf[:total])
         check[14] = 0
         check[15] = 0
         if crc16(bytes(check)) != crc_wire:
+            discarded.append(buf[0])
             del buf[0]
             continue
         if (ver_flags & 0xFF) != PROTO_VERSION:
             # CRC-valid but wrong version → consume the whole frame, don't resync.
+            _flush_discard()
             version_errors += 1
+            if on_reject is not None:
+                on_reject("version", bytes(buf[:total]))
             del buf[:total]
             continue
+        _flush_discard()
+        if on_frame is not None:
+            on_frame(bytes(buf[:total]))
         payload = bytes(buf[HDR_SIZE:total])
         return (msg_type, seq, ts_ms, payload, total)
+    _flush_discard()
     return None
 
 

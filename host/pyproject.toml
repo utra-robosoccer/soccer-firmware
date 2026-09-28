@@ -11,5 +11,6 @@ requires-python = ">=3.8"
 # live in requirements.txt.
 dependencies = []
 
-[tool.setuptools]
-packages = ["master_link"]
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["master_link*", "policies*"]   # master_link, master_link.datalog, policies
