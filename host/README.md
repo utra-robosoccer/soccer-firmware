@@ -20,7 +20,7 @@ host/
 ```
 
 Device utilities that are not part of this stack live in `tools/` (e.g.
-`tools/robostride_usb_can/`).
+`tools/robstride_usb_can/`).
 
 ## System prerequisites
 
