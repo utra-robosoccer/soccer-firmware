@@ -40,7 +40,7 @@ models:
 # RobStride node id on the bus. The host client displays id = motor_idx + 1.
 motors:
   - idx: 0
-    can_id: 0
+    can_id: 1
     model: RS02
     joint_name: motor0
     soft_min: -0.79   # ~45 deg
