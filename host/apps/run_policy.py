@@ -17,9 +17,11 @@ import time
 from master_link import config_meta
 from master_link.link import MasterLink, ControlRequest, ControlKind
 from policies.listen_policy import ListenPolicy
+from policies.man_1s_1m_policy import Man1s1mPolicy
 
 POLICIES = {
     "listen": ListenPolicy,
+    "man_1s_1m": Man1s1mPolicy,
 }
 
 
