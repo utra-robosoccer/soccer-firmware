@@ -565,5 +565,43 @@ def set_id(ctx: click.Context, motor_id: int, new_motor_id: int) -> None:
             raise click.ClickException(f"expected feedback from ID {new_motor_id}, got ID {after.motor_id}")
 
 
+@cli.command("get-param")
+@click.argument("motor_id", type=int)
+@click.argument("reg")
+@click.pass_context
+def get_param(ctx: click.Context, motor_id: int, reg: str) -> None:
+    """Read a parameter register (Type 17). REG accepts 0x-hex or decimal, e.g.
+    get-param 1 0x7029."""
+    _validate_motor_id(motor_id)
+    r = int(reg, 0)
+    with _motor(ctx, motor_id) as m:
+        pv = m.read_param(r)
+        if pv is None:
+            raise click.ClickException(
+                f"no read-param reply for reg 0x{r:04X} from id {motor_id}")
+        print(pv)
+
+
+@cli.command("set-param")
+@click.argument("motor_id", type=int)
+@click.argument("reg")
+@click.argument("value")
+@click.option("--float", "as_float", is_flag=True, help="interpret VALUE as float32")
+@click.option("--save", "do_save", is_flag=True, help="persist to flash (Type 22)")
+@click.pass_context
+def set_param(ctx: click.Context, motor_id: int, reg: str, value: str,
+              as_float: bool, do_save: bool) -> None:
+    """Write a parameter register (Type 18), optionally --save (Type 22). REG/VALUE
+    accept 0x-hex or decimal; --float writes VALUE as float32."""
+    _validate_motor_id(motor_id)
+    r = int(reg, 0)
+    v = float(value) if as_float else int(value, 0)
+    with _motor(ctx, motor_id) as m:
+        pv = m.write_param(r, v, as_float=as_float, save=do_save)
+        print(f"wrote reg=0x{r:04X} value={v}"
+              f"{' (float)' if as_float else ''}{' +saved' if do_save else ''}")
+        print("read-back:", pv if pv is not None else "(no reply)")
+
+
 if __name__ == "__main__":
     cli()

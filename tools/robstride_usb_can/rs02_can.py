@@ -162,6 +162,61 @@ def encode_change_motor_mode(motor_id: int, run_mode: int = RUN_MODE_MIT) -> tup
     return make_id(COMM_WRITE_PARAM, motor_id, data=MASTER_ID), bytes(payload)
 
 
+COMM_SAVE = 22  # Type 22 (0x16): persist 0x20xx params to flash
+
+
+def encode_read_param(motor_id: int, reg: int) -> tuple[int, bytes]:
+    """Type 17 read single parameter. Register index in payload bytes 0-1 (LE)."""
+    payload = bytearray(8)
+    payload[0] = reg & 0xFF
+    payload[1] = (reg >> 8) & 0xFF
+    return make_id(COMM_READ_PARAM, motor_id, data=MASTER_ID), bytes(payload)
+
+
+def encode_write_param(motor_id: int, reg: int, value, as_float: bool = False) -> tuple[int, bytes]:
+    """Type 18 write single parameter. Register in bytes 0-1 (LE); value in bytes 4-7
+    (LE u32, or IEEE-754 float32 when as_float)."""
+    payload = bytearray(8)
+    payload[0] = reg & 0xFF
+    payload[1] = (reg >> 8) & 0xFF
+    if as_float:
+        payload[4:8] = struct.pack("<f", float(value))
+    else:
+        payload[4:8] = struct.pack("<I", int(value) & 0xFFFFFFFF)
+    return make_id(COMM_WRITE_PARAM, motor_id, data=MASTER_ID), bytes(payload)
+
+
+def encode_save(motor_id: int) -> tuple[int, bytes]:
+    """Type 22 save: persist the 0x20xx flash bank."""
+    return make_id(COMM_SAVE, motor_id, data=MASTER_ID), bytes(8)
+
+
+@dataclass
+class ParamValue:
+    reg: int
+    raw: int                 # value bytes 4-7 as a 32-bit little-endian integer
+
+    def as_int(self) -> int:
+        return self.raw
+
+    def as_float(self) -> float:
+        return struct.unpack("<f", struct.pack("<I", self.raw))[0]
+
+    def __str__(self) -> str:
+        return (f"reg=0x{self.reg:04X}  u32={self.raw} (0x{self.raw:08X})  "
+                f"f32={self.as_float():.6g}")
+
+
+def decode_param(arb_id: int, data: bytes) -> Optional[ParamValue]:
+    """Type 17 read-parameter reply: register in bytes 0-1, value in bytes 4-7 (LE)."""
+    mode, _data_field, _ = parse_id(arb_id)
+    if mode != COMM_READ_PARAM or len(data) < 8:
+        return None
+    reg = data[0] | (data[1] << 8)
+    raw = int.from_bytes(data[4:8], byteorder="little")
+    return ParamValue(reg=reg, raw=raw)
+
+
 @dataclass
 class DeviceId:
     motor_id: int

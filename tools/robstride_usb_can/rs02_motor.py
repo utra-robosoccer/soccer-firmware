@@ -9,8 +9,10 @@ import serial
 from rs02_can import (
     DeviceId,
     Feedback,
+    ParamValue,
     decode_device_id,
     decode_feedback,
+    decode_param,
     decode_raw_frame,
     encode_change_motor_mode,
     encode_disable,
@@ -18,8 +20,11 @@ from rs02_can import (
     encode_get_motor_id,
     encode_mit,
     encode_raw_frame,
+    encode_read_param,
+    encode_save,
     encode_set_motor_id,
     encode_set_zero,
+    encode_write_param,
 )
 
 DEFAULT_PORT = "/dev/ttyCH341USB0"
@@ -225,6 +230,49 @@ class RS02Motor:
         self._buf = b""
         self._send(*encode_get_motor_id(self.motor_id))
         return self._recv_device_id(timeout)
+
+    def _recv_param(self, timeout: Optional[float] = None) -> Optional[ParamValue]:
+        ser = self._require_open()
+        wait_time = self.rx_timeout if timeout is None else timeout
+        deadline = time.monotonic() + wait_time
+        while True:
+            chunk = ser.read(256) if wait_time > 0.0 else b""
+            if chunk:
+                self._buf += chunk
+            frame = decode_raw_frame(self._buf)
+            if frame is None:
+                if time.monotonic() >= deadline:
+                    break
+                continue
+            self._buf = self._buf[frame.end:]
+            pv = decode_param(frame.arb_id, frame.data)
+            if pv is not None:
+                return pv
+            if time.monotonic() >= deadline:
+                break
+        return None
+
+    def read_param(self, reg: int, timeout: Optional[float] = None) -> Optional[ParamValue]:
+        """Type 17 read of a parameter register."""
+        ser = self._require_open()
+        ser.reset_input_buffer()
+        self._buf = b""
+        self._send(*encode_read_param(self.motor_id, reg))
+        return self._recv_param(timeout)
+
+    def write_param(self, reg: int, value, as_float: bool = False,
+                    save: bool = False, timeout: Optional[float] = None) -> Optional[ParamValue]:
+        """Type 18 write of a parameter register; optionally Type 22 save to flash.
+        Returns a read-back of the register."""
+        ser = self._require_open()
+        ser.reset_input_buffer()
+        self._buf = b""
+        self._send(*encode_write_param(self.motor_id, reg, value, as_float))
+        time.sleep(0.02)
+        if save:
+            self._send(*encode_save(self.motor_id))
+            time.sleep(0.05)
+        return self.read_param(reg, timeout)
 
     def set_zero(self, timeout: Optional[float] = None, stop_first: bool = True) -> Optional[Feedback]:
         """Set the current mechanical position as zero using comm type 6."""
