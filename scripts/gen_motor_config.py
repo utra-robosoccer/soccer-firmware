@@ -61,6 +61,12 @@ GOTO_ZERO = {
     "MOTOR_ZERO_PROGRESS_EPS": "0.01f",# rad   — |pos| must improve by this to count as progress (above position noise)
 }
 
+# Safety-monitor parameters (global, not per-motor identity).
+SAFETY = {
+    "MOTOR_ENABLE_MON_K": "3u",  # consecutive FRESH feedback frames reporting not-NORMAL
+                                 # (motor off) while armed before CAUSE_NOT_ENABLED trips
+}
+
 
 def _f(x):
     """Format a value as a valid C float literal (always has a decimal point)."""
@@ -142,6 +148,7 @@ def gen_header(cfg, src_name):
     cfg_block = ",\n".join(cfg_entries)
 
     gz = "\n".join(f"#define {k:<14} {v}" for k, v in GOTO_ZERO.items())
+    sf = "\n".join(f"#define {k:<22} {v}" for k, v in SAFETY.items())
 
     return f"""\
 /* AUTO-GENERATED — DO NOT EDIT.
@@ -170,6 +177,9 @@ extern "C" {{
 
 /* Goto-zero motion parameters */
 {gz}
+
+/* Safety-monitor parameters */
+{sf}
 
 /* Motor models present on the bus */
 typedef enum {{

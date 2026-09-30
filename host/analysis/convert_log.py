@@ -39,8 +39,8 @@ if _sz is not None:
 _GIDX = {(m["slave"], m["idx"]): g for g, m in enumerate(mc.MOTORS)}
 
 MOTOR_STATE_FIELDS = ["host_ts", "master_ts_ms", "motor", "slave", "local",
-                      "state", "cause", "motor_fault", "cmd_flags", "fault_word",
-                      "fb_age", "pos", "vel", "tau", "temp"]
+                      "state", "cause", "cause_name", "motor_fault", "cmd_flags",
+                      "fault_word", "fb_age", "pos", "vel", "tau", "temp"]
 MOTOR_CMD_FIELDS = ["host_ts", "motor", "slave", "local", "opcode",
                     "pos", "vel", "kp", "kd", "tau_ff"]
 STATUS_FIELDS = ["host_ts", "type", "robot_state", "slave_alive", "uptime_ms",
@@ -110,6 +110,7 @@ def convert(path):
                         "motor": _GIDX.get((d["slave_id"], d["motor_idx"])),
                         "slave": d["slave_id"], "local": d["motor_idx"],
                         "state": d["state"], "cause": d["cause"],
+                        "cause_name": P.CAUSE_NAMES.get(d["cause"], str(d["cause"])),
                         "motor_fault": d["motor_fault"], "cmd_flags": d["cmd_flags"],
                         "fault_word": d["fault_word"], "fb_age": d["fb_age"],
                         "pos": d["pos"], "vel": d["vel"], "tau": d["tau"], "temp": d["temp"]})

@@ -116,6 +116,7 @@ void HAL_CAN_RxFifo0MsgPendingCallback(CAN_HandleTypeDef *hcan)
                 can_type2_count++;
                 if (can_unpack_motor_feedback(target_motor, rx_data) == HAL_OK) {
                     target_motor->last_fb_ms = HAL_GetTick();  // per-motor fb_age source
+                    target_motor->fb_count++;                  // per-motor fresh-feedback tick
                     can_feedback_motor_id = sender_id;
                     can_feedback_count++;
                     can_rx_flag = 1;

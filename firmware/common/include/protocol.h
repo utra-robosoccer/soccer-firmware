@@ -56,6 +56,8 @@ typedef enum {
     CAUSE_WATCHDOG    = 3u,  /* master-link (SPI command) watchdog expired      */
     CAUSE_MOTOR_FAULT = 4u,  /* RS motor's own Type-2 fault bits fired          */
     CAUSE_ZERO_TIMEOUT= 5u,  /* goto-zero made no progress toward home (stall)   */
+    CAUSE_NOT_ENABLED = 6u,  /* armed motor reported not-running (enable didn't
+                                take / dropped out) for K fresh feedback frames   */
 } MotorFaultCause;
 
 /* MotorState.state packs lifecycle (low nibble) + fault cause (high nibble). */

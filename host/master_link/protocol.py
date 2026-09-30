@@ -55,10 +55,11 @@ LIFECYCLE_NAMES = {
 }
 # ── fault cause (high nibble of MotorState.state) ─────────────────────────────
 (CAUSE_NONE, CAUSE_OVERTORQUE, CAUSE_CAN_TIMEOUT, CAUSE_WATCHDOG,
- CAUSE_MOTOR_FAULT, CAUSE_ZERO_TIMEOUT) = range(6)
+ CAUSE_MOTOR_FAULT, CAUSE_ZERO_TIMEOUT, CAUSE_NOT_ENABLED) = range(7)
+# Single source of truth for fault-cause names (imported by convert_log / plot).
 CAUSE_NAMES = {
     0: "NONE", 1: "OVERTORQUE", 2: "CAN_TIMEOUT", 3: "WATCHDOG", 4: "MOTOR_FAULT",
-    5: "ZERO_TIMEOUT",
+    5: "ZERO_TIMEOUT", 6: "NOT_ENABLED",
 }
 
 # ── cmd_flags bits (recomputed each tick by the slave) ────────────────────────

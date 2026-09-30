@@ -1,6 +1,7 @@
 #include "motor_runtime.h"
 #include "motor_chain.h"
 #include "robostride.h"
+#include "enable_monitor.h"
 #include <math.h>
 #include <string.h>
 
@@ -37,6 +38,20 @@ static void idle_motor(uint8_t idx)
     can_disable_motor(motor_configs[idx].can_id, CAN_MASTER_ID);
     motors_rt[idx].state    = MOTOR_IDLE;
     motors_rt[idx].hold_vel = 0.0f;
+}
+
+/* Reset the enable monitor to a clean slate: clear the not-NORMAL count and seed the
+   fresh-frame reference to the motor's current fb_count, so only genuinely new
+   (post-enable) feedback is judged. Takes its own snapshot so it is independent of any
+   diagnostics. Called on each ARM / GOTO_ZERO entry and when the ZEROING-arrival
+   re-enable window ends. */
+static void enable_monitor_reset(uint8_t idx)
+{
+    motor_t s;
+    motor_get_snapshot(idx, &s);
+    motors_rt[idx].mon_not_enabled   = 0u;
+    motors_rt[idx].mon_prev_fb_count = s.fb_count;
+    motors_rt[idx].mon_suspended     = 0u;
 }
 
 static uint8_t pack_faults(const motor_t *m)
@@ -131,6 +146,19 @@ void motor_runtime_update(uint32_t now_ms)
         uint8_t driving = (motors_rt[i].state == MOTOR_ARMED_HOLD ||
                            motors_rt[i].state == MOTOR_ARMED_MIT  ||
                            motors_rt[i].state == MOTOR_ZEROING);
+
+        /* Enable monitor (pure decision in enable_monitor.c). Runs every tick but
+           only accumulates on a FRESH feedback frame (per-motor fb_count changed);
+           NORMAL resets it, K not-NORMAL fresh frames → NOT_ENABLED. Silence is left
+           to CAN_TIMEOUT below (a stale tick just holds the count). Suspended during
+           the firmware's own disable→set-zero→re-enable window (ZEROING arrival). */
+        uint8_t mon_fresh = (snap.fb_count != motors_rt[i].mon_prev_fb_count);
+        EnableMonVerdict mon = enable_monitor_step(
+            (uint8_t)(driving && !motors_rt[i].mon_suspended), mon_fresh,
+            (uint8_t)(snap.status == RS_MODE_NORMAL), MOTOR_ENABLE_MON_K,
+            &motors_rt[i].mon_not_enabled);
+        if (mon_fresh) motors_rt[i].mon_prev_fb_count = snap.fb_count;
+
         if (driving &&
             (uint32_t)(now_ms - snap.last_fb_ms) >= MOTOR_CAN_FB_TIMEOUT_MS) {
             idle_motor(i);
@@ -141,6 +169,9 @@ void motor_runtime_update(uint32_t now_ms)
             motor_set_fault_word(i, 0xFFFFFFFFu);   /* sentinel in live motors[] */
             motors_rt[i].fault_word = 0xFFFFFFFFu;   /* mirror it this tick too   */
             can_read_single_param(cid, CAN_MASTER_ID, 0x3022u);
+        } else if (driving && mon == ENABLE_MON_FAULT_NOT_ENABLED) {
+            idle_motor(i);
+            motors_rt[i].cause = CAUSE_NOT_ENABLED;
         } else if (driving &&
                    fabsf(motors_rt[i].tau) > motors_rt[i].cfg->max_tau) {
             idle_motor(i);
@@ -230,6 +261,7 @@ void motor_runtime_update(uint32_t now_ms)
                        residual (< MOTOR_ZERO_TOL) each re-zero — reference
                        calibration is a separate manual procedure (docs/command.md). */
                     uint32_t ts;
+                    motors_rt[i].mon_suspended = 1u;  /* intentional disable window */
                     can_disable_motor(cid, CAN_MASTER_ID);
                     HAL_Delay(5u);
                     can_set_mech_zero(cid, CAN_MASTER_ID);
@@ -251,6 +283,9 @@ void motor_runtime_update(uint32_t now_ms)
                     motors_rt[i].hold_pos    = 0.0f;
                     motors_rt[i].hold_vel    = 0.0f;
                     motors_rt[i].watchdog_ms = HAL_GetTick(); /* post-delay, not stale now_ms */
+                    /* Resume the enable monitor from a clean slate: if THIS re-enable
+                       silently failed, the check now catches it (NOT_ENABLED). */
+                    enable_monitor_reset(i);
                     motors_rt[i].state       = MOTOR_ARMED_HOLD;
                     break;
                 }
@@ -364,6 +399,8 @@ HAL_StatusTypeDef motor_runtime_arm(uint8_t idx)
              motors_rt[idx].cfg->default_kp,
              motors_rt[idx].cfg->default_kd);
 
+    /* Start the enable monitor for this armed session (catches a failed entry enable). */
+    enable_monitor_reset(idx);
     motors_rt[idx].state       = MOTOR_ARMED_HOLD;
     motors_rt[idx].watchdog_ms = HAL_GetTick();
     return HAL_OK;
@@ -462,6 +499,7 @@ HAL_StatusTypeDef motor_runtime_goto_zero(uint8_t idx)
     motors_rt[idx].hold_pos = motors_rt[idx].pos;
     motors_rt[idx].hold_vel = 0.0f;
 
+
     /* Arm the progress/stall watchdog: best distance = the start distance, timer
        = now. It trips only if |pos| fails to close on home for
        MOTOR_ZERO_STALL_MS, so a slow (leash-paced) but converging creep never
@@ -474,6 +512,9 @@ HAL_StatusTypeDef motor_runtime_goto_zero(uint8_t idx)
     send_mit(idx, 0.0f, motors_rt[idx].hold_pos, 0.0f,
              MOTOR_ZERO_KP, MOTOR_ZERO_KD);
 
+    /* Start the enable monitor for this zeroing session (catches a failed entry enable
+       instead of waiting out the 1.5 s ZERO_TIMEOUT). */
+    enable_monitor_reset(idx);
     motors_rt[idx].state        = MOTOR_ZEROING;
     motors_rt[idx].watchdog_ms  = HAL_GetTick();
     return HAL_OK;

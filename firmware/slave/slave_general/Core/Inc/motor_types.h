@@ -65,6 +65,7 @@ typedef struct {
     // orders the ISR's writes. last_fb_ms is ISR-written; fault_word is written
     // by the ISR (0x3022 latch) and by main via motor_set_fault_word().
     uint32_t last_fb_ms;   // HAL_GetTick() at last Type-2 feedback
+    uint32_t fb_count;     // ISR-incremented per Type-2; fresh-feedback tick source
     uint32_t fault_word;   // latched 0x3022 read (0=clear, 0xFFFFFFFF=read-fail)
 
     // Motor set point

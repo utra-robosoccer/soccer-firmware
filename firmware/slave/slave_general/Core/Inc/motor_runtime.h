@@ -51,6 +51,11 @@ typedef struct {
     uint16_t           zero_settle;   /* MOTOR_ZEROING: consecutive ticks with the
                                          ramp done AND |pos|<TOL — arrival gate        */
     uint8_t            alive;
+    /* Enable monitor: fault if an armed motor reports not-running for K fresh
+       feedback frames (see enable_monitor.h). */
+    uint8_t            mon_not_enabled;  /* consecutive not-NORMAL fresh-frame count */
+    uint32_t           mon_prev_fb_count;/* motor fb_count at last check (fresh detect) */
+    uint8_t            mon_suspended;    /* 1 during a firmware-intentional disable */
 } MotorRuntime;
 
 extern MotorRuntime motors_rt[N_MOTORS];

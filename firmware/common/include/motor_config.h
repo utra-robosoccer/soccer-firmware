@@ -33,6 +33,9 @@ extern "C" {
 #define MOTOR_ZERO_STALL_MS 1500u
 #define MOTOR_ZERO_PROGRESS_EPS 0.01f
 
+/* Safety-monitor parameters */
+#define MOTOR_ENABLE_MON_K     3u
+
 /* Motor models present on the bus */
 typedef enum {
     MOTOR_MODEL_RS00 = 0u,
