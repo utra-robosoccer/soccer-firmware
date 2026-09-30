@@ -37,10 +37,12 @@ RX_DISCARD  = 3
 EVENT       = 4
 ANNOTATION  = 5
 LOOP_TIMING = 6
+LOG_DROP    = 7   # the writer's queue overflowed: records were LOST (see LOG_DROP_FMT)
 
 KIND_NAMES = {
     RX_FRAME: "RX_FRAME", TX_FRAME: "TX_FRAME", RX_DISCARD: "RX_DISCARD",
     EVENT: "EVENT", ANNOTATION: "ANNOTATION", LOOP_TIMING: "LOOP_TIMING",
+    LOG_DROP: "LOG_DROP",
 }
 
 # ── struct layouts ──────────────────────────────────────────────────────────
@@ -49,6 +51,11 @@ _REC_HEADER   = struct.Struct("<BQI")       # kind, mono_ns, length
 
 # LOOP_TIMING payload: seq (u64) + period/step/send/lateness (i64 ns).
 LOOP_TIMING_FMT = struct.Struct("<Qqqqq")
+
+# LOG_DROP payload: how many records were dropped, and the mono_ns span they cover.
+# Emitted by the writer once the queue drains, so a drop is always self-documented
+# in-band — a log's completeness is verifiable from the file alone.
+LOG_DROP_FMT = struct.Struct("<IQQ")   # dropped_count, first_mono_ns, last_mono_ns
 
 
 def pack_header(proto_version: int, wall_start_ns: int, mono_start_ns: int,

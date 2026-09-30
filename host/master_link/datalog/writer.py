@@ -25,6 +25,11 @@ class BinaryLogWriter:
         self._dropped = 0
         self._warned = False
         self._lock = threading.Lock()
+        # Pending (not-yet-recorded) drop window; the consumer flushes it in-band as a
+        # LOG_DROP record once the queue has space, so completeness is provable offline.
+        self._drop_pending = 0
+        self._drop_first_ns = 0
+        self._drop_last_ns = 0
 
         self._file = open(path, "wb")
         meta_bytes = json.dumps(meta, separators=(",", ":"), sort_keys=True).encode("utf-8")
@@ -42,13 +47,18 @@ class BinaryLogWriter:
         try:
             self._q.put_nowait(rec)
         except queue.Full:
+            now = time.monotonic_ns()
             with self._lock:
                 self._dropped += 1
+                if self._drop_pending == 0:
+                    self._drop_first_ns = now
+                self._drop_last_ns = now
+                self._drop_pending += 1
                 if not self._warned:
                     self._warned = True
                     sys.stderr.write(
                         f"BinaryLogWriter: queue full ({self._q.maxsize}) — disk too slow; "
-                        f"dropping records.\n")
+                        f"dropping records (recorded as LOG_DROP in the log).\n")
 
     @property
     def dropped(self) -> int:
@@ -56,6 +66,18 @@ class BinaryLogWriter:
             return self._dropped
 
     # ── consumer side ─────────────────────────────────────────────────────────
+    def _emit_drop_record(self) -> None:
+        """Write a LOG_DROP record for any pending drops (consumer thread only, so it
+        writes straight to the file and can't itself be dropped)."""
+        with self._lock:
+            if self._drop_pending == 0:
+                return
+            cnt, first, last = self._drop_pending, self._drop_first_ns, self._drop_last_ns
+            self._drop_pending = 0
+        self._file.write(fmt.pack_record(
+            fmt.LOG_DROP, time.monotonic_ns(),
+            fmt.LOG_DROP_FMT.pack(cnt, first, last)))
+
     def _run(self) -> None:
         next_flush = time.monotonic() + self._flush_interval
         while True:
@@ -68,6 +90,7 @@ class BinaryLogWriter:
                     break
             else:
                 self._file.write(rec)
+            self._emit_drop_record()   # queue just drained → space exists; record any drops
             now = time.monotonic()
             if now >= next_flush:
                 self._file.flush()
@@ -87,5 +110,6 @@ class BinaryLogWriter:
                     self._file.write(rec)
         except queue.Empty:
             pass
+        self._emit_drop_record()   # record any drops that never got a chance to flush
         self._file.flush()
         self._file.close()

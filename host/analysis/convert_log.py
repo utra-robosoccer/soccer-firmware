@@ -87,7 +87,8 @@ def convert(path):
     event_w = _writer("events.csv", EVENT_FIELDS)
     loop_w = _writer("loop_timing.csv", LOOP_FIELDS)
 
-    c = dict(rx=0, tx=0, discard_records=0, discard_bytes=0, version_frames=0)
+    c = dict(rx=0, tx=0, discard_records=0, discard_bytes=0, version_frames=0,
+             dropped_records=0, drop_events=0)
 
     for rec in reader:
         ht = _host_ts(hdr, rec.ts_ns)
@@ -160,6 +161,15 @@ def convert(path):
             loop_w.writerow({"host_ts": ht, "seq": seq, "period_ms": period / 1e6,
                              "step_ms": step / 1e6, "send_ms": send / 1e6,
                              "lateness_ms": late / 1e6})
+        elif rec.kind == LOG.LOG_DROP:
+            cnt, first_ns, last_ns = LOG.LOG_DROP_FMT.unpack(rec.payload)
+            c["dropped_records"] += cnt
+            c["drop_events"] += 1
+            t0 = (hdr["wall_start_ns"] + (first_ns - hdr["mono_start_ns"])) / 1e9
+            t1 = (hdr["wall_start_ns"] + (last_ns - hdr["mono_start_ns"])) / 1e9
+            event_w.writerow({"host_ts": t0, "kind": "LOG_DROP",
+                              "text": f"{cnt} records dropped between "
+                                      f"host_ts {t0:.3f} and {t1:.3f} (writer queue full)"})
 
     for f in files.values():
         f.close()
@@ -178,6 +188,11 @@ def main(argv=None):
     print(f"RX frames {c['rx']}  TX frames {c['tx']}  "
           f"discards {c['discard_records']} rec / {c['discard_bytes']} B  "
           f"wrong-version {c['version_frames']}")
+    if c["dropped_records"]:
+        print(f"** INCOMPLETE LOG: {c['dropped_records']} records DROPPED "
+              f"in {c['drop_events']} window(s) (writer queue full) — see events.csv **")
+    else:
+        print("log complete: 0 records dropped")
 
 
 if __name__ == "__main__":

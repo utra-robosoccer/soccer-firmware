@@ -61,10 +61,21 @@ class DatalogRoundTrip(unittest.TestCase):
             for i in range(5000):
                 w.write(fmt.EVENT, b"x" * 32)
             w.close()
-            # Some may have dropped; file must still be a valid, readable log.
-            r = BinaryLogReader(path)
-            n = sum(1 for _ in r)
-            self.assertEqual(n + w.dropped, 5000)
+            # Some may have dropped; file must still be a valid, readable log, and every
+            # dropped record must be self-documented in-band as LOG_DROP records.
+            events = drops = drop_recorded = 0
+            for rec in BinaryLogReader(path):
+                if rec.kind == fmt.EVENT:
+                    events += 1
+                elif rec.kind == fmt.LOG_DROP:
+                    drops += 1
+                    cnt, first_ns, last_ns = fmt.LOG_DROP_FMT.unpack(rec.payload)
+                    drop_recorded += cnt
+                    self.assertLessEqual(first_ns, last_ns)
+            self.assertEqual(events + w.dropped, 5000)     # nothing silently vanished
+            self.assertEqual(drop_recorded, w.dropped)     # every drop is in the .bin
+            if w.dropped:
+                self.assertGreater(drops, 0)
 
 
 if __name__ == "__main__":

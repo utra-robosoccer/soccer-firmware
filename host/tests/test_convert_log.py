@@ -66,7 +66,7 @@ class ConvertLog(unittest.TestCase):
                 self.assertTrue(os.path.isfile(os.path.join(folder, name)), name)
 
             self.assertEqual(c, dict(rx=5, tx=2, discard_records=1, discard_bytes=2,
-                                     version_frames=1))
+                                     version_frames=1, dropped_records=0, drop_events=0))
 
             # motor_state: telemetry only, its own columns (no 'kind').
             f, rows = _rows(os.path.join(folder, "motor_state.csv"))
