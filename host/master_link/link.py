@@ -26,6 +26,44 @@ from .datalog import format as LOG
 MASTER_VID = 0x0483
 MASTER_PID = 0x5740
 
+# Startup liveness: at port open the master's USB buffer drains a stale burst (old
+# master_ts_ms arriving faster than real time), then jumps to the live stream. A motor's
+# telemetry is "live" once master_ts_ms advances in step with host monotonic time for
+# LIVE_N consecutive MOTOR_STATE frames.
+LIVE_N = 5
+LIVE_TOL_MS = 3.0
+
+
+class _LiveDetector:
+    """Per motor. Feed (master_ts_ms, recv_ns) for each MOTOR_STATE frame; latches live
+    once the master tick advances consistently with host monotonic time for N frames.
+    The stale burst (Δhost ≪ Δmaster) and the post-burst jump both reset the counter, so
+    live latches only on the genuine live stream. Pure/deterministic for testing."""
+
+    def __init__(self, n: int = LIVE_N, tol_ms: float = LIVE_TOL_MS):
+        self._n = n
+        self._tol = tol_ms
+        self._prev_ms: int | None = None
+        self._prev_ns: int | None = None
+        self._count = 0
+        self.live = False
+
+    def update(self, master_ts_ms: int, recv_ns: int) -> bool:
+        if self.live:
+            return True
+        if self._prev_ms is not None:
+            dm = master_ts_ms - self._prev_ms                 # master tick delta (ms)
+            dh = (recv_ns - self._prev_ns) / 1e6              # host monotonic delta (ms)
+            if 0 < dm <= 200 and abs(dm - dh) <= max(self._tol, 0.5 * dm):
+                self._count += 1
+                if self._count >= self._n:
+                    self.live = True
+            else:
+                self._count = 0
+        self._prev_ms = master_ts_ms
+        self._prev_ns = recv_ns
+        return self.live
+
 
 # ── command / state types (owned here; policies import them) ──────────────────
 class ControlKind(Enum):
@@ -100,6 +138,10 @@ class MasterLink:
                 "no master serial port found (looked for USB VID:PID "
                 f"{MASTER_VID:04x}:{MASTER_PID:04x}); pass --port explicitly")
         self._ser = serial.Serial(self.port, baud, timeout=0)
+        try:
+            self._ser.reset_input_buffer()   # flush kernel buffer; live-detect handles the rest
+        except (OSError, serial.SerialException):
+            pass
 
         now = datetime.now()
         day = os.path.join(log_dir, now.strftime("%Y-%m-%d"))
@@ -114,6 +156,8 @@ class MasterLink:
         self._master: dict | None = None
         self._slaves: dict = {}
         self._last_ctrl: dict | None = None
+        self._live: dict = {}            # (slave, local) -> _LiveDetector
+        self._live_logged = False        # EVENT "live" emitted once, on first live motor
 
         self._tx_lock = threading.Lock()
         self._rx_frames = 0
@@ -183,8 +227,18 @@ class MasterLink:
                 tau=d["tau"], temp=d["temp"], motor_fault=d["motor_fault"],
                 cmd_flags=d["cmd_flags"], fault_word=d["fault_word"], fb_age=d["fb_age"],
                 master_ts_ms=ts_ms, recv_ns=recv_ns)
+            log_live = False
             with self._lock:
                 self._motors[key] = snap
+                det = self._live.get(key)
+                if det is None:
+                    det = _LiveDetector()
+                    self._live[key] = det
+                if det.update(ts_ms, recv_ns) and not self._live_logged:
+                    self._live_logged = True
+                    log_live = True
+            if log_live:
+                self._log.write(LOG.EVENT, b"live")
         elif mt == P.MSG_MASTER_STATUS:
             d = P.parse_master_status(pl)
             if d:
@@ -212,6 +266,27 @@ class MasterLink:
                 slaves={k: dict(v) for k, v in self._slaves.items()},
                 last_control_resp=dict(self._last_ctrl) if self._last_ctrl else None,
                 stamp_ns=time.monotonic_ns())
+
+    # ── startup liveness ────────────────────────────────────────────────────────
+    def configured_motors(self) -> set:
+        """(slave, local) keys of every motor in the active config."""
+        return set(self._gidx.keys())
+
+    def live_motors(self) -> set:
+        """(slave, local) keys whose telemetry has been confirmed live (see _LiveDetector)."""
+        with self._lock:
+            return {k for k, d in self._live.items() if d.live}
+
+    def wait_until_live(self, keys=None, timeout: float = 2.0):
+        """Block until every key in `keys` (default: all configured motors) is live.
+        Returns (ok, missing_set)."""
+        keys = set(keys) if keys is not None else self.configured_motors()
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            if keys <= self.live_motors():
+                return True, set()
+            time.sleep(0.01)
+        return False, keys - self.live_motors()
 
     # ── TX path ───────────────────────────────────────────────────────────────
     def _write_frame(self, frame: bytes) -> bool:
