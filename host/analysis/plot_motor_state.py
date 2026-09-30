@@ -21,9 +21,7 @@ import sys
 from collections import defaultdict
 
 import convert_log  # sibling module (host/analysis on sys.path when run as a script)
-
-CAUSE_NAMES = {0: "NONE", 1: "OVERTORQUE", 2: "CAN_TIMEOUT", 3: "WATCHDOG",
-               4: "MOTOR_FAULT", 5: "ZERO_TIMEOUT"}
+from master_link.protocol import CAUSE_NAMES  # single source of truth
 
 
 def _f(x):
@@ -62,10 +60,45 @@ def resolve_session(target: str) -> str:
         "  e.g. logs/2026-09-27/20-55-09_listen  or  logs/2026-09-27/20-55-09_listen.bin")
 
 
+# At port open the master's USB TX ring drains ~0.5 s of stale, buffered telemetry
+# whose master_ts_ms sits far behind the live stream, then jumps forward to live. We
+# trim that prefix: find the first large forward master_ts_ms jump in the opening
+# window and keep only the rows after it.
+STALE_JUMP_MS       = 1000.0   # a master_ts_ms step this big marks the stale→live edge
+STALE_HOST_WINDOW_S = 2.0      # ...but only when it happens this soon after the first row
+
+
+def _trim_stale_prefix(rows):
+    """Drop buffered pre-open frames (see STALE_* above). Returns the live rows.
+
+    Only trims a jump within STALE_HOST_WINDOW_S of the first row, so a legitimate
+    mid-session gap (e.g. a master reboot) is left intact."""
+    first_host = None
+    prev = None
+    for i, r in enumerate(rows):
+        m = _f(r.get("master_ts_ms"))
+        if m is None:
+            continue
+        h = _f(r.get("host_ts"))
+        if first_host is None:
+            first_host = h
+        if prev is not None and (m - prev) > STALE_JUMP_MS:
+            within = (first_host is None or h is None or (h - first_host) <= STALE_HOST_WINDOW_S)
+            return rows[i:] if within else rows
+        prev = m
+    return rows
+
+
 def _load_state(folder):
     """motor -> [(t, pos, vel, tau, cause)], plus the host->master time offset."""
     rows = list(csv.DictReader(open(os.path.join(folder, "motor_state.csv"), newline="")))
     use_master = any(_f(r.get("master_ts_ms")) is not None for r in rows)
+    if use_master:
+        n_before = len(rows)
+        rows = _trim_stale_prefix(rows)
+        n_trimmed = n_before - len(rows)
+        if n_trimmed:
+            print(f"trimmed {n_trimmed} stale pre-open frame(s) from the start")
     offsets = [(_f(r["master_ts_ms"]) / 1000.0 - _f(r["host_ts"]))
                for r in rows
                if use_master and _f(r.get("master_ts_ms")) is not None
@@ -156,9 +189,10 @@ def main(argv=None):
                       [m[3] for m in mc["mit"]]]  # pos, vel, tau_ff
 
         for ax, (label, meas), cmd_vals in zip(axes, series.items(), cmd_series):
-            ax.plot(ts, meas, lw=0.9, label="measured")
+            ax.plot(ts, meas, ls="none", marker="x", ms=3, mew=0.8, label="measured")
             if cmd_t and any(v is not None for v in cmd_vals):
-                ax.plot(cmd_t, cmd_vals, lw=0.8, ls="--", alpha=0.8, label="commanded")
+                ax.plot(cmd_t, cmd_vals, ls="none", marker="+", ms=3, mew=0.8,
+                        alpha=0.8, label="commanded")
                 ax.legend(loc="upper right", fontsize=7)
             ax.set_ylabel(label)
             ax.grid(True, alpha=0.3)
