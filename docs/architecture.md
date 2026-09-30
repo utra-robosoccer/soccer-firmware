@@ -21,11 +21,12 @@ Active config for this snapshot: **`bench-1-motor`** — one slave (`slave0`), o
 ## 0. The hops
 
 ```
- ┌─────────┐  policy    ┌──────────┐  USB CDC   ┌─────────┐   SPI    ┌─────────┐   CAN    ┌────────┐
- │ policy  │──────────▶ │  runner  │─────────▶  │ master  │────────▶ │ slave   │────────▶ │ RS02   │
- │ .step() │   Action   │run_policy│ MsgHeader  │ STM32   │ full-dup │ STM32   │ Type-1   │ motor  │
+ ┌─────────┐  policy    ┌───────────┐  USB CDC  ┌─────────┐   SPI    ┌─────────┐   CAN    ┌────────┐
+ │ policy  │──────────▶ │  runner   │─────────▶ │ master  │────────▶ │ slave   │────────▶ │ RS02   │
+ │ .step() │   Action   │run_policy │ MsgHeader │ STM32   │ full-dup │ STM32   │ Type-1   │ motor  │
  │         │◀────────── │ MasterLink│◀───────── │ F446    │◀──────── │ F446    │◀──────── │        │
- └─────────┘ LinkState  └────┬─────┘  frames    └─────────┘  frame   └─────────┘ Type-2   └────────┘
+ └─────────┘ LinkState  └────┬──────┘  frames   └─────────┘  frame   └─────────┘ Type-2   └────────┘
+                             │
                              │ raw TX/RX bytes
                              ▼
                         ┌─────────┐   convert_log    ┌──────┐   plot_motor_state / latency
