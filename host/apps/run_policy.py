@@ -56,9 +56,20 @@ def main(argv=None):
         sys.exit(str(e))
     print(f"port {link.port}  |  logging to {link.log_path}")
 
+    # Don't act on the stale burst that drains at port open: wait until every configured
+    # motor's telemetry is confirmed live before setup()/the first step().
+    ok, missing = link.wait_until_live(timeout=2.0)
+    if not ok:
+        link.log_event("error:no_live_telemetry")
+        link.close()
+        names = ", ".join(f"s{s}.m{l}" for (s, l) in sorted(missing)) or "(none seen)"
+        sys.exit(f"no live telemetry within 2.0 s from motor(s): {names} "
+                 "— is the master up, the slave powered, and the motors on the CAN bus?")
+    print("telemetry live")
+
     period_ns = int(1e9 / args.rate)
     link.log_event("start")
-    policy.setup(link.latest_state())
+    policy.setup(link.latest_state(), time.monotonic_ns())
 
     periods = []
     latenesses = []
@@ -75,7 +86,7 @@ def main(argv=None):
 
             state = link.latest_state()
             t1 = time.monotonic_ns()
-            action = policy.step(state)
+            action = policy.step(state, t0)
             t2 = time.monotonic_ns()
             if action.mit:
                 link.send_mit(action.mit)

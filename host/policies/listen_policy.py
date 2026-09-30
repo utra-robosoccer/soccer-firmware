@@ -9,5 +9,5 @@ from .base import Policy, Action, LinkState
 class ListenPolicy(Policy):
     name = "listen"
 
-    def step(self, state: LinkState) -> Action:
+    def step(self, state: LinkState, t_ns: int) -> Action:
         return Action()

@@ -29,7 +29,6 @@ import signal
 import sys
 import termios
 import threading
-import time
 import tty
 
 from master_link.motor_config_gen import (
@@ -72,7 +71,8 @@ class Man1s1mPolicy(Policy):
         self._lock = threading.Lock()
         self._mode = _NONE
         self._ctrl_pending = False   # edge-triggered: emit one control frame this tick
-        self._mit_t0 = 0.0
+        self._mit_t0 = 0             # ns; captured from the runner's t_ns on MIT entry
+        self._mit_restart = False    # set on MIT entry; step() re-seeds _mit_t0 from t_ns
 
         self._stop = threading.Event()
         self._kb = None
@@ -80,7 +80,7 @@ class Man1s1mPolicy(Policy):
         self._old_term = None
 
     # ── lifecycle ───────────────────────────────────────────────────────────
-    def setup(self, state: LinkState) -> None:
+    def setup(self, state: LinkState, t_ns: int) -> None:
         if not sys.stdin.isatty():
             sys.stderr.write("man_1s_1m: stdin is not a TTY — no keyboard control "
                              "(the loop will just idle-log). Run it in a terminal.\n")
@@ -106,7 +106,7 @@ class Man1s1mPolicy(Policy):
         with self._lock:
             self._mode = mode
             if mode == _MIT:
-                self._mit_t0 = time.monotonic()
+                self._mit_restart = True    # step() seeds _mit_t0 from the injected t_ns
             else:
                 self._ctrl_pending = True   # control modes send one frame on entry
         print(f"→ {_MODE_NAME[mode]} (all)", flush=True)
@@ -142,7 +142,7 @@ class Man1s1mPolicy(Policy):
                 print(_HELP, flush=True)
 
     # ── per-tick action ───────────────────────────────────────────────────────
-    def step(self, state: LinkState) -> Action:
+    def step(self, state: LinkState, t_ns: int) -> Action:
         with self._lock:
             mode = self._mode
             if mode in _CTRL_OF and self._ctrl_pending:
@@ -150,10 +150,13 @@ class Man1s1mPolicy(Policy):
                 kind = _CTRL_OF[mode]
                 return Action(control=[ControlRequest(s, l, kind)
                                        for (s, l, _kp, _kd, _c, _a) in self._motors])
+            if mode == _MIT and self._mit_restart:   # seed phase origin from injected time
+                self._mit_t0 = t_ns
+                self._mit_restart = False
             t0 = self._mit_t0
 
         if mode == _MIT:
-            t = time.monotonic() - t0
+            t = (t_ns - t0) / 1e9
             s_wt = math.sin(SINE_OMEGA * t)
             c_wt = math.cos(SINE_OMEGA * t)
             return Action(mit=[MitCommand(s, l, pos=center + amp * s_wt,
