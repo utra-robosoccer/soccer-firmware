@@ -692,4 +692,45 @@ free-running host and master clocks is the mechanism that would drop the occasio
 |---|---|---|
 | observation-triggered runner | step on telemetry receipt instead of a fixed grid, aligning host cadence to the slave feedback and removing the host/poll beat | F1 (runner loop); MasterLink would signal new telemetry |
 | event-triggered forwarding | master forwards a command to SPI on USB RX rather than at the next 200 Hz poll; slave applies on SPI RX rather than at the next control tick — removes both 0–5 ms quantization waits | F4 (master poll), F6/F7 (slave dispatch/tick) |
-| faster loop rates | raise master poll + slave control tick above 200 Hz | `MASTER_POLL_PERIOD_MS`, `MOTOR_LOOP_PERIOD_MS`, SPI bandwidth |
+| faster loop rates | raise master poll + slave control tick above 200 Hz | `MASTER_POLL_PERIOD_MS`, `MOTOR_LOOP_PERIOD_MS`, SPI bandwidth — but the **CAN bus caps the slave loop**, see §13.7 |
+
+### 13.7 CAN bus bandwidth ceiling (N motors)
+
+The hard ceiling on the slave control-tick rate is the **CAN bus**, not CPU or SPI. RobStride
+is classic CAN 2.0 only — 1 Mbps, 29-bit extended, 8 data bytes, no FD/XL (see
+`robostride-motor-reference.md` §3). Each armed motor costs **2 frames per tick**: the slave's
+Type-1 MIT out + the motor's Type-2 feedback back. This is **analysis** (only 1 motor @ 200 Hz
+is bench-verified, bus pristine — `can-investigation.md`).
+
+Classic extended 8-byte frame @ 1 Mbps (1 µs/bit), incl. 3-bit IFS:
+
+| frame | bits | time |
+|---|---|---|
+| min (no bit-stuffing) | 131 | 131 µs |
+| typical (some stuffing) | ~140 | ~140 µs |
+| worst case (max stuffing) | ~160 | 160 µs |
+
+**6 motors = 12 frames/tick:**
+
+| | bus time/tick | ceiling @ 100 % bus |
+|---|---|---|
+| typical (~140 µs) | ~1.68 ms | ~595 Hz |
+| worst case (160 µs) | ~1.92 ms | ~520 Hz |
+
+So the bus-saturated ceiling for 6 motors is **~520–600 Hz**; 100 % utilization is never a
+target, so budget ~65–70 %:
+
+| slave loop rate (6 motors) | bus load | note |
+|---|---|---|
+| 200 Hz (today) | ~34 % | comfortable |
+| 400 Hz | ~67 % | workable, tight |
+| 500 Hz | ~84 % | too close to the edge |
+
+**Practical sustained target ≈ 300–400 Hz for 6 motors.** Caveats: (a) `AutoRetransmission` is
+**DISABLE** (one-shot CAN) — a frame lost to arbitration is not retried, so contention at high
+load drops frames; keep real headroom. (b) bxCAN has **3 TX mailboxes**, so 6 Type-1 frames
+take ~2 mailbox rounds (~660 µs of the tick at ~110 µs/frame) — the second-tightest resource
+after raw bus time. (c) the RS02's own max MIT-acceptance rate is unverified (typically ≥1 kHz,
+so unlikely to bind first). General rule: **ceiling ≈ 1 / (2·N·~140 µs)** at full bus; halve
+for a safe target. Finally, raising the slave loop past the master's 200 Hz SPI poll only helps
+end-to-end if `MASTER_POLL_PERIOD_MS` rises too (§13.6).
