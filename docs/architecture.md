@@ -560,10 +560,136 @@ The wire motor count `N` is baked into all three at build time; there is **no in
   Zero/ramp to the trajectory start first.
 - **No in-band SPI `N` check.** Slave/master built from different configs → silent "dead
   slave" with climbing `crc_errors`. Both must build from the same active config.
-- **Master ingress does not gate on `ver_flags`** (only CRC) — a wrong-version host frame is
-  accepted by the master (the host gates its RX, the master does not gate its RX).
+- **Version gating is now on both ends** (as of PROTO_VERSION 2): the host drops+counts
+  wrong-version RX, and the master's `CDC_Receive_FS` drops+counts wrong-version host frames
+  (`master_proto_ver_mismatch`). (Older docs said the master gated only on CRC — no longer true.)
 - **`MSG_MOTOR_CMD kp/kd/tau_ff` are ignored** downstream — the slave always uses per-motor
   `default_kp/kd`; only `pos/vel` drive the motor.
 - **`CTRL_SET_ZERO` is a stub** (`CTRL_ERR_STUB`); set-zero happens only inside GOTO_ZERO
   arrival.
 - **`pos_raw` is home-frame wrapped** — multi-turn absolute angle is not on the wire.
+
+---
+
+## 13. Timing & dataflow model
+
+**Snapshot:** commit `7b3556b` + uncommitted cmd_seq work (PROTO_VERSION 2). A scheduling/
+dataflow picture of the whole path, as the code is now. Where code and prose disagree, the
+code wins — noted inline.
+
+### 13.1 Clock domains (independently timed loops)
+
+| domain | rate | driven by | jitter |
+|---|---|---|---|
+| host runner loop | 50 Hz (`--rate`, default) | sleep-to-deadline on `time.monotonic_ns` (`run_policy.main`) | sub-ms (bench p99 ~0.14 ms); resyncs grid if it falls a full period behind |
+| MasterLink RX thread | ~1 kHz poll | `in_waiting` read + `time.sleep(0.001)` (`link._rx_loop`) | up to ~1 ms before bytes are ingested |
+| log writer thread | flush ~1 Hz | background thread draining a bounded queue (100 000) | opportunistic; overflow recorded as `LOG_DROP` |
+| master main loop | free-running | `HAL_GetTick()` (1 ms) deadline checks in `MotorMaster_ProcessLoop` | ~1 ms (tick granularity) |
+| ├ SPI poll sub-rate | 200 Hz (5 ms) | `next_poll_ms` deadline | |
+| ├ telemetry emit | 200 Hz (5 ms), gated on `slave_alive` | `next_tele_ms` deadline | |
+| └ status emit | 20 Hz (50 ms) | `next_status_ms` deadline | |
+| slave main loop | free-running | `HAL_GetTick()` deadline checks (`main.c` while(1)) | ~1 ms |
+| ├ control tick | 200 Hz (5 ms) | `loop_next_poll_ms` → `motor_runtime_update` | |
+| └ telemetry rebuild | event (per new CAN feedback) | `can_feedback_count` change | tracks feedback rate |
+| slave SPI transfer | master-paced | DMA + `SPI1` TxRxCplt ISR (re-arms DMA) | set by master clock |
+| motor (RS02) | ~200 Hz feedback while armed | motor firmware; one Type-2 per received Type-1 | motor-internal |
+
+Interrupt priorities (lower = higher): **master** OTG_FS=0, SPI1=0, DMA2=0; **slave** DMA2
+streams=0, SPI1=1, CAN1_RX0=1. Both MCUs run the control/scheduling work in the main loop;
+ISRs only move bytes/frames and set flags.
+
+### 13.2 Stage table (one row per stage)
+
+Forward path (command), then return path (telemetry). "latest-value mailbox" = a single slot,
+newest write wins; "ping-pong" = two halves, one DMA-owned, one main-owned, swapped at
+transfer end.
+
+| # | stage | trigger | context | input buffer (full policy) | output | code |
+|---|---|---|---|---|---|---|
+| F1 | policy → Action | time, 50 Hz | host main | `latest_state()` snapshot (latest-value, lock-copied) | `Action{mit,control}` | `run_policy.main`, `Policy.step` |
+| F2 | send → USB | event (step w/ mit) | host main | Action list | `MSG_MOTOR_CMD` frames; **cmd_seq stamped once per `send_mit` call** | `link.send_mit`/`_write_frame` |
+| F3 | master USB RX | event (USB OUT) | OTG_FS ISR (0) | `accum[128]` reassembly; CRC + version gate | `pending_mit[s][idx]` (latest-value mailbox) | `CDC_Receive_FS`→`MotorMaster_SetMitCmd` |
+| F4 | master SPI poll | time, 200 Hz | master main | `pending_mit` (latest-value); priority DISARM>GOTO_ZERO>ARM>MIT>HOLD/NOP | one SPI cmd frame (**blocking** `HAL_SPI_TransmitReceive`) | `ProcessLoop`→`poll_one_slave`→`spi_exchange` |
+| F5 | slave SPI RX | event (master clock) | DMA2 (0) + SPI1 TxRxCplt ISR (1) | ping-pong RX halves | `cmd_inbox_buf` + `data_receive_flag` | `slave_spi.HAL_SPI_TxRxCpltCallback` |
+| F6 | slave dispatch | event (`data_receive_flag`) | slave main | `cmd_local` copy (IRQ-masked), CRC-checked | `apply_mit`: stores `hold_pos`/`target_cmd_seq` | `main.c` SPI handler→`motor_runtime_apply_mit` |
+| F7 | control tick → CAN | time, 200 Hz | slave main | `motors_rt[]` | Type-1 MIT frame; **opens cmd_seq reply window** | `motor_runtime_update`→`send_mit`→`can_mit_control_set` |
+| F8 | motor apply | event (Type-1 on bus) | RS02 firmware | — | **[APPLIED]**, emits Type-2 feedback | motor |
+| R1 | slave CAN RX | event (Type-2 on bus) | CAN1_RX0 ISR (1) | decode into `motors[]` slot | `motors[]`, `fb_count++`, `can_feedback_count++` | `motor_chain.HAL_CAN_RxFifo0MsgPendingCallback` |
+| R2 | telemetry rebuild | event (`can_feedback_count` Δ) | slave main | `motor_get_snapshot` (IRQ-masked) + `cmd_track.last_applied` | staged into `tele_stage_buf` (ping-pong) | `main.c`→`motor_runtime_sample`→`spi_proto_build_tele`→`spi_write_next_tx_buf` |
+| R3 | slave→master SPI | event (next master poll) | DMA + ISR | ping-pong TX | telemetry frame into master RX | `spi_exchange` (RX half) |
+| R4 | master telemetry emit | time, 200 Hz, **gated on this tick's poll CRC** | master main | `latest_atom[s][]` (latest-value) | `MSG_MOTOR_STATE` into TX ring | `emit_motor_state`→`usb_tx` |
+| R5 | master USB TX | event (ring non-empty) | master main (`usb_tx_pump`) | ring buffer (4096 B) | bytes to host | `usb_tx.c` |
+| R6 | host RX ingest | event (bytes), ~1 kHz poll | host RX thread | `bytearray` reassembly | `_motors[key]=MotorSnap` (latest-value, lock); log `RX_FRAME` | `link._rx_loop`→`_ingest` |
+| R7 | host log write | event (per frame/record) | queued → writer thread | bounded queue (100 000) | `.bin` on disk | `datalog` writer |
+
+### 13.3 Rate transitions (cross-domain crossings)
+
+| crossing | can drop? | can duplicate? | delay |
+|---|---|---|---|
+| host send (50 Hz) → `pending_mit` mailbox (F2→F3) | yes, if two commands land within one 5 ms poll window (older overwritten) — **not** at 50 Hz | no | ≤ one poll (≤5 ms) |
+| `pending_mit` → SPI poll (F3→F4) | — | yes: HOLD/NOP re-sent when no fresh command | 0–5 ms (poll quantization) |
+| slave SPI dispatch → control tick (F6→F7) | no | no | 0–5 ms (next 200 Hz tick) |
+| CAN feedback (~200 Hz) → telemetry rebuild (R1→R2) | no (latest state rebuilt next feedback) | no | deferred to the rebuild if main loop busy |
+| telemetry ping-pong → SPI (R2→R3) | — | yes: previous telemetry re-sent if no fresh frame staged | 0–5 ms |
+| `latest_atom` → `MSG_MOTOR_STATE` (R4) | **yes**: if this tick's poll CRC failed, no emit (host silence = freshness signal) | — | ≤5 ms |
+| master ring → host (R5) | yes on ring overflow (not expected at these rates) | no | ~0.3–1 ms |
+| host RX → `latest_state` mailbox (R6→F1) | policy-visible: intermediate frames coalesced (newest wins); **all** frames kept in the log | no | ≤ one runner period (≤20 ms @ 50 Hz) |
+
+### 13.4 Timing diagrams
+
+**MIT command — host send → motor apply → applied echo back** (measured round trip ≈ **19 ms**
+median, `logs/2026-10-01/10-35-16_man_1s_1m.bin`):
+
+```
+t=0   host send_mit (cmd_seq k)
+  │  USB OUT + master CDC RX ISR            ~0.3–1 ms   → pending_mit (latest-wins)
+  │  wait for next master SPI poll          0–5 ms      (200 Hz quantization)
+  │  SPI transfer (blocking)                ~0.1 ms     → slave cmd_inbox
+  │  wait for next slave control tick       0–5 ms      (200 Hz) → apply_mit stores target
+  │  control tick: Type-1 MIT → CAN         ~0.1 ms     ►► [APPLIED at motor], reply window open
+  ── return ──
+  │  motor Type-2 feedback                  motor-internal
+  │  slave CAN RX ISR → motors[], fb_count  ~0.1 ms     → cmd_seq_on_reply: last_applied=k
+  │  telemetry rebuild → ping-pong          < next poll
+  │  next master poll clocks telemetry back 0–5 ms
+  │  master emit MSG_MOTOR_STATE (200 Hz)   0–5 ms      → USB ring
+  │  host RX thread ingest                  0–1 ms
+t≈19 ms  host sees last_applied_seq ≥ k      (median; min 17.7, p95 20.6, max 21.2)
+```
+
+**Telemetry sample — motor → policy** (and → log):
+
+```
+t=0   motor Type-2 on bus
+  │  slave CAN RX ISR → motors[] + fb_count  ~0.1 ms
+  │  telemetry rebuild (event) → tele_stage  < next poll
+  │  master SPI poll clocks it back          0–5 ms
+  │  master emit MSG_MOTOR_STATE (gated,200) 0–5 ms     → ring
+  │  master USB TX pump → host               ~0.3–1 ms
+  │  host RX thread ingest → latest_state     0–1 ms    ├─► log RX_FRAME (writer thread)
+  │  policy.step reads snapshot              0–20 ms    (next 50 Hz runner tick)
+```
+
+Reference slices: **ping RTT ~1.6 ms** (host↔master only, no SPI/CAN —
+`logs/2026-09-29/21-25-09_latency.bin`); **cmd_seq round trip ~19 ms** (above); **torque
+onset ~29 ms** (`21-25-09_latency.bin`) — physical torque departs baseline *after* the command
+is acknowledged, so it trails the ~19 ms echo.
+
+### 13.5 Host rate vs the master's 200 Hz poll
+
+| host rate | per command | coalescing in `pending_mit` | polls with no fresh cmd | expected cmd_seq effect |
+|---|---|---|---|---|
+| 50 Hz | 1 / 20 ms | none (two commands never share one 5 ms window) | ~3 of 4 → HOLD re-sent | 0 never-applied; spread ≈ one poll period |
+| 200 Hz | 1 / 5 ms | host/master clocks are independent (no handshake) → beats: occasionally two commands land in one poll window (older cmd_seq overwritten, never applied), occasionally zero (HOLD) | occasional | small but **nonzero** never-applied; lower mean latency, similar spread |
+
+**Measured:** the 50 Hz row — median 19.17 ms, **0 never-applied of 1500**
+(`10-35-16_man_1s_1m.bin`). **Analysis (not measured):** the 200 Hz row — the beat between the
+free-running host and master clocks is the mechanism that would drop the occasional cmd_seq.
+
+### 13.6 Options for a 200 Hz policy (not recommendations)
+
+| option | idea | stages it changes |
+|---|---|---|
+| observation-triggered runner | step on telemetry receipt instead of a fixed grid, aligning host cadence to the slave feedback and removing the host/poll beat | F1 (runner loop); MasterLink would signal new telemetry |
+| event-triggered forwarding | master forwards a command to SPI on USB RX rather than at the next 200 Hz poll; slave applies on SPI RX rather than at the next control tick — removes both 0–5 ms quantization waits | F4 (master poll), F6/F7 (slave dispatch/tick) |
+| faster loop rates | raise master poll + slave control tick above 200 Hz | `MASTER_POLL_PERIOD_MS`, `MOTOR_LOOP_PERIOD_MS`, SPI bandwidth |
