@@ -338,7 +338,7 @@ int main(void)
             spi_proto_read_mit(cmd_local, _i, &mc);
             if (mc.valid) {
               /* Clamp to the motor's soft angle limits on the slave side. */
-              motor_runtime_apply_mit(_i, mc.pos, mc.vel);
+              motor_runtime_apply_mit(_i, mc.pos, mc.vel, mc.cmd_seq);
             }
             /* Master is alive — always refresh watchdog regardless of valid flag */
             motor_runtime_refresh_watchdog(_i);

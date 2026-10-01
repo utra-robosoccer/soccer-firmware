@@ -4,6 +4,7 @@
 #include "stm32f4xx_hal.h"
 #include "proto_common.h"
 #include "spi_proto.h"   /* MotorSample — the codec's neutral per-motor input */
+#include "cmd_seq_track.h"  /* CmdSeqTrack — reply-window pairing for last_applied_seq */
 #include <stdint.h>
 
 #define MOTOR_WATCHDOG_MS 200u
@@ -56,6 +57,8 @@ typedef struct {
     uint8_t            mon_not_enabled;  /* consecutive not-NORMAL fresh-frame count */
     uint32_t           mon_prev_fb_count;/* motor fb_count at last check (fresh detect) */
     uint8_t            mon_suspended;    /* 1 during a firmware-intentional disable */
+    uint16_t           target_cmd_seq;   /* host cmd_seq of the current MIT target (0=none) */
+    CmdSeqTrack        cmd_track;        /* reply-window pairing → last_applied_seq */
 } MotorRuntime;
 
 extern MotorRuntime motors_rt[N_MOTORS];
@@ -83,7 +86,7 @@ void motor_runtime_refresh_watchdog(uint8_t idx);
 
 /* Apply a streamed MIT setpoint while armed, clamping the commanded position
    to the motor's soft angle limits (soft_min/soft_max). No-op if not armed. */
-void motor_runtime_apply_mit(uint8_t idx, float pos, float vel);
+void motor_runtime_apply_mit(uint8_t idx, float pos, float vel, uint16_t cmd_seq);
 
 /* Project one motor's live state into the codec's neutral MotorSample (physical
    units + lifecycle/fault fields). The SPI wire encoding lives in spi_proto. */

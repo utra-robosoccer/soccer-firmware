@@ -24,7 +24,7 @@ def _rows(path):
 
 class ConvertLog(unittest.TestCase):
     def _build_log(self, path):
-        atom = struct.pack(P.MOTORSTATE_FMT, 32768, 40000, 30000, 42, 3, 0, 0, 0, 5, 0)
+        atom = struct.pack(P.MOTORSTATE_FMT, 32768, 40000, 30000, 42, 3, 0, 0, 0, 5, 0, 7)
         ms = P.encode_frame(P.MSG_MOTOR_STATE, P.NODE_MASTER, P.NODE_JETSON,
                             struct.pack(P.FMT_MOTOR_STATE_HDR, 0, 0) + atom)
         vf = bytearray(ms)               # wrong-version copy
@@ -45,7 +45,7 @@ class ConvertLog(unittest.TestCase):
                                              struct.pack(P.FMT_CONTROL_RESP, 0, 0, 1, 0, 3, 7)))
         w.write(LOG.RX_FRAME, bytes(vf))
         w.write(LOG.TX_FRAME, P.encode_frame(P.MSG_MOTOR_CMD, P.NODE_JETSON, P.NODE_MASTER,
-                                             struct.pack(P.FMT_MOTOR_CMD, 0, 1, 1.5, -2.0, 15.0, 1.0, 0.0)))
+                                             struct.pack(P.FMT_MOTOR_CMD, 0, 1, 1.5, -2.0, 15.0, 1.0, 0.0, 1)))
         w.write(LOG.TX_FRAME, P.encode_frame(P.MSG_CONTROL_REQ, P.NODE_JETSON, P.NODE_MASTER,
                                              struct.pack(P.FMT_CONTROL_REQ, 0, 0, P.CTRL_ARM_HOLD, 0)))
         w.write(LOG.RX_DISCARD, b"\xde\xad")

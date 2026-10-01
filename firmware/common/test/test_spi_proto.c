@@ -50,6 +50,7 @@ static void ref_encode_atom(MotorState *out, const MotorSample *s)
     uint32_t age     = s->fb_age_ms;
     out->fb_age      = (age > 255u) ? 255u : (uint8_t)age;
     out->reserved_v2 = 0u;
+    out->last_applied_seq = s->last_applied_seq;
 }
 
 /* old main.c inline telemetry assembly */
@@ -101,6 +102,7 @@ static MotorSample rand_sample(void)
     s.cmd_flags = (uint8_t)(lcg() & 0xFFu);
     s.fault_word = lcg();
     s.fb_age_ms = lcg() % 400u;                   /* spans the 255 saturation */
+    s.last_applied_seq = (uint16_t)(lcg() & 0xFFFFu);
     return s;
 }
 
@@ -180,11 +182,13 @@ static void test_golden_frame(void)
     MotorSample s0 = { .pos = 0.0f, .vel = 0.0f, .tau = 0.0f, .temp = 25.0f,
                        .life = MOTOR_ARMED_HOLD, .cause = CAUSE_OVERTORQUE,
                        .motor_fault = 0x0Au, .cmd_flags = 0x05u,
-                       .fault_word = 0xDEADBEEFu, .fb_age_ms = 250u };
+                       .fault_word = 0xDEADBEEFu, .fb_age_ms = 250u,
+                       .last_applied_seq = 0x1234u };
     MotorSample s1 = { .pos = MOTOR_P_MAX, .vel = MOTOR_V_MIN, .tau = 1.0f, .temp = -5.0f,
                        .life = MOTOR_ARMED_MIT, .cause = CAUSE_NONE,
                        .motor_fault = 0u, .cmd_flags = 0u,
-                       .fault_word = 0u, .fb_age_ms = 1000u };
+                       .fault_word = 0u, .fb_age_ms = 1000u,
+                       .last_applied_seq = 0u };
     MotorSample samples[2] = { s0, s1 };
     uint8_t got[SPI_TELE_FRAME_SIZE(2)];
     spi_proto_build_tele(got, 2u, 0x03u, 0x2Au, samples, 7u, 3u);

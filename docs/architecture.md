@@ -104,14 +104,14 @@ boundaries are found by CRC resync.
 | `src`,`dst` | u8,u8 | `NodeId` (JETSON=1, MASTER=2, SLAVE_0=3) |
 | `ts_ms` | u32 | sender `HAL_GetTick()` (master) / `monotonic_ns//1e6` (host) |
 | `len` | u16 | payload bytes |
-| `ver_flags` | u16 | low byte = `PROTO_VERSION` (=1), high byte reserved 0 |
+| `ver_flags` | u16 | low byte = `PROTO_VERSION` (=2), high byte reserved 0 |
 | `crc16` | u16 | CRC16-CCITT over header(crc=0)+payload |
 
 ### Messages — host → master
 | type | struct | fields / encoding | built | parsed | trigger/rate |
 |---|---|---|---|---|---|
 | `MSG_CONTROL_REQ` 0x05 | `ControlReq{slave_id,motor_idx,cmd,reserved}` u8×4 | `cmd`=`ControlCmd` (ARM_HOLD 1, DISABLE 2, GOTO_ZERO 4; SET_ZERO 3 = stub) | `link.send_control` (`FMT_CONTROL_REQ`) | `usbd_cdc_if.c CDC_Receive_FS` → `MotorMaster_HandleControlReq` | on event |
-| `MSG_MOTOR_CMD` 0x07 | `MotorCmd{slave_id,motor_idx,pos,vel,kp,kd,tau_ff}` u8,u8,f32×5 | SI floats; **`kp/kd/tau_ff` ignored downstream** — slave uses per-motor `default_kp/kd` | `link.send_mit` (`FMT_MOTOR_CMD`) | `CDC_Receive_FS` → `MotorMaster_SetMitCmd` | streamed at loop rate (≤200 Hz useful — coalesced above) |
+| `MSG_MOTOR_CMD` 0x07 | `MotorCmd{slave_id,motor_idx,pos,vel,kp,kd,tau_ff,cmd_seq}` u8,u8,f32×5,u16 | SI floats; **`kp/kd/tau_ff` ignored downstream** — slave uses per-motor `default_kp/kd`. `cmd_seq` = one per policy tick (≥1, 0 reserved), echoed back as `last_applied_seq` (§5, §6) | `link.send_mit` (`FMT_MOTOR_CMD`) | `CDC_Receive_FS` → `MotorMaster_SetMitCmd` | streamed at loop rate (≤200 Hz useful — coalesced above) |
 | `MSG_PING` 0x01 | (empty) | — | `link._write_frame(encode_frame(PING))` | `CDC_Receive_FS` → PONG | on request |
 
 > **Discrepancy:** `protocol.h` labels `MSG_MOTOR_CMD` "stub – not wired" — **wrong**; it is
@@ -120,7 +120,7 @@ boundaries are found by CRC resync.
 ### Messages — master → host
 | type | struct | fields / encoding | built | parsed | trigger/rate |
 |---|---|---|---|---|---|
-| `MSG_MOTOR_STATE` 0x04 | `MotorStatePayload{slave_id,motor_idx,MotorState atom}` | atom = 16 B, see §5 | `emit_motor_state` (`spi_master.c`) | `MasterLink._ingest`→`parse_motor_state` | 200 Hz, **emission-gated** (only when the slave's poll passed CRC that tick) |
+| `MSG_MOTOR_STATE` 0x04 | `MotorStatePayload{slave_id,motor_idx,MotorState atom}` | atom = 18 B, see §5 | `emit_motor_state` (`spi_master.c`) | `MasterLink._ingest`→`parse_motor_state` | 200 Hz, **emission-gated** (only when the slave's poll passed CRC that tick) |
 | `MSG_MASTER_STATUS` 0x02 | `MasterStatus{robot_state,slave_alive,uptime_ms,link_errors,rx_frames}` | `robot_state`=`RobotState`; `slave_alive` bitmask | `emit_master_status` | `parse_master_status` | 20 Hz |
 | `MSG_SLAVE_STATUS` 0x03 | `SlaveStatus{slave_id,motors_alive,uptime_ms,crc_errors,cmd_crc_errors,seq_gaps}` | counters u32 | `emit_slave_status` | `parse_slave_status` | 20 Hz |
 | `MSG_PING` 0x01 (PONG) | (empty) | **echoes request `seq`** | `usbd_cdc_if.c` → posted to TX ring | logged as RX_FRAME | on PING |
@@ -132,9 +132,12 @@ boundaries are found by CRC resync.
 ### Checks / failure
 - **CRC** both directions. Host: `decode_frame` drops one byte & retries on mismatch
   (logged coalesced as `RX_DISCARD`). Master ingress: bad CRC dropped, `master_link_errors++`.
-- **Version:** host **drops + counts** any frame with `ver_flags` low byte ≠ 1 (logged as a
-  raw `RX_FRAME`, flagged by `convert_log`). **Master ingress does NOT gate on version** —
-  it accepts any CRC-valid version (known gap; same-version by deployment).
+- **Version:** host **drops + counts** any frame with `ver_flags` low byte ≠ `PROTO_VERSION`
+  (logged as a raw `RX_FRAME`, flagged by `convert_log`). **Master ingress also gates now:**
+  `CDC_Receive_FS` checks the low byte of `ver_flags` on each CRC-valid host frame and, on a
+  mismatch, skips dispatch and increments `master_proto_ver_mismatch` (added with
+  `PROTO_VERSION`=2). Both ends therefore reject a wrong-version peer rather than
+  misparsing the grown structs.
 - USB RX backpressure: `CDC_Receive_FS` NAKs further OUT packets until it returns.
 
 ### Buffering
@@ -145,6 +148,13 @@ boundaries are found by CRC resync.
 ### Latency (measured)
 - `MSG_PING` host↔master RTT: **median 1.56 ms** (min 0.67, p95 2.64, max 3.34) —
   `logs/2026-09-29/21-25-09_latency.bin`. This is the pure link, no motor/CAN.
+- **cmd_seq latency** (`host/analysis/latency.py`, primary): TX of a command's `cmd_seq`
+  → the first telemetry whose `last_applied_seq ≥` it (wrap-aware). This **includes the full
+  return path** — host→master→SPI→slave→CAN→motor to apply, then
+  motor→CAN→SPI→master→USB→host for the echo to come back — so it is strictly larger than
+  the one-way command delay. Reported per-tick (all commanded motors applied) and per-motor,
+  each with a never-applied count. Compare against the physical torque-onset step latency
+  (~29 ms median from `logs/2026-09-29/21-25-09_latency.bin`).
 
 ---
 
@@ -194,7 +204,7 @@ tick's emit; a failed/absent poll emits nothing for that slave (silence = dead).
 
 One **full-duplex** transfer per poll (200 Hz): the master clocks out a command frame while
 the slave clocks out its telemetry frame simultaneously. Transfer length = the (larger)
-telemetry frame size, `SPI_TELE_FRAME_SIZE(N) = 2 + 16·N + 8 + 2` (N=1 → 28 B).
+telemetry frame size, `SPI_TELE_FRAME_SIZE(N) = 2 + 18·N + 8 + 2` (N=1 → 30 B).
 Master SPI: `SPI_MODE_MASTER`, CPOL=0/CPHA=0, MSB-first, prescaler 64.
 
 ### Command frame (master → slave), CRC-protected
@@ -203,8 +213,11 @@ Master SPI: `SPI_MODE_MASTER`, CPOL=0/CPHA=0, MSB-first, prescaler 64.
 ```
 - `cmd`: low nibble = opcode (`NOP 0 / ARM 1 / HOLD 2 / DISARM 3 / GOTO_ZERO 4 / MIT 5`),
   high nibble = motor index (ARM/GOTO_ZERO).
-- `seq`: `spi_seq[s]++` each poll; echoed in telemetry.
-- `SpiMitCmd{float pos, float vel, uint8_t valid}` (9 B) — per motor; used only for MIT.
+- `seq`: `spi_seq[s]++` each poll; echoed in telemetry. **This is the SPI link-health seq —
+  distinct from the host `cmd_seq`** carried inside `SpiMitCmd` below.
+- `SpiMitCmd{float pos, float vel, uint8_t valid, uint16_t cmd_seq}` (11 B) — per motor; used
+  only for MIT. `cmd_seq` is the host command sequence (§2), forwarded verbatim so the slave
+  can echo it back as `last_applied_seq` (§5, §6).
 - `crc16`: `proto_crc16` over `[cmd … last SpiMitCmd byte]` at `SPI_CMD_CRC_OFF(N)`; built
   for **every** command (HOLD/NOP included).
 - Built: `poll_one_slave`/`spi_build_cmd` (`spi_master.c`). Parsed: slave `main.c` +
@@ -241,7 +254,7 @@ Master SPI: `SPI_MODE_MASTER`, CPOL=0/CPHA=0, MSB-first, prescaler 64.
 
 ---
 
-## 5. The `MotorState` atom (16 B) — the telemetry unit
+## 5. The `MotorState` atom (18 B) — the telemetry unit
 
 Built in `motor_runtime_sample` + `spi_proto_build_tele` (slave); consumed by
 `protocol.py parse_motor_state` (host). Forwarded byte-identical by the master.
@@ -257,14 +270,26 @@ Built in `motor_runtime_sample` + `spi_proto_build_tele` (slave); consumed by
 | 9 | `cmd_flags` | u8 | bits | b0 `CLAMPED_POS`, b1 `CLAMPED_TAU`, b2 `CMD_STALE` — recomputed each tick |
 | 10 | `fault_word` | u32 | code | `0` clear · `0xFFFFFFFF` read pending/fail · else raw `0x3022` register |
 | 14 | `fb_age` | u8 | ms | ms since this motor's last Type-2, **saturating 255** (CAN hop only; frozen at pack time) |
-| 15 | `reserved_v2` | u8 | — | 0, append-only growth slot |
+| 15 | `reserved_v2` | u8 | — | 0, append-only growth slot (one byte still spare after v2) |
+| 16 | `last_applied_seq` | u16 | — | host `cmd_seq` the motor last confirmed applied; `0` (`CMD_SEQ_NONE`) = none since arm; pairing in §6 |
+
+**`last_applied_seq` semantics (added v2):** the slave pairs each MIT (Type-1) frame it sends
+with the next fresh Type-2 feedback and, on that reply, promotes the pending `cmd_seq` to
+`last_applied_seq` (the reply-window pairing in `cmd_seq_track.c`). **Pairing is MIT-only** —
+any non-MIT frame to the motor (enable, mode-change, disable, set-zero) closes the window
+*without* updating `last_applied_seq`, so an enable/mode reply is never miscounted as a
+command being applied. It is **frozen** (holds its last value) while merely holding or idle and
+**reset to 0** on arm / goto-zero / disable; zeroing is not a host command so it stays 0
+throughout. This is the field `latency.py` matches against (§2, wrap-aware); the pairing
+mechanics are in §6.
 
 **Encoding notes / where precision is lost:** float→u16 quantization on pos/vel/tau (clamped
 to the global bound; overshoot saturates); temperature truncated to whole °C. `pos_raw` is the
 **wrapped home-frame** angle — multi-turn winding is *not* represented (deliberate; see the
-position-wrap handling in §6). The atom is **append-only, frozen v1**: never insert a field
-mid-struct (offsets shift → silent host corruption); grow into `reserved_v2` + bump
-`PROTO_VERSION`. Guards: `_Static_assert(sizeof==16)` + the cross-language fixture test.
+position-wrap handling in §6). The atom is **append-only**: never insert a field mid-struct
+(offsets shift → silent host corruption); grow at the end + bump `PROTO_VERSION` (v1→v2 did
+exactly this, appending `last_applied_seq` after `reserved_v2`, which stays a spare byte).
+Guards: `_Static_assert(sizeof==18)` + the cross-language fixture test.
 
 ---
 
@@ -299,6 +324,18 @@ and the ZEROING-arrival re-enable — **not** the steady-state path (see §9).
 **one-sided velocity clamp** (only cancels feed-forward driving *further into* the limit),
 setting `CLAMPED_POS`/`CLAMPED_TAU` in `cmd_flags`. Host sends the full command; the slave
 enforces the clamp.
+
+### cmd_seq reply-window pairing
+`cmd_seq_track.c` (pure, host-tested) turns each host `cmd_seq` into the echoed
+`last_applied_seq` (§5). `apply_mit` stores the command's `cmd_seq` as the motor's current
+target; the next `send_mit` stamps it onto the Type-1 frame and **opens a reply window**
+(`cmd_seq_on_mit_frame`); the next fresh Type-2 feedback **closes it** and promotes the target
+to `last_applied_seq` (`cmd_seq_on_reply`, driven by the same `fb_count`-change signal the
+enable monitor uses, evaluated *before* the per-state action so it pairs with the previous
+tick's frame). A non-MIT frame calls `cmd_seq_on_other_frame` to drop the window without
+crediting it (so the ZEROING-arrival enable/mode replies don't count); arm/goto-zero/disable
+`cmd_seq_reset` back to 0. The reader/host comparison is **wrap-aware** (`protocol.seq_ge`,
+RFC-1982).
 
 ### Enable monitor **(uncommitted)**
 Per tick, `enable_monitor_step` (pure, `enable_monitor.c`) checks that an armed motor reports
@@ -359,15 +396,20 @@ write and only logged on write success.
 ### `convert_log.py`
 `.bin` → a session folder of CSVs (`motor_state`, `motor_cmd`, `status`, `control_resp`,
 `events`, `loop_timing`). Decodes each frame; `motor_state.csv` has `cause` + **`cause_name`**
-(from the single `CAUSE_NAMES` in `protocol.py`). Flags wrong-version frames; prints
-**`log complete: 0 records dropped`** or an INCOMPLETE warning from `LOG_DROP` records.
+(from the single `CAUSE_NAMES` in `protocol.py`) and the echoed **`last_applied_seq`**, and
+`motor_cmd.csv` carries the per-tick **`cmd_seq`** — the two columns `latency.py` pairs. Flags
+wrong-version frames; prints **`log complete: 0 records dropped`** or an INCOMPLETE warning
+from `LOG_DROP` records.
 
 ### `plot_motor_state.py`
 Session folder or `.bin` → per-motor pos/vel/tau figures (measured `x`, commanded `+`),
 fault onsets as red verticals. Anchors on `master_ts_ms`, trimming the stale pre-open prefix.
 
 ### `latency.py`
-`.bin` → step-latency (cmd TX → first torque response beyond noise) + ping-RTT distributions.
+`.bin` → **cmd_seq latency** (per-tick and per-motor: TX of a `cmd_seq` → first telemetry with
+`last_applied_seq ≥` it, wrap-aware, **including the return path** — see §2 — each with a
+never-applied count), plus step-latency (cmd TX → first torque response beyond noise) and
+ping-RTT distributions for comparison.
 
 ---
 
@@ -381,7 +423,7 @@ handlers:
                          │  ▲                         │  ▲                         │
                          │  │   watchdog / disable    │  └── watchdog (200ms) ─────┘
                          │  └─────────────────────────┤       falls back to HOLD
-                         │                             │
+                         │                            │
                          ├──GOTO_ZERO──▶ ZEROING ──arrival──▶ ARMED_HOLD
                          │                  │
                          │                  └── stall / host-stop / fault
@@ -392,7 +434,7 @@ handlers:
 Transitions & triggers:
 - **BOOT→DISCOVERING→IDLE:** startup probe (`discover()`); a found, responsive motor → IDLE.
 - **IDLE→ARMED_HOLD:** `SPI_CMD_ARM` → `motor_runtime_arm` (mode-change + enable; clears
-  whitelisted latched faults). Gate: must be IDLE + alive.
+  whitelisted latched faults). Gate: must be IDLE + alive. (Block action if motors not equal config)
 - **IDLE→ZEROING→ARMED_HOLD:** `SPI_CMD_GOTO_ZERO` → leashed creep to home → set-zero +
   re-enable → hold. Gates: IDLE, `0 ∈ [soft_min,soft_max]`, latched cause ∉ {OVERTORQUE,
   MOTOR_FAULT} (those need an explicit ARM).

@@ -31,6 +31,7 @@ void spi_proto_encode_atom(MotorState *out, const MotorSample *s)
     out->fault_word  = s->fault_word;
     out->fb_age      = (s->fb_age_ms > 255u) ? 255u : (uint8_t)s->fb_age_ms;
     out->reserved_v2 = 0u;
+    out->last_applied_seq = s->last_applied_seq;
 }
 
 void spi_proto_build_tele(uint8_t *frame, uint8_t n,

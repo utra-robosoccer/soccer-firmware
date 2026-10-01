@@ -77,7 +77,7 @@ CTRL_RESULT_NAMES = {0: "OK", 1: "ERR_STATE", 2: "ERR_STUB", 3: "ERR_MOTOR"}
 ROBOT_STATE_NAMES = {0: "INIT", 1: "READY", 2: "DEGRADED"}
 
 # v1 telemetry contract version — carried in MsgHeader.ver_flags low byte.
-PROTO_VERSION = 1
+PROTO_VERSION = 2
 
 # ── wire layouts (little-endian, packed) ──────────────────────────────────────
 HDR_FMT  = "<HHBBIHHH"          # type,seq,src,dst,ts_ms,len,ver_flags,crc  → 16 B
@@ -87,16 +87,25 @@ FMT_MASTER_STATUS = "<BBIII"    # robot_state,slave_alive,uptime,link_errs,rx_fr
 FMT_SLAVE_STATUS  = "<BBIIII"   # slave_id,motors_alive,uptime,crc_errors,cmd_crc_errors,seq_gaps (18)
 FMT_CONTROL_REQ   = "<BBBB"     # slave_id,motor_idx,cmd,reserved (4)
 FMT_CONTROL_RESP  = "<BBBBBH"   # slave_id,motor_idx,cmd,result,new_state,req_seq (7)
-FMT_MOTOR_CMD     = "<BBfffff"  # slave_id,motor_idx,pos,vel,kp,kd,tau_ff (22)
+FMT_MOTOR_CMD     = "<BBfffffH"  # slave_id,motor_idx,pos,vel,kp,kd,tau_ff,cmd_seq (24)
 
-MOTORSTATE_FMT  = "<HHHBBBBIBB"  # 16 B telemetry atom
+MOTORSTATE_FMT  = "<HHHBBBBIBBH"  # 18 B telemetry atom (last u16 = last_applied_seq)
 MOTORSTATE_SIZE = struct.calcsize(MOTORSTATE_FMT)
 FMT_MOTOR_STATE_HDR = "<BB"      # slave_id, motor_idx before the atom
 
 assert HDR_SIZE == 16, HDR_SIZE
-assert MOTORSTATE_SIZE == 16, MOTORSTATE_SIZE
+assert MOTORSTATE_SIZE == 18, MOTORSTATE_SIZE
 assert struct.calcsize(FMT_SLAVE_STATUS) == 18
 assert struct.calcsize(FMT_MASTER_STATUS) == 14
+
+
+def seq_ge(a: int, b: int) -> bool:
+    """Wrap-aware uint16 ``a >= b`` (RFC-1982 serial-number comparison).
+
+    True when ``a`` is at or ahead of ``b`` within half the 16-bit space, so a
+    counter that wraps 65535 → 1 still compares correctly. Used to decide whether
+    a reported last_applied_seq has reached a given cmd_seq (latency matching)."""
+    return ((a - b) & 0xFFFF) < 0x8000
 
 
 def _decode(raw: int, lo: float, hi: float) -> float:
@@ -106,7 +115,7 @@ def _decode(raw: int, lo: float, hi: float) -> float:
 
 @dataclass(frozen=True)
 class MotorState:
-    """One motor's 16-byte telemetry atom, forwarded verbatim by the master.
+    """One motor's 18-byte telemetry atom, forwarded verbatim by the master.
 
     ``pos_raw`` is the HOME-FRAME wrapped ``[-pi, pi]`` position scaled over the
     ``±4π`` transport bound — NOT the motor's multi-turn angle. ``vel_raw`` /
@@ -122,6 +131,7 @@ class MotorState:
     fault_word: int     # 0x3022 latched on fault; 0 clear; 0xFFFFFFFF read-fail
     fb_age: int         # ms since this motor's last Type-2, saturating 255
     reserved_v2: int    # reserved growth byte (0); append-only evolution
+    last_applied_seq: int  # host cmd_seq last confirmed applied (0 = none since arm)
 
     @classmethod
     def unpack(cls, data: bytes) -> "MotorState":
@@ -286,7 +296,8 @@ def parse_motor_state(p: bytes) -> dict:
                 state=ms.lifecycle, cause=ms.cause,
                 pos=ms.pos, vel=ms.vel, tau=ms.tau, temp=ms.temp,
                 motor_fault=ms.motor_fault, cmd_flags=ms.cmd_flags,
-                fault_word=ms.fault_word, fb_age=ms.fb_age)
+                fault_word=ms.fault_word, fb_age=ms.fb_age,
+                last_applied_seq=ms.last_applied_seq)
 
 
 def age_ms(now: float, t_last_msg: float, fb_age_at_receipt: int) -> float:

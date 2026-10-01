@@ -112,6 +112,7 @@ class MotorSnap:
     cmd_flags: int
     fault_word: int
     fb_age: int
+    last_applied_seq: int  # host cmd_seq the motor last confirmed applied (0 = none)
     master_ts_ms: int   # MsgHeader.ts_ms (master tick at emit)
     recv_ns: int        # host monotonic_ns at receipt
 
@@ -163,6 +164,9 @@ class MasterLink:
         self._rx_frames = 0
         self._tx_frames = 0
         self._tx_errors = 0
+        # Monotonic command sequence, one per send_mit tick. Starts at 1; 0 is the
+        # CMD_SEQ_NONE sentinel ("none applied"), so wrap skips it (…65535 → 1).
+        self._cmd_seq = 0
         self._discard_records = 0
         self._discard_bytes = 0
         self._version_frames = 0
@@ -226,6 +230,7 @@ class MasterLink:
                 state=d["state"], cause=d["cause"], pos=d["pos"], vel=d["vel"],
                 tau=d["tau"], temp=d["temp"], motor_fault=d["motor_fault"],
                 cmd_flags=d["cmd_flags"], fault_word=d["fault_word"], fb_age=d["fb_age"],
+                last_applied_seq=d["last_applied_seq"],
                 master_ts_ms=ts_ms, recv_ns=recv_ns)
             log_live = False
             with self._lock:
@@ -307,11 +312,23 @@ class MasterLink:
         return True
 
     def send_mit(self, cmds) -> None:
-        """Send one MSG_MOTOR_CMD per command (any subset of motors)."""
+        """Send one MSG_MOTOR_CMD per command (any subset of motors).
+
+        All commands in one call share a single cmd_seq (one per policy tick):
+        latency.py measures a tick as applied once every commanded motor reports
+        last_applied_seq >= this value. The counter advances once per call, starting
+        at 1 and skipping 0 on wrap (0 = CMD_SEQ_NONE, "none applied")."""
         import struct
+        cmds = list(cmds)
+        if not cmds:
+            return
+        seq = self._cmd_seq + 1
+        if seq > 0xFFFF:
+            seq = 1
+        self._cmd_seq = seq
         for c in cmds:
             payload = struct.pack(P.FMT_MOTOR_CMD, c.slave, c.local,
-                                  c.pos, c.vel, c.kp, c.kd, c.tau_ff)
+                                  c.pos, c.vel, c.kp, c.kd, c.tau_ff, seq)
             self._write_frame(P.encode_frame(P.MSG_MOTOR_CMD, P.NODE_JETSON,
                                              P.NODE_MASTER, payload))
 

@@ -20,26 +20,28 @@ static void print_hex(const char *label, const uint8_t *b, unsigned n)
 }
 
 /* Fixed known values — MUST match the Python side of the test. */
-static MotorState make_atom(uint16_t pos_raw, uint8_t life, uint8_t cause)
+static MotorState make_atom(uint16_t pos_raw, uint8_t life, uint8_t cause,
+                            uint16_t last_applied_seq)
 {
     MotorState m;
     memset(&m, 0, sizeof(m));
-    m.pos_raw     = pos_raw;
-    m.vel_raw     = 40000u;
-    m.tau_raw     = 30000u;
-    m.temp_c      = 42u;
-    m.state       = SPI_STATE_PACK(life, cause);
-    m.motor_fault = 0x0Au;   /* distinct from cmd_flags so a byte swap is caught */
-    m.cmd_flags   = SPI_CMDFLAG_CLAMPED_POS | SPI_CMDFLAG_CMD_STALE;  /* 0x05 */
-    m.fault_word  = 0xDEADBEEFu;
-    m.fb_age      = 250u;
-    m.reserved_v2 = 0u;
+    m.pos_raw          = pos_raw;
+    m.vel_raw          = 40000u;
+    m.tau_raw          = 30000u;
+    m.temp_c           = 42u;
+    m.state            = SPI_STATE_PACK(life, cause);
+    m.motor_fault      = 0x0Au;   /* distinct from cmd_flags so a byte swap is caught */
+    m.cmd_flags        = SPI_CMDFLAG_CLAMPED_POS | SPI_CMDFLAG_CMD_STALE;  /* 0x05 */
+    m.fault_word       = 0xDEADBEEFu;
+    m.fb_age           = 250u;
+    m.reserved_v2      = 0u;
+    m.last_applied_seq = last_applied_seq;  /* distinct 16-bit value catches a byte swap */
     return m;
 }
 
 int main(void)
 {
-    MotorState m0 = make_atom(12345u, MOTOR_ARMED_HOLD, CAUSE_OVERTORQUE);
+    MotorState m0 = make_atom(12345u, MOTOR_ARMED_HOLD, CAUSE_OVERTORQUE, 0x1234u);
     print_hex("ATOM", (const uint8_t *)&m0, (unsigned)sizeof(m0));
 
     /* Two-motor telemetry frame, independent of the build's N_MOTORS. */
@@ -49,7 +51,7 @@ int main(void)
     frame[1] = 0x2Au;   /* echo_seq   */
     MotorState *ms = (MotorState *)&frame[SPI_TELE_HDR_BYTES];
     ms[0] = m0;
-    ms[1] = make_atom(1000u, MOTOR_ARMED_MIT, CAUSE_NONE);
+    ms[1] = make_atom(1000u, MOTOR_ARMED_MIT, CAUSE_NONE, 0x5678u);
     uint16_t crc = proto_crc16(frame, (size_t)(sizeof(frame) - SPI_TELE_CRC_BYTES));
     frame[sizeof(frame) - 2] = (uint8_t)(crc & 0xFFu);
     frame[sizeof(frame) - 1] = (uint8_t)(crc >> 8);
@@ -63,8 +65,8 @@ int main(void)
     cmdf[0] = 0x05u;   /* SPI_CMD_MIT */
     cmdf[1] = 0x2Au;   /* seq */
     SpiMitCmd *mc = (SpiMitCmd *)&cmdf[SPI_CMD_HDR_BYTES];
-    mc[0].pos = 1.5f;   mc[0].vel = -2.25f; mc[0].valid = 1u;
-    mc[1].pos = -0.75f; mc[1].vel = 3.5f;   mc[1].valid = 0u;
+    mc[0].pos = 1.5f;   mc[0].vel = -2.25f; mc[0].valid = 1u; mc[0].cmd_seq = 0x1111u;
+    mc[1].pos = -0.75f; mc[1].vel = 3.5f;   mc[1].valid = 0u; mc[1].cmd_seq = 0x2222u;
     uint16_t ccrc = proto_crc16(cmdf, SPI_CMD_CRC_OFF(2));
     cmdf[SPI_CMD_CRC_OFF(2)]     = (uint8_t)(ccrc & 0xFFu);
     cmdf[SPI_CMD_CRC_OFF(2) + 1] = (uint8_t)(ccrc >> 8);

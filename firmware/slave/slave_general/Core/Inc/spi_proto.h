@@ -37,6 +37,7 @@ typedef struct {
     uint8_t  cmd_flags;    /* SPI_CMDFLAG_*                          */
     uint32_t fault_word;   /* latched 0x3022                         */
     uint32_t fb_age_ms;    /* ms since last feedback (codec saturates to u8) */
+    uint16_t last_applied_seq; /* host cmd_seq last confirmed applied (0 = none) */
 } MotorSample;
 
 /* Encode one sample into a wire atom. Byte-identical to the former

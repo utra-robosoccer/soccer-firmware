@@ -337,10 +337,10 @@ def _log_out_frame(frame: bytes) -> None:
         return
     mt, _seq, _ts, pl, _consumed = r
     if mt == tc.MSG_MOTOR_CMD:
-        slave, local, pos, vel, kp, kd, tau = struct.unpack(tc.FMT_MOTOR_CMD, pl)
+        slave, local, pos, vel, kp, kd, tau, cmd_seq = struct.unpack(tc.FMT_MOTOR_CMD, pl)
         _logger.log_cmd("MIT", motor=_GIDX_OF.get((slave, local)),
                         slave=slave, local=local,
-                        pos=pos, vel=vel, kp=kp, kd=kd, tau=tau)
+                        pos=pos, vel=vel, kp=kp, kd=kd, tau=tau, cmd_seq=cmd_seq)
     elif mt == tc.MSG_CONTROL_REQ:
         slave, local, cmd, _res = struct.unpack(tc.FMT_CONTROL_REQ, pl)
         _logger.log_cmd(_CTRL_NAMES.get(cmd, f"CTRL_{cmd}"),

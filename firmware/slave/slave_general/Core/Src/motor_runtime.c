@@ -29,6 +29,8 @@ static void send_mit(uint8_t idx, float torque, float home_pos, float vel,
 {
     can_mit_control_set(motor_configs[idx].can_id, torque,
                         home_pos + motors_rt[idx].pos_offset, vel, kp, kd);
+    /* A Type-1 frame carrying this motor's current target opens its reply window. */
+    cmd_seq_on_mit_frame(&motors_rt[idx].cmd_track, motors_rt[idx].target_cmd_seq);
 }
 
 /* Drop a single motor's output and return it to IDLE. Disabling an already-idle
@@ -159,6 +161,14 @@ void motor_runtime_update(uint32_t now_ms)
             &motors_rt[i].mon_not_enabled);
         if (mon_fresh) motors_rt[i].mon_prev_fb_count = snap.fb_count;
 
+        /* Reply-window pairing (cmd_seq_track). A fresh Type-2 frame is the reply
+           to the Type-1 MIT frame send_mit emitted last tick: if a window is open,
+           commit its cmd_seq as last_applied_seq. This runs BEFORE the switch so it
+           pairs with the PREVIOUS tick's frame, not the one we're about to send.
+           Only MIT frames open the window (send_mit); non-MIT frames close it via
+           cmd_seq_on_other_frame, so an enable/mode-change reply can't be counted. */
+        if (mon_fresh) cmd_seq_on_reply(&motors_rt[i].cmd_track);
+
         if (driving &&
             (uint32_t)(now_ms - snap.last_fb_ms) >= MOTOR_CAN_FB_TIMEOUT_MS) {
             idle_motor(i);
@@ -262,6 +272,10 @@ void motor_runtime_update(uint32_t now_ms)
                        calibration is a separate manual procedure (docs/command.md). */
                     uint32_t ts;
                     motors_rt[i].mon_suspended = 1u;  /* intentional disable window */
+                    /* Close the reply window: the disable/set-zero/mode/enable
+                       frames below are non-MIT, and their Type-2 replies must not
+                       be paired to any pending cmd_seq. */
+                    cmd_seq_on_other_frame(&motors_rt[i].cmd_track);
                     can_disable_motor(cid, CAN_MASTER_ID);
                     HAL_Delay(5u);
                     can_set_mech_zero(cid, CAN_MASTER_ID);
@@ -394,6 +408,11 @@ HAL_StatusTypeDef motor_runtime_arm(uint8_t idx)
     while (can_rx_flag == 0 && (HAL_GetTick() - ts) < 10u) {}
     HAL_Delay(10u);
 
+    /* Fresh armed session: no host MIT command applied yet. Clear the pairing so
+       last_applied_seq reads 0 (none) until the host streams its first MIT. */
+    motors_rt[idx].target_cmd_seq = CMD_SEQ_NONE;
+    cmd_seq_reset(&motors_rt[idx].cmd_track);
+
     /* First hold command */
     send_mit(idx, 0.0f, motors_rt[idx].hold_pos, 0.0f,
              motors_rt[idx].cfg->default_kp,
@@ -413,6 +432,9 @@ HAL_StatusTypeDef motor_runtime_disable(uint8_t idx)
     motors_rt[idx].cause = CAUSE_NONE;      /* commanded stop, not a fault */
     motor_set_fault_word(idx, 0u);
     motors_rt[idx].fault_word = 0u;         /* mirror the clear */
+    /* Drop the pairing: no target applies once idle. */
+    motors_rt[idx].target_cmd_seq = CMD_SEQ_NONE;
+    cmd_seq_reset(&motors_rt[idx].cmd_track);
     return HAL_OK;
 }
 
@@ -508,6 +530,11 @@ HAL_StatusTypeDef motor_runtime_goto_zero(uint8_t idx)
     motors_rt[idx].zero_progress_ms = HAL_GetTick();
     motors_rt[idx].zero_settle      = 0u;
 
+    /* Zeroing is not a host MIT command: clear the pairing so last_applied_seq
+       stays 0 (none) throughout the creep and the subsequent arrival hold. */
+    motors_rt[idx].target_cmd_seq = CMD_SEQ_NONE;
+    cmd_seq_reset(&motors_rt[idx].cmd_track);
+
     /* First command: hold current position before the update loop starts stepping */
     send_mit(idx, 0.0f, motors_rt[idx].hold_pos, 0.0f,
              MOTOR_ZERO_KP, MOTOR_ZERO_KD);
@@ -527,13 +554,18 @@ void motor_runtime_refresh_watchdog(uint8_t idx)
     }
 }
 
-void motor_runtime_apply_mit(uint8_t idx, float pos, float vel)
+void motor_runtime_apply_mit(uint8_t idx, float pos, float vel, uint16_t cmd_seq)
 {
     if (idx >= N_MOTORS) return;
 
     MotorRuntime *r = &motors_rt[idx];
     /* Streamed MIT setpoints are only honoured while the motor is armed. */
     if (r->state != MOTOR_ARMED_HOLD && r->state != MOTOR_ARMED_MIT) return;
+
+    /* Adopt this command's cmd_seq as the current MIT target. The next send_mit
+       stamps it onto the Type-1 frame (opening the reply window); the following
+       fresh Type-2 feedback confirms it as last_applied_seq. */
+    r->target_cmd_seq = cmd_seq;
 
     /* Enforce the per-motor soft angle limits here on the slave: the host may
        command past them (e.g. a ±90° sine), but the motor must stop at its
@@ -584,6 +616,8 @@ void motor_runtime_sample(MotorSample *out, uint8_t idx)
     out->fault_word  = r->fault_word;
     /* Raw ms since this motor's last Type-2 feedback; the codec saturates to u8. */
     out->fb_age_ms   = HAL_GetTick() - r->last_fb_ms;
+    /* Host cmd_seq last confirmed applied by the motor (0 = none yet). */
+    out->last_applied_seq = r->cmd_track.last_applied;
 }
 
 uint8_t motor_runtime_motors_alive(void)

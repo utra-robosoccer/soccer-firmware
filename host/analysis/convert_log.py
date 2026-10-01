@@ -40,9 +40,10 @@ _GIDX = {(m["slave"], m["idx"]): g for g, m in enumerate(mc.MOTORS)}
 
 MOTOR_STATE_FIELDS = ["host_ts", "master_ts_ms", "motor", "slave", "local",
                       "state", "cause", "cause_name", "motor_fault", "cmd_flags",
-                      "fault_word", "fb_age", "pos", "vel", "tau", "temp"]
+                      "fault_word", "fb_age", "pos", "vel", "tau", "temp",
+                      "last_applied_seq"]
 MOTOR_CMD_FIELDS = ["host_ts", "motor", "slave", "local", "opcode",
-                    "pos", "vel", "kp", "kd", "tau_ff"]
+                    "pos", "vel", "kp", "kd", "tau_ff", "cmd_seq"]
 STATUS_FIELDS = ["host_ts", "type", "robot_state", "slave_alive", "uptime_ms",
                  "link_errors", "rx_frames", "slave_id", "motors_alive",
                  "crc_errors", "cmd_crc_errors", "seq_gaps"]
@@ -114,7 +115,8 @@ def convert(path):
                         "cause_name": P.CAUSE_NAMES.get(d["cause"], str(d["cause"])),
                         "motor_fault": d["motor_fault"], "cmd_flags": d["cmd_flags"],
                         "fault_word": d["fault_word"], "fb_age": d["fb_age"],
-                        "pos": d["pos"], "vel": d["vel"], "tau": d["tau"], "temp": d["temp"]})
+                        "pos": d["pos"], "vel": d["vel"], "tau": d["tau"], "temp": d["temp"],
+                        "last_applied_seq": d["last_applied_seq"]})
             elif mt == P.MSG_MASTER_STATUS:
                 d = P.parse_master_status(inner)
                 if d:
@@ -136,10 +138,11 @@ def convert(path):
             c["tx"] += 1
             mt, ver, ts_ms, inner = _frame_header(rec.payload)
             if mt == P.MSG_MOTOR_CMD:
-                s, l, pos, vel, kp, kd, tau = struct.unpack(P.FMT_MOTOR_CMD, inner)
+                s, l, pos, vel, kp, kd, tau, cmd_seq = struct.unpack(P.FMT_MOTOR_CMD, inner)
                 cmd_w.writerow({"host_ts": ht, "motor": _GIDX.get((s, l)),
                                 "slave": s, "local": l, "opcode": "MIT",
-                                "pos": pos, "vel": vel, "kp": kp, "kd": kd, "tau_ff": tau})
+                                "pos": pos, "vel": vel, "kp": kp, "kd": kd, "tau_ff": tau,
+                                "cmd_seq": cmd_seq})
             elif mt == P.MSG_CONTROL_REQ:
                 s, l, cmd, _res = struct.unpack(P.FMT_CONTROL_REQ, inner)
                 cmd_w.writerow({"host_ts": ht, "motor": _GIDX.get((s, l)),

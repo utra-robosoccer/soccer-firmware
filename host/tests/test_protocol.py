@@ -23,11 +23,11 @@ _LIFE1, _CAUSE1 = 7, 0      # MOTOR_ARMED_MIT, CAUSE_NONE
 _FLAGS = P.CMDFLAG_CLAMPED_POS | P.CMDFLAG_CMD_STALE
 
 
-def _atom(pos_raw: int, life: int, cause: int) -> bytes:
+def _atom(pos_raw: int, life: int, cause: int, last_applied_seq: int = 0) -> bytes:
     # motor_fault (0x0A) distinct from cmd_flags (_FLAGS=0x05) so a byte swap is caught.
     return struct.pack(P.MOTORSTATE_FMT, pos_raw, 40000, 30000, 42,
                        (life & 0x0F) | (cause << 4), 0x0A, _FLAGS,
-                       0xDEADBEEF, 250, 0)
+                       0xDEADBEEF, 250, 0, last_applied_seq)
 
 
 class MotorStateDecode(unittest.TestCase):
@@ -72,11 +72,13 @@ class FrameCodec(unittest.TestCase):
         self.assertIsNone(P.decode_frame(bytearray(fr)))
 
     def test_wrong_version_dropped_and_counted(self):
-        # Build a CRC-valid frame, then rewrite ver_flags low byte to 2 and fix
-        # the CRC so it passes CRC but fails the version gate.
+        # Build a CRC-valid frame, then rewrite ver_flags low byte to a version other
+        # than the current PROTO_VERSION and fix the CRC so it passes CRC but fails
+        # the version gate.
+        wrong = (P.PROTO_VERSION + 1) & 0xFF
         payload = struct.pack(P.FMT_MOTOR_STATE_HDR, 0, 0) + _atom(0, 0, 0)
         fr = bytearray(P.encode_frame(P.MSG_MOTOR_STATE, P.NODE_MASTER, P.NODE_JETSON, payload))
-        fr[12] = 2                      # ver_flags low byte (header offset 12) → version 2
+        fr[12] = wrong                  # ver_flags low byte (header offset 12)
         fr[14] = 0                      # zero the CRC field, then recompute like the codec
         fr[15] = 0
         crc = P.crc16(bytes(fr))
@@ -86,9 +88,23 @@ class FrameCodec(unittest.TestCase):
         self.assertIsNone(P.decode_frame(bytearray(fr)))   # dropped, no frame returned
         self.assertEqual(P.version_errors, before + 1)     # and counted
 
-        # A v1 frame still round-trips.
+        # A current-version frame still round-trips.
         ok = bytearray(P.encode_frame(P.MSG_MOTOR_STATE, P.NODE_MASTER, P.NODE_JETSON, payload))
         self.assertIsNotNone(P.decode_frame(ok))
+
+
+class WrapAwareSeq(unittest.TestCase):
+    def test_seq_ge_basic_and_wrap(self):
+        # Simple ordering, no wrap.
+        self.assertTrue(P.seq_ge(5, 5))
+        self.assertTrue(P.seq_ge(6, 5))
+        self.assertFalse(P.seq_ge(5, 6))
+        # Across the 65535 → 1 wrap: 2 is "ahead of" 65535.
+        self.assertTrue(P.seq_ge(2, 65535))
+        self.assertFalse(P.seq_ge(65535, 2))
+        # Just under half the space ahead reads as ahead; the mirror reads behind.
+        self.assertTrue(P.seq_ge(0x7FFF, 0))
+        self.assertFalse(P.seq_ge(0, 0x7FFF))
 
 
 class CrossLanguageFixture(unittest.TestCase):
@@ -115,10 +131,10 @@ class CrossLanguageFixture(unittest.TestCase):
     def test_atom_and_frame_match_c(self):
         got = self._build_and_run()
 
-        atom0 = _atom(12345, _LIFE0, _CAUSE0)
+        atom0 = _atom(12345, _LIFE0, _CAUSE0, 0x1234)
         self.assertEqual(got["ATOM"], atom0, "MotorState atom layout drift C<->Python")
 
-        atom1 = _atom(1000, _LIFE1, _CAUSE1)
+        atom1 = _atom(1000, _LIFE1, _CAUSE1, 0x5678)
         frame = bytearray(struct.pack("<BB", 0x03, 0x2A) + atom0 + atom1 + b"\x00" * 8 + b"\x00\x00")
         crc = P.crc16(bytes(frame[:-2]))
         frame[-2] = crc & 0xFF
@@ -126,10 +142,10 @@ class CrossLanguageFixture(unittest.TestCase):
         self.assertEqual(bytes(frame), got["FRAME"], "SPI frame layout/CRC drift C<->Python")
 
         # Command frame (master→slave): [cmd][seq][SpiMitCmd×2][crc16].
-        spimit = "<ffB"   # pos, vel, valid — 9 B, matches packed C SpiMitCmd
+        spimit = "<ffBH"   # pos, vel, valid, cmd_seq — 11 B, matches packed C SpiMitCmd
         body = (struct.pack("<BB", 0x05, 0x2A)
-                + struct.pack(spimit, 1.5, -2.25, 1)
-                + struct.pack(spimit, -0.75, 3.5, 0))
+                + struct.pack(spimit, 1.5, -2.25, 1, 0x1111)
+                + struct.pack(spimit, -0.75, 3.5, 0, 0x2222))
         ccrc = P.crc16(body)
         cmdframe = body + bytes([ccrc & 0xFF, ccrc >> 8])
         self.assertEqual(cmdframe, got["CMDFRAME"], "command-frame layout/CRC drift C<->Python")

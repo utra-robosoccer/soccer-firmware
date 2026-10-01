@@ -94,7 +94,12 @@ typedef enum {
 
 /* Telemetry contract version. Carried in MsgHeader.ver_flags low byte; the host
  * drops any frame whose version != this. High byte reserved (0). */
-#define PROTO_VERSION 1u
+#define PROTO_VERSION 2u
+
+/* Command-sequence sentinel: 0 means "no host MIT command has been applied" (used in
+ * MotorState.last_applied_seq for arm-only / zeroing / idle). The host starts cmd_seq
+ * at 1 and skips 0 on wrap, so a real applied command is never 0. */
+#define CMD_SEQ_NONE 0u
 
 typedef struct PROTO_PACKED {
     uint16_t type;    /* MsgType                              */
@@ -109,7 +114,7 @@ typedef struct PROTO_PACKED {
 
 #define MSG_HEADER_SIZE 16u
 
-/* ── MotorState telemetry atom (16 B) ────────────────────────────────────────
+/* ── MotorState telemetry atom (18 B) ────────────────────────────────────────
  * The unit of slave→master telemetry, forwarded verbatim to the host. pos/vel/
  * tau are encoded over the GLOBAL transport bounds (widest model) — decode with
  * the generated MOTOR_P/V/T_MIN/MAX, not per-model tables. */
@@ -124,8 +129,10 @@ typedef struct PROTO_PACKED {
     uint8_t  cmd_flags;     /* SPI_CMDFLAG_* (recomputed each tick)              */
     uint32_t fault_word;    /* 0x3022 latched on fault entry; 0 clear; 0xFFFFFFFF read-fail */
     uint8_t  fb_age;        /* ms since this motor's last Type-2, saturating 255 */
-    uint8_t  reserved_v2;   /* reserved growth byte (0). Append-only evolution.  */
-} MotorState;               /* 16 bytes */
+    uint8_t  reserved_v2;   /* reserved growth byte (0) — spare for motor mode later */
+    uint16_t last_applied_seq; /* host cmd_seq last confirmed applied to the motor;
+                                  CMD_SEQ_NONE(0) = none since arm (frozen in HOLD/IDLE) */
+} MotorState;               /* 18 bytes */
 
 /* ── payload structs ─────────────────────────────────────────────────────── */
 
@@ -153,7 +160,7 @@ typedef struct PROTO_PACKED {
 typedef struct PROTO_PACKED {
     uint8_t    slave_id;    /* which slave the motor is on            */
     uint8_t    motor_idx;   /* local index within that slave          */
-    MotorState atom;        /* 16 B atom, exactly as received over SPI */
+    MotorState atom;        /* 18 B atom, exactly as received over SPI */
 } MotorStatePayload;
 
 typedef struct PROTO_PACKED {
@@ -181,14 +188,16 @@ typedef struct PROTO_PACKED {
     float    kp;
     float    kd;
     float    tau_ff;
+    uint16_t cmd_seq;       /* host command sequence (one per runner tick; >=1)  */
 } MotorCmd;
 
-/* ── SPI wire format (master → slave MIT command, 9 bytes per motor) ────── */
+/* ── SPI wire format (master → slave MIT command, 11 bytes per motor) ────── */
 typedef struct PROTO_PACKED {
-    float   pos;    /* target position (rad)                            */
-    float   vel;    /* feedforward velocity (rad/s)                     */
-    uint8_t valid;  /* non-zero = this slot carries a live command      */
-} SpiMitCmd;        /* 9 bytes */
+    float    pos;      /* target position (rad)                          */
+    float    vel;      /* feedforward velocity (rad/s)                   */
+    uint8_t  valid;    /* non-zero = this slot carries a live command    */
+    uint16_t cmd_seq;  /* host cmd_seq this target carries (0 = none)    */
+} SpiMitCmd;        /* 11 bytes */
 
 /* ── SPI frame layout (one full-duplex transfer, length = tele frame) ──────
  *
@@ -237,8 +246,8 @@ typedef struct PROTO_PACKED {
 /* ── layout guards (catch C↔wire drift at compile time) ──────────────────── */
 #if defined(__STDC_VERSION__) && (__STDC_VERSION__ >= 201112L)
 _Static_assert(sizeof(MsgHeader) == MSG_HEADER_SIZE, "MsgHeader must be 16 bytes");
-_Static_assert(sizeof(MotorState) == 16u,            "MotorState must be 16 bytes");
-_Static_assert(sizeof(SpiMitCmd) == 9u,              "SpiMitCmd must be 9 bytes");
+_Static_assert(sizeof(MotorState) == 18u,            "MotorState must be 18 bytes");
+_Static_assert(sizeof(SpiMitCmd) == 11u,             "SpiMitCmd must be 11 bytes");
 _Static_assert(MOTOR_ARMED_MIT   <= 0x0Fu,           "MotorLifecycle must fit 4 bits");
 _Static_assert(CAUSE_ZERO_TIMEOUT <= 0x0Fu,          "MotorFaultCause must fit 4 bits");
 #endif

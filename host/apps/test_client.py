@@ -224,11 +224,13 @@ def _sine_thread(idx: int, ser_ref, ser_lock: threading.Lock,
     amp      = max(0.0, 0.5 * (hi - lo) - SINE_MARGIN_RAD)  # peaks 5° inside each limit
     t0 = time.monotonic()
     next_send = t0                       # fixed-grid deadline for the next send
+    cmd_seq = 0                          # per-send command sequence (≥1, 0 reserved)
     while not stop_event.is_set():
         t   = time.monotonic() - t0      # sample pos/vel at TRUE time (jitter-immune value)
         pos = mid + amp * math.sin(SINE_OMEGA * t)
         vel =       amp * SINE_OMEGA * math.cos(SINE_OMEGA * t)
-        payload = struct.pack(FMT_MOTOR_CMD, slave_id, local_idx, pos, vel, kp, kd, 0.0)
+        cmd_seq = cmd_seq + 1 if cmd_seq < 0xFFFF else 1   # wrap 65535 → 1, skip 0
+        payload = struct.pack(FMT_MOTOR_CMD, slave_id, local_idx, pos, vel, kp, kd, 0.0, cmd_seq)
         frame   = encode_frame(MSG_MOTOR_CMD, NODE_JETSON, NODE_MASTER, payload)
         with ser_lock:
             try:

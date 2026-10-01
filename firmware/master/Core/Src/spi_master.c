@@ -31,6 +31,7 @@ static uint8_t   mit_pending[NUM_SLAVES];
 /* ── master status counters (written by frame decoder in usbd_cdc_if.c) ─── */
 uint32_t master_link_errors = 0;
 uint32_t master_rx_frames   = 0;
+uint32_t master_proto_ver_mismatch = 0;
 
 /* ── per-slave runtime state ─────────────────────────────────────────────── */
 static uint8_t      slave_alive[NUM_SLAVES];
@@ -304,14 +305,15 @@ void MotorMaster_Init(SPI_HandleTypeDef *hspi, UART_HandleTypeDef *huart)
 }
 
 void MotorMaster_SetMitCmd(uint8_t slave_id, uint8_t idx, float pos, float vel,
-                            float kp, float kd, float tau_ff)
+                            float kp, float kd, float tau_ff, uint16_t cmd_seq)
 {
     (void)kp; (void)kd; (void)tau_ff;  /* slave uses default_kp/kd from motor_config */
     if (slave_id >= NUM_SLAVES) return;
     if (idx >= slave_motor_counts[slave_id]) return;
-    pending_mit[slave_id][idx].pos   = pos;
-    pending_mit[slave_id][idx].vel   = vel;
-    pending_mit[slave_id][idx].valid = 1u;
+    pending_mit[slave_id][idx].pos     = pos;
+    pending_mit[slave_id][idx].vel     = vel;
+    pending_mit[slave_id][idx].valid   = 1u;
+    pending_mit[slave_id][idx].cmd_seq = cmd_seq;  /* forwarded verbatim to the slave */
     mit_pending[slave_id] = 1u;
 }
 

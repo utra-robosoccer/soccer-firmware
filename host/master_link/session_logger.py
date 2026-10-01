@@ -36,7 +36,7 @@ import time
 from datetime import datetime
 
 FIELDS = ["host_ts", "master_ts_ms", "kind", "motor", "slave", "local", "opcode",
-          "state", "cause", "flags", "pos", "vel", "tau", "kp", "kd"]
+          "state", "cause", "flags", "pos", "vel", "tau", "kp", "kd", "cmd_seq"]
 
 # Buffer size cap: if the background flusher stalls (slow/full disk), the in-memory
 # buffer is bounded here rather than growing without limit. Rows over the cap are
@@ -81,11 +81,12 @@ class SessionLogger:
         })
 
     def log_cmd(self, opcode, motor=None, slave=None, local=None,
-                pos=None, vel=None, kp=None, kd=None, tau=None, host_ts=None):
+                pos=None, vel=None, kp=None, kd=None, tau=None, cmd_seq=None, host_ts=None):
         self._append({
             "host_ts": self._clock() if host_ts is None else host_ts,
             "kind": "C", "motor": motor, "slave": slave, "local": local,
             "opcode": opcode, "pos": pos, "vel": vel, "tau": tau, "kp": kp, "kd": kd,
+            "cmd_seq": cmd_seq,
         })
 
     def _append(self, row):

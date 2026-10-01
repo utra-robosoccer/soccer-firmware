@@ -69,8 +69,9 @@ void MotorMaster_FormatTxBuffer(void);
 void MotorMaster_SetArmed(uint8_t armed);
 void MotorMaster_HandleControlReq(const ControlReq *req, uint16_t req_seq);
 void MotorMaster_SetMitCmd(uint8_t slave_id, uint8_t idx, float pos, float vel,
-                            float kp, float kd, float tau_ff);
+                            float kp, float kd, float tau_ff, uint16_t cmd_seq);
 
 extern uint32_t master_link_errors;
 extern uint32_t master_rx_frames;
+extern uint32_t master_proto_ver_mismatch;  /* host frames rejected on PROTO_VERSION */
 #endif /* INC_SPI_MASTER_H_ */

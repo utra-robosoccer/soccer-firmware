@@ -292,6 +292,17 @@ static int8_t CDC_Receive_FS(uint8_t* Buf, uint32_t *Len)
       }
       master_rx_frames++;
 
+      /* Reject frames from a host speaking a different wire version. The low byte
+         of ver_flags carries PROTO_VERSION; a mismatch means the struct layouts
+         (incl. cmd_seq fields) differ, so parsing the payload would be unsafe.
+         Count it, skip dispatch, but still consume the framed bytes below. */
+      if ((uint8_t)(hdr.ver_flags & 0xFFu) != PROTO_VERSION) {
+          master_proto_ver_mismatch++;
+          accum_len -= total;
+          if (accum_len > 0u) memmove(accum, accum + total, accum_len);
+          continue;
+      }
+
       /* Dispatch */
       const uint8_t *payload = accum + MSG_HEADER_SIZE;
       switch ((MsgType)hdr.type) {
@@ -322,7 +333,7 @@ static int8_t CDC_Receive_FS(uint8_t* Buf, uint32_t *Len)
                   MotorCmd mc;
                   memcpy(&mc, payload, sizeof(mc));
                   MotorMaster_SetMitCmd(mc.slave_id, mc.motor_idx, mc.pos, mc.vel,
-                                        mc.kp, mc.kd, mc.tau_ff);
+                                        mc.kp, mc.kd, mc.tau_ff, mc.cmd_seq);
               } else {
                   master_link_errors++;
               }

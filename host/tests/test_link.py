@@ -52,8 +52,9 @@ class FakeSerial:
         self.closed = True
 
 
-def _motor_state(slave, idx, pos_raw=32768, state=3):
-    atom = struct.pack(P.MOTORSTATE_FMT, pos_raw, 40000, 30000, 42, state, 0, 0, 0, 5, 0)
+def _motor_state(slave, idx, pos_raw=32768, state=3, last_applied_seq=0):
+    atom = struct.pack(P.MOTORSTATE_FMT, pos_raw, 40000, 30000, 42, state, 0, 0, 0, 5, 0,
+                       last_applied_seq)
     payload = struct.pack(P.FMT_MOTOR_STATE_HDR, slave, idx) + atom
     return P.encode_frame(P.MSG_MOTOR_STATE, P.NODE_MASTER, P.NODE_JETSON, payload)
 
@@ -65,7 +66,7 @@ def _master_status():
 
 def _motor_state_ts(slave, idx, ts_ms, state=7, pos_raw=32768):
     """MOTOR_STATE frame with an explicit master_ts_ms (encode_frame can't set it)."""
-    atom = struct.pack(P.MOTORSTATE_FMT, pos_raw, 40000, 30000, 42, state, 0, 0, 0, 5, 0)
+    atom = struct.pack(P.MOTORSTATE_FMT, pos_raw, 40000, 30000, 42, state, 0, 0, 0, 5, 0, 0)
     payload = struct.pack(P.FMT_MOTOR_STATE_HDR, slave, idx) + atom
     fr = bytearray(struct.pack(P.HDR_FMT, P.MSG_MOTOR_STATE, 0, P.NODE_MASTER,
                                P.NODE_JETSON, ts_ms & 0xFFFFFFFF, len(payload),
@@ -162,10 +163,11 @@ class MasterLinkFakeSerial(unittest.TestCase):
             self.assertIn(P.MSG_MOTOR_CMD, types)
             self.assertIn(P.MSG_CONTROL_REQ, types)
             mit = next(f for f in frames if f[0] == P.MSG_MOTOR_CMD)
-            s, l, pos, vel, kp, kd, tau = struct.unpack(P.FMT_MOTOR_CMD, mit[3])
+            s, l, pos, vel, kp, kd, tau, cmd_seq = struct.unpack(P.FMT_MOTOR_CMD, mit[3])
             self.assertEqual((s, l), (0, 1))
             self.assertAlmostEqual(pos, 1.5, places=5)
             self.assertAlmostEqual(kp, 15.0, places=5)
+            self.assertEqual(cmd_seq, 1)   # first send_mit tick stamps cmd_seq=1 (skips 0)
             # TX_FRAME records present in the log.
             tx = [rec for rec in BinaryLogReader(lk.log_path) if rec.kind == LOG.TX_FRAME]
             self.assertEqual(len(tx), 2)
