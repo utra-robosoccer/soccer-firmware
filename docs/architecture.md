@@ -153,8 +153,19 @@ boundaries are found by CRC resync.
   return path** — host→master→SPI→slave→CAN→motor to apply, then
   motor→CAN→SPI→master→USB→host for the echo to come back — so it is strictly larger than
   the one-way command delay. Reported per-tick (all commanded motors applied) and per-motor,
-  each with a never-applied count. Compare against the physical torque-onset step latency
-  (~29 ms median from `logs/2026-09-29/21-25-09_latency.bin`).
+  each with a never-applied count.
+  - **Measured (2026-10-01):** **median 19.17 ms** (min 17.67, p95 20.58, max 21.17),
+    **0 never-applied of 1500** — `logs/2026-10-01/10-35-16_man_1s_1m.bin`, a 30 s in-range
+    MIT sine at 50 Hz on the `bench-1-motor` config. The command traverses, in order:
+    host `send_mit` → USB-CDC → master `pending_mit` → SPI poll → slave `apply_mit` →
+    Type-1 MIT frame → RS02 controller **(applied)**; the echo then returns Type-2 feedback →
+    slave pairs it into `last_applied_seq` → SPI telemetry → master pass-through → USB-CDC →
+    host. The tight ~17–21 ms band reflects 200 Hz SPI poll quantization (±5 ms) plus the
+    CAN and telemetry-emission timing. It lands **below** the ~29 ms torque-onset step
+    latency because `last_applied_seq` flips when the motor's feedback *acknowledges* the
+    command, which precedes a physically measurable torque departure.
+  - Compare against the physical torque-onset step latency (~29 ms median from
+    `logs/2026-09-29/21-25-09_latency.bin`).
 
 ---
 
