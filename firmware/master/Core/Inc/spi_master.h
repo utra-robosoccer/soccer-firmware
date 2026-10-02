@@ -9,21 +9,14 @@
 #include <stdio.h>
 #include <stdint.h>
 
-/* SPI command opcodes (SPI_CMD_*) and index macros are defined once in the
-   shared common/include/protocol.h (via proto_common.h) so master and slave
-   cannot drift. */
+/* SPI opcodes (SPI_OP_*) and the fixed frame-size macros (one chain per slave)
+   are defined once in the shared common/include/protocol.h (via proto_common.h)
+   so master and slave cannot drift. The full-duplex transfer is SPI_XFER_SIZE. */
 
 /* NUM_SLAVES, MAX_MOTORS_PER_SLAVE come from system_config.h (via proto_common.h). */
 #define NUM_SLV               NUM_SLAVES
 #define BYTES_PER_MOTOR       5
 #define USB_BYTES_PER_MOTOR  sizeof(motor_cmd_t)
-
-/* One full-duplex transfer per slave carries the CRC-framed telemetry frame
-   (protocol.h SPI_TELE_FRAME_SIZE) in the RX direction and the command frame in
-   the TX prefix. Per-slave sizes differ; buffers are sized for the widest slave
-   and the per-slave length is computed at runtime from slave_motor_counts[]. */
-#define SPI_MAX_PKT_SIZE SPI_TELE_FRAME_SIZE(MAX_MOTORS_PER_SLAVE)
-#define SPI_PKT_SIZE(n)  SPI_TELE_FRAME_SIZE(n)
 
 typedef enum {
     DEV1 = 0,
@@ -66,10 +59,8 @@ void MotorMaster_ProcessLoop(void);
 void MotorMaster_ParseRxBuffer(void);
 void MotorMaster_FormatTxBuffer(void);
 
-void MotorMaster_SetArmed(uint8_t armed);
-void MotorMaster_HandleControlReq(const ControlReq *req, uint16_t req_seq);
-void MotorMaster_SetMitCmd(uint8_t slave_id, uint8_t idx, float pos, float vel,
-                            float kp, float kd, float tau_ff, uint16_t cmd_seq);
+/* Split the host's cmd_robot_t into per-slave command mailboxes (ISR context). */
+void MotorMaster_HandleRobotCmd(const cmd_robot_t *cmd);
 
 extern uint32_t master_link_errors;
 extern uint32_t master_rx_frames;

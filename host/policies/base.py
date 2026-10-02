@@ -1,29 +1,28 @@
 """Policy interface and the Action it returns.
 
-An Action can carry per-motor MIT commands, control requests (arm/zero/disable),
-both, or nothing. The command/state types are owned by master_link (they're
-wire-adjacent); policies just compose them.
+Under the robot/chain/motor wire protocol an Action carries a per-motor
+MotorCommand list (level-triggered mode + targets); the runner sends them as one
+cmd_robot_t per tick. The command/state types are owned by master_link.
 
-Designed so a future manual_policy (its own keyboard thread queuing intents) drops
-in without changing the runner: step() simply returns whatever the policy has
-decided this tick.
+Designed so a manual_policy (its own keyboard thread queuing intents) drops in
+without changing the runner: step() returns whatever the policy decided this tick.
 """
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 
 # Re-exported for policy authors: build these in step().
 from master_link.link import (  # noqa: F401
-    MitCommand, ControlRequest, ControlKind, LinkState,
+    MotorCommand, LinkState,
+    MODE_IDLE, MODE_HOLD, MODE_MIT, MODE_DAMPED, MODE_TO_ZERO,
 )
 
 
 @dataclass
 class Action:
-    mit: list = field(default_factory=list)      # list[MitCommand]
-    control: list = field(default_factory=list)  # list[ControlRequest]
+    motors: list = field(default_factory=list)   # list[MotorCommand]
 
     def is_empty(self) -> bool:
-        return not self.mit and not self.control
+        return not self.motors
 
 
 class Policy(ABC):

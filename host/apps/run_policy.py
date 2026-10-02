@@ -15,7 +15,7 @@ import sys
 import time
 
 from master_link import config_meta
-from master_link.link import MasterLink, ControlRequest, ControlKind
+from master_link.link import MasterLink, MotorCommand, MODE_IDLE
 from policies.listen_policy import ListenPolicy
 from policies.man_1s_1m_policy import Man1s1mPolicy
 
@@ -88,10 +88,8 @@ def main(argv=None):
             t1 = time.monotonic_ns()
             action = policy.step(state, t0)
             t2 = time.monotonic_ns()
-            if action.mit:
-                link.send_mit(action.mit)
-            for req in action.control:
-                link.send_control(req)
+            if action.motors:
+                link.send_robot_cmd(action.motors)
             t3 = time.monotonic_ns()
 
             period = (t0 - prev_start) if prev_start is not None else period_ns
@@ -121,12 +119,12 @@ def main(argv=None):
 
 
 def _shutdown(link, policy, stop_reason, rate, seq, periods, latenesses, overruns):
-    # Disable any motor still armed (best-effort; safe even on listen).
+    # Disable any motor still armed (best-effort; safe even on listen). One
+    # cmd_robot_t with an IDLE request for each armed motor.
     try:
         armed = link.latest_state().armed_motors()
-        for (slave, local) in armed:
-            link.send_control(ControlRequest(slave, local, ControlKind.DISABLE))
         if armed:
+            link.send_robot_cmd([MotorCommand(s, l, mode=MODE_IDLE) for (s, l) in armed])
             print(f"disabled {len(armed)} armed motor(s): {armed}")
     except Exception:
         pass

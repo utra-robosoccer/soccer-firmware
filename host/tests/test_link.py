@@ -1,9 +1,9 @@
 """MasterLink tests against a fake serial port (no hardware).
 
-A loopback FakeSerial feeds recorded RX frames — a valid MOTOR_STATE, a corrupted
+A loopback FakeSerial feeds recorded RX frames — a valid ROBOT_TELE, a corrupted
 run (CRC fail → resync/discard), a wrong-version frame, and a MASTER_STATUS — and
 captures TX writes. Asserts: state store updates, discards + version frames are
-logged, and send_mit/send_control emit correct, decodable frames logged as TX_FRAME.
+logged, and send_robot_cmd emits a correct, decodable ROBOT_CMD logged as TX_FRAME.
 """
 import os
 import struct
@@ -48,27 +48,37 @@ class FakeSerial:
         self.tx.extend(data)
         return len(data)
 
+    def flush(self):
+        pass
+
     def close(self):
         self.closed = True
 
 
-def _motor_state(slave, idx, pos_raw=32768, state=3, last_applied_seq=0):
-    atom = struct.pack(P.MOTORSTATE_FMT, pos_raw, 40000, 30000, 42, state, 0, 0, 0, 5, 0,
-                       last_applied_seq)
-    payload = struct.pack(P.FMT_MOTOR_STATE_HDR, slave, idx) + atom
-    return P.encode_frame(P.MSG_MOTOR_STATE, P.NODE_MASTER, P.NODE_JETSON, payload)
+def _tele_payload(state=3, last_applied_seq=0, pos_raw=5000):
+    """One-chain, one-motor tele_robot_t payload (motor at (0,0))."""
+    motor = dict(pos_raw=pos_raw, vel_raw=0, tau_raw=0, temp_c=42, state=state,
+                 cause=0, motor_mode=2, motor_fault=0, flags=0, fb_age_ms=5,
+                 fault_word=0, last_applied_seq=last_applied_seq)
+    chains = [dict(chain_id=0, spi_seq_echo=0, slave_time_us=0,
+                   cmd_crc_errors=0, can_tx_errors=0, motors=[motor])]
+    return P.pack_robot_tele(1, 0, 0, 0, 1, chains)
+
+
+def _robot_tele(state=3, last_applied_seq=0, pos_raw=5000):
+    return P.encode_frame(P.MSG_ROBOT_TELE, P.NODE_MASTER, P.NODE_JETSON,
+                          _tele_payload(state, last_applied_seq, pos_raw))
 
 
 def _master_status():
-    payload = struct.pack(P.FMT_MASTER_STATUS, 1, 0b1, 1234, 0, 99)
+    payload = struct.pack(P.FMT_MASTER_STATUS, 1, 0b1, 1234, 0, 99, 200, 200, 200, 50)
     return P.encode_frame(P.MSG_MASTER_STATUS, P.NODE_MASTER, P.NODE_JETSON, payload)
 
 
-def _motor_state_ts(slave, idx, ts_ms, state=7, pos_raw=32768):
-    """MOTOR_STATE frame with an explicit master_ts_ms (encode_frame can't set it)."""
-    atom = struct.pack(P.MOTORSTATE_FMT, pos_raw, 40000, 30000, 42, state, 0, 0, 0, 5, 0, 0)
-    payload = struct.pack(P.FMT_MOTOR_STATE_HDR, slave, idx) + atom
-    fr = bytearray(struct.pack(P.HDR_FMT, P.MSG_MOTOR_STATE, 0, P.NODE_MASTER,
+def _robot_tele_ts(ts_ms, state=7):
+    """ROBOT_TELE frame with an explicit master_ts_ms (encode_frame can't set it)."""
+    payload = _tele_payload(state=state)
+    fr = bytearray(struct.pack(P.HDR_FMT, P.MSG_ROBOT_TELE, 0, P.NODE_MASTER,
                                P.NODE_JETSON, ts_ms & 0xFFFFFFFF, len(payload),
                                P.PROTO_VERSION, 0)) + payload
     fr[14] = 0; fr[15] = 0
@@ -78,7 +88,7 @@ def _motor_state_ts(slave, idx, ts_ms, state=7, pos_raw=32768):
 
 
 def _version_mismatch_frame():
-    fr = bytearray(_motor_state(0, 1, pos_raw=1000))
+    fr = bytearray(_robot_tele(pos_raw=1000))
     fr[12] = P.PROTO_VERSION + 1          # ver_flags low byte → wrong version
     fr[14] = 0
     fr[15] = 0
@@ -110,9 +120,9 @@ class MasterLinkFakeSerial(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             lk, fake = self._make_link(d)
             try:
-                corrupt = bytearray(_motor_state(0, 2))
+                corrupt = bytearray(_robot_tele(pos_raw=1234))
                 corrupt[16] ^= 0xFF                       # break CRC → discarded on resync
-                fake.feed(_motor_state(0, 0, state=3))    # valid → state store
+                fake.feed(_robot_tele(state=3))           # valid → state store
                 fake.feed(bytes(corrupt))                 # garbage → RX_DISCARD
                 fake.feed(_version_mismatch_frame())      # wrong version → RX_FRAME, counted
                 fake.feed(_master_status())               # valid master status
@@ -137,19 +147,19 @@ class MasterLinkFakeSerial(unittest.TestCase):
                          and len(p) >= 13 and p[12] != P.PROTO_VERSION]
             self.assertEqual(len(wrong_ver), 1, "version-mismatch frame not logged as RX_FRAME")
 
-    def test_tx_mit_and_control(self):
-        from master_link.link import MitCommand, ControlRequest, ControlKind
+    def test_tx_robot_cmd(self):
+        from master_link.link import MotorCommand, MODE_MIT, MODE_HOLD
         with tempfile.TemporaryDirectory() as d:
             lk, fake = self._make_link(d)
             try:
-                lk.send_mit([MitCommand(slave=0, local=1, pos=1.5, vel=-2.0,
-                                        kp=15.0, kd=1.0, tau_ff=0.0)])
-                lk.send_control(ControlRequest(slave=0, local=0, kind=ControlKind.ARM))
-                self.assertTrue(_wait(lambda: lk.stats["tx_frames"] == 2))
+                lk.send_robot_cmd([
+                    MotorCommand(slave=0, local=0, mode=MODE_HOLD),
+                    MotorCommand(slave=0, local=1, mode=MODE_MIT, pos=1.5, vel=-2.0),
+                ])
+                self.assertTrue(_wait(lambda: lk.stats["tx_frames"] == 1))
             finally:
                 lk.close()
 
-            # Decode the captured TX bytes back through the codec.
             buf = bytearray(fake.tx)
             frames = []
             while True:
@@ -157,35 +167,35 @@ class MasterLinkFakeSerial(unittest.TestCase):
                 if r is None:
                     break
                 frames.append(r)
-                del buf[:r[4]]      # remove the consumed frame
+                del buf[:r[4]]
 
-            types = [f[0] for f in frames]
-            self.assertIn(P.MSG_MOTOR_CMD, types)
-            self.assertIn(P.MSG_CONTROL_REQ, types)
-            mit = next(f for f in frames if f[0] == P.MSG_MOTOR_CMD)
-            s, l, pos, vel, kp, kd, tau, cmd_seq = struct.unpack(P.FMT_MOTOR_CMD, mit[3])
-            self.assertEqual((s, l), (0, 1))
-            self.assertAlmostEqual(pos, 1.5, places=5)
-            self.assertAlmostEqual(kp, 15.0, places=5)
-            self.assertEqual(cmd_seq, 1)   # first send_mit tick stamps cmd_seq=1 (skips 0)
-            # TX_FRAME records present in the log.
+            self.assertEqual([f[0] for f in frames], [P.MSG_ROBOT_CMD])
+            d2 = P.parse_robot_cmd(frames[0][3])
+            self.assertEqual(d2["cmd_seq"], 1)   # first tick stamps cmd_seq=1 (skips 0)
+            motors = d2["chains"][0]["motors"]
+            self.assertEqual(motors[0]["mode_req"], MODE_HOLD)
+            self.assertEqual(motors[1]["mode_req"], MODE_MIT)
+            self.assertAlmostEqual(motors[1]["pos"], 1.5, places=3)
+            self.assertAlmostEqual(motors[1]["vel"], -2.0, places=2)
             tx = [rec for rec in BinaryLogReader(lk.log_path) if rec.kind == LOG.TX_FRAME]
-            self.assertEqual(len(tx), 2)
+            self.assertEqual(len(tx), 1)
 
     def test_live_detection_stale_then_live(self):
         with tempfile.TemporaryDirectory() as d:
             lk, fake = self._make_link(d)
             try:
-                # Stale burst: valid frames with old ts fed all at once (Δhost ≈ 0).
-                for i in range(15):
-                    fake.feed(_motor_state_ts(0, 0, 500000 + i * 5))
+                # Stale burst: master ts jumps 100 ms/frame but the whole blob drains
+                # to the host at once (Δhost ≪ Δmaster) → never live.
+                burst = b"".join(_robot_tele_ts(500000 + i * 100) for i in range(15))
+                fake.feed(burst)
                 time.sleep(0.1)
                 self.assertEqual(lk.live_motors(), set(),
                                  "went live on the stale burst")
-                # Live stream: ts advances ~5 ms, fed ~6 ms apart in real time.
-                for i in range(8):
-                    fake.feed(_motor_state_ts(0, 0, 1_000_000 + i * 5))
-                    time.sleep(0.006)
+                # Live stream: master ts advances ~10 ms, fed ~8 ms apart in real time
+                # (plus ~2 ms host decode ≈ Δmaster) → latches live.
+                for i in range(10):
+                    fake.feed(_robot_tele_ts(1_000_000 + i * 10))
+                    time.sleep(0.008)
                 self.assertTrue(_wait(lambda: (0, 0) in lk.live_motors()),
                                 "never went live on the live stream")
                 self.assertIn((0, 0), lk.configured_motors())

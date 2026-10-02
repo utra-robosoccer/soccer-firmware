@@ -22,19 +22,35 @@ extern "C" {
 #define MOTOR_T_MIN  -17.0f
 #define MOTOR_T_MAX  17.0f
 
-/* Goto-zero motion parameters */
+/* TO_ZERO motion parameters */
 #define MOTOR_ZERO_TOL 0.05f
 #define MOTOR_ZERO_RATE 0.3f
 #define MOTOR_ZERO_KP  4.0f
 #define MOTOR_ZERO_KD  1.0f
 #define MOTOR_ZERO_LEASH 0.15f
-#define MOTOR_ZERO_SETTLE_TICKS 10u
 #define MOTOR_ZERO_DAMP_KD 3.0f
-#define MOTOR_ZERO_STALL_MS 1500u
 #define MOTOR_ZERO_PROGRESS_EPS 0.01f
+#define MOTOR_WOUND_OFFSET_MAX 9.0f
 
-/* Safety-monitor parameters */
-#define MOTOR_ENABLE_MON_K     3u
+/* Timing, rates & derived tick counts (system-wide) */
+/* Configured rates (Hz) — reported in MasterStatus and the .bin header. */
+#define MASTER_POLL_HZ  200u
+#define TELEMETRY_HZ    200u
+#define SLAVE_TICK_HZ   200u
+#define HOST_CMD_HZ     50u
+
+/* Derived loop periods (ms) — do not hand-edit; change the rate instead. */
+#define MASTER_POLL_PERIOD_MS  5u
+#define MASTER_TELE_PERIOD_MS  5u
+#define MOTOR_LOOP_PERIOD_MS   5u
+#define MOTOR_LOOP_DT_S        ((float)MOTOR_LOOP_PERIOD_MS * 0.001f)
+
+/* Timeouts/debounces (ms) and tick/frame counts derived from the slave tick. */
+#define MOTOR_WATCHDOG_MS        200u
+#define MOTOR_CAN_FB_TIMEOUT_MS  100u
+#define MOTOR_ZERO_STALL_MS      1500u
+#define MOTOR_ZERO_SETTLE_TICKS  10u   /* 50 ms / 5 ms tick */
+#define MOTOR_ENABLE_MON_K       3u   /* 15 ms / 5 ms tick */
 
 /* Motor models present on the bus */
 typedef enum {

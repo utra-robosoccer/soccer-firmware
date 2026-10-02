@@ -127,10 +127,12 @@ def _load_cmd(folder, offset):
         if h is None:
             continue
         t = h + offset
-        if r.get("opcode") == "MIT":
+        mode = r.get("mode_name", "")
+        if mode == "MIT":
             out[r["motor"]]["mit"].append((t, _f(r["pos"]), _f(r["vel"]), _f(r["tau_ff"])))
         else:
-            out[r["motor"]]["ctrl"].append((t, r.get("opcode", "")))
+            # Non-MIT mode requests (HOLD/DAMPED/TO_ZERO/IDLE) overlay as events.
+            out[r["motor"]]["ctrl"].append((t, mode))
     return out
 
 

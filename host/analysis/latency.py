@@ -82,27 +82,38 @@ def analyze(path):
             if not res:
                 continue
             mt, seq, ts_ms, pl, _ = res
-            if mt == P.MSG_MOTOR_STATE:
-                d = P.parse_motor_state(pl)
+            if mt == P.MSG_ROBOT_TELE:
+                d = P.parse_robot_tele(pl)
                 if d:
-                    ms.append((rec.ts_ns, d["tau"]))
-                    key = (d["slave_id"], d["motor_idx"])
-                    tele_by_motor.setdefault(key, []).append(
-                        (rec.ts_ns, d["last_applied_seq"]))
+                    for ch in d["chains"]:
+                        sid = ch["chain_id"]
+                        for local, mo in enumerate(ch["motors"]):
+                            key = (sid, local)
+                            ms.append((rec.ts_ns, mo.tau))
+                            tele_by_motor.setdefault(key, []).append(
+                                (rec.ts_ns, mo.last_applied_seq))
             elif mt == P.MSG_PING:
                 rx_ping.setdefault(seq, rec.ts_ns)
         elif rec.kind == LOG.TX_FRAME:
             if len(rec.payload) < P.HDR_SIZE:
                 continue
             mt, seq, src, dst, ts_ms, plen, ver, crc = struct.unpack_from(P.HDR_FMT, rec.payload)
-            if mt == P.MSG_MOTOR_CMD:
-                s, l, pos, vel, kp, kd, tau, cmd_seq = struct.unpack_from(
-                    P.FMT_MOTOR_CMD, rec.payload, P.HDR_SIZE)
-                tx_step.append((rec.ts_ns, pos))
-                cmd_by_motor.setdefault((s, l), []).append((rec.ts_ns, cmd_seq))
-                t = tick_cmds.setdefault(cmd_seq, {"ts": rec.ts_ns, "motors": set()})
-                t["ts"] = min(t["ts"], rec.ts_ns)
-                t["motors"].add((s, l))
+            if mt == P.MSG_ROBOT_CMD:
+                d = P.parse_robot_cmd(rec.payload[P.HDR_SIZE:])
+                if not d:
+                    continue
+                cmd_seq = d["cmd_seq"]
+                for ch in d["chains"]:
+                    sid = ch["chain_id"]
+                    for local, m in enumerate(ch["motors"]):
+                        if m["mode_req"] != P.REQ_MIT:
+                            continue   # only MIT targets get last_applied echoes
+                        key = (sid, local)
+                        tx_step.append((rec.ts_ns, m["pos"]))
+                        cmd_by_motor.setdefault(key, []).append((rec.ts_ns, cmd_seq))
+                        t = tick_cmds.setdefault(cmd_seq, {"ts": rec.ts_ns, "motors": set()})
+                        t["ts"] = min(t["ts"], rec.ts_ns)
+                        t["motors"].add(key)
             elif mt == P.MSG_PING:
                 tx_ping.setdefault(seq, rec.ts_ns)
 

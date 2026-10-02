@@ -13,13 +13,14 @@
 #include "proto_common.h"
 #include "main.h"
 
-/* SPI command opcodes (SPI_CMD_*) and index macros are defined once in the
-   shared common/include/protocol.h (via proto_common.h) so master and slave
-   cannot drift. */
+/* SPI opcodes (SPI_OP_*) and frame-size macros are defined once in the shared
+   common/include/protocol.h (via proto_common.h) so master and slave cannot
+   drift. One chain per slave → fixed frame sizes (no per-N arithmetic):
+     master→slave: [opcode][spi_seq][cycle_id][cmd_seq][cmd_chain_t][crc16]  (70 B)
+     slave→master: [tele_chain_t][crc16]                                     (119 B) */
 
-/* slave→master telemetry frame (see protocol.h SPI_TELE_FRAME_SIZE):
-   [alive_mask u8][echo_seq u8][MotorState × N][slave_debug_rsvd[8]][crc16 u16] */
-#define PAYLOAD_LENGTH SPI_TELE_FRAME_SIZE(N_MOTORS)
+/* The full-duplex transfer is the larger of the two frames. */
+#define PAYLOAD_LENGTH SPI_XFER_SIZE
 /* DMA buffers must hold the full frame; round up to a 32-byte multiple. */
 #define BUFFER_SIZE    (((PAYLOAD_LENGTH) + 31u) & ~31u)
 

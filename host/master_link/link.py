@@ -11,7 +11,6 @@ import threading
 import time
 from dataclasses import dataclass
 from datetime import datetime
-from enum import Enum
 
 import serial
 from serial.tools import list_ports
@@ -66,35 +65,31 @@ class _LiveDetector:
 
 
 # ── command / state types (owned here; policies import them) ──────────────────
-class ControlKind(Enum):
-    ARM = "arm"
-    GOTO_ZERO = "goto_zero"
-    DISABLE = "disable"
+# Mode-request constants mirror protocol.MotorModeReq (re-exported for policies).
+MODE_IDLE    = P.REQ_IDLE
+MODE_HOLD    = P.REQ_HOLD
+MODE_MIT     = P.REQ_MIT
+MODE_DAMPED  = P.REQ_DAMPED
+MODE_TO_ZERO = P.REQ_TO_ZERO
 
-
-_CTRL_OPCODE = {
-    ControlKind.ARM:       P.CTRL_ARM_HOLD,
-    ControlKind.GOTO_ZERO: P.CTRL_GOTO_ZERO,
-    ControlKind.DISABLE:   P.CTRL_DISABLE,
-}
+# Armed lifecycles (tele_motor_t.state): HOLD/MIT/DAMPED/TO_ZERO.
+_ARMED_STATES = (P.LIFE_HOLD, P.LIFE_MIT, P.LIFE_DAMPED, P.LIFE_TO_ZERO)
 
 
 @dataclass
-class MitCommand:
+class MotorCommand:
+    """One motor's level-triggered mode request + targets for a tick. Built by a
+    policy and sent (with every other motor's) as one cmd_robot_t per tick."""
     slave: int
     local: int
+    mode: int = P.REQ_IDLE            # MotorModeReq
     pos: float = 0.0
     vel: float = 0.0
     kp: float = 0.0
     kd: float = 0.0
     tau_ff: float = 0.0
-
-
-@dataclass
-class ControlRequest:
-    slave: int
-    local: int
-    kind: ControlKind
+    use_config_gains: bool = True     # ignore wire kp/kd, use the slave's config
+    fault_reset: bool = False         # clear a latched fault this tick
 
 
 @dataclass(frozen=True)
@@ -102,32 +97,44 @@ class MotorSnap:
     slave: int
     local: int
     gidx: int | None
-    state: int
-    cause: int
+    state: int          # MotorLifecycle (LIFE_*)
+    cause: int          # MotorFaultCause
     pos: float
     vel: float
     tau: float
     temp: float
+    motor_mode: int     # RS Type-2 run mode (0 reset/1 cal/2 normal)
     motor_fault: int
-    cmd_flags: int
+    flags: int          # TELE_FLAG_*
     fault_word: int
     fb_age: int
-    last_applied_seq: int  # host cmd_seq the motor last confirmed applied (0 = none)
+    last_applied_seq: int
     master_ts_ms: int   # MsgHeader.ts_ms (master tick at emit)
     recv_ns: int        # host monotonic_ns at receipt
+
+    @property
+    def request_rejected(self) -> bool: return bool(self.flags & P.TELE_FLAG_REQUEST_REJECTED)
+    @property
+    def to_zero_arrived(self) -> bool: return bool(self.flags & P.TELE_FLAG_TO_ZERO_ARRIVED)
+    @property
+    def saturated(self) -> bool: return bool(self.flags & P.TELE_FLAG_SATURATED)
+    @property
+    def state_name(self) -> str: return P.LIFECYCLE_NAMES.get(self.state, f"?{self.state}")
+    @property
+    def cause_name(self) -> str: return P.CAUSE_NAMES.get(self.cause, f"?{self.cause}")
 
 
 @dataclass(frozen=True)
 class LinkState:
     motors: dict            # (slave, local) -> MotorSnap
-    master: dict | None     # robot_state, slave_alive, uptime_ms, link_errors, rx_frames
+    master: dict | None     # robot_state, slave_alive, uptime_ms, link_errors, rx_frames, rates
     slaves: dict            # slave_id -> dict(motors_alive, crc_errors, cmd_crc_errors, seq_gaps)
-    last_control_resp: dict | None
+    robot: dict | None      # tele_robot_t meta: cycle_id, last_cmd_seq_rx, missed_deadlines, ...
     stamp_ns: int
 
     def armed_motors(self):
-        """(slave, local) of motors currently in an armed lifecycle (HOLD/MIT)."""
-        return [k for k, m in self.motors.items() if m.state in (3, 7)]
+        """(slave, local) of motors currently in an armed lifecycle."""
+        return [k for k, m in self.motors.items() if m.state in _ARMED_STATES]
 
 
 class MasterLink:
@@ -156,7 +163,8 @@ class MasterLink:
         self._motors: dict = {}
         self._master: dict | None = None
         self._slaves: dict = {}
-        self._last_ctrl: dict | None = None
+        self._robot: dict | None = None  # latest tele_robot_t meta (cycle_id etc.)
+        self._cycle_id = 0               # last master cycle_id seen (echoed in commands)
         self._live: dict = {}            # (slave, local) -> _LiveDetector
         self._live_logged = False        # EVENT "live" emitted once, on first live motor
 
@@ -164,8 +172,8 @@ class MasterLink:
         self._rx_frames = 0
         self._tx_frames = 0
         self._tx_errors = 0
-        # Monotonic command sequence, one per send_mit tick. Starts at 1; 0 is the
-        # CMD_SEQ_NONE sentinel ("none applied"), so wrap skips it (…65535 → 1).
+        # Monotonic command sequence, one per send_robot_cmd tick. Starts at 1; 0 is
+        # the CMD_SEQ_NONE sentinel ("none applied"), so wrap skips it (…65535 → 1).
         self._cmd_seq = 0
         self._discard_records = 0
         self._discard_bytes = 0
@@ -217,31 +225,43 @@ class MasterLink:
                 mt, _seq, ts_ms, pl, consumed = r
                 del buf[:consumed]      # decode_frame does not remove accepted frames
                 self._ingest(mt, ts_ms, pl, time.monotonic_ns())
-            time.sleep(0.001)
+            # Poll faster than the telemetry period so the host out-drains the
+            # master's ~200 Hz full-robot stream and no standing backlog builds
+            # (a 1 ms sleep sat just under the emit rate → ~120 ms of buffering).
+            time.sleep(0.0002)
 
     def _ingest(self, mt: int, ts_ms: int, pl: bytes, recv_ns: int) -> None:
-        if mt == P.MSG_MOTOR_STATE:
-            d = P.parse_motor_state(pl)
+        if mt == P.MSG_ROBOT_TELE:
+            d = P.parse_robot_tele(pl)
             if not d:
                 return
-            key = (d["slave_id"], d["motor_idx"])
-            snap = MotorSnap(
-                slave=d["slave_id"], local=d["motor_idx"], gidx=self._gidx.get(key),
-                state=d["state"], cause=d["cause"], pos=d["pos"], vel=d["vel"],
-                tau=d["tau"], temp=d["temp"], motor_fault=d["motor_fault"],
-                cmd_flags=d["cmd_flags"], fault_word=d["fault_word"], fb_age=d["fb_age"],
-                last_applied_seq=d["last_applied_seq"],
-                master_ts_ms=ts_ms, recv_ns=recv_ns)
             log_live = False
             with self._lock:
-                self._motors[key] = snap
-                det = self._live.get(key)
-                if det is None:
-                    det = _LiveDetector()
-                    self._live[key] = det
-                if det.update(ts_ms, recv_ns) and not self._live_logged:
-                    self._live_logged = True
-                    log_live = True
+                self._robot = dict(cycle_id=d["cycle_id"], master_time_us=d["master_time_us"],
+                                   last_cmd_seq_rx=d["last_cmd_seq_rx"],
+                                   missed_deadlines=d["missed_deadlines"],
+                                   n_chains=d["n_chains"], robot_state=d["robot_state"],
+                                   recv_ns=recv_ns)
+                self._cycle_id = d["cycle_id"]
+                for ch in d["chains"]:
+                    sid = ch["chain_id"]
+                    for local, mo in enumerate(ch["motors"]):
+                        key = (sid, local)
+                        self._motors[key] = MotorSnap(
+                            slave=sid, local=local, gidx=self._gidx.get(key),
+                            state=mo.state, cause=mo.cause, pos=mo.pos, vel=mo.vel,
+                            tau=mo.tau, temp=mo.temp, motor_mode=mo.motor_mode,
+                            motor_fault=mo.motor_fault, flags=mo.flags,
+                            fault_word=mo.fault_word, fb_age=mo.fb_age_ms,
+                            last_applied_seq=mo.last_applied_seq,
+                            master_ts_ms=ts_ms, recv_ns=recv_ns)
+                        det = self._live.get(key)
+                        if det is None:
+                            det = _LiveDetector()
+                            self._live[key] = det
+                        if det.update(ts_ms, recv_ns) and not self._live_logged:
+                            self._live_logged = True
+                            log_live = True
             if log_live:
                 self._log.write(LOG.EVENT, b"live")
         elif mt == P.MSG_MASTER_STATUS:
@@ -255,12 +275,6 @@ class MasterLink:
             if d:
                 with self._lock:
                     self._slaves[d["slave_id"]] = d
-        elif mt == P.MSG_CONTROL_RESP:
-            d = P.parse_control_resp(pl)
-            if d:
-                d["recv_ns"] = recv_ns
-                with self._lock:
-                    self._last_ctrl = d
 
     # ── snapshot ──────────────────────────────────────────────────────────────
     def latest_state(self) -> LinkState:
@@ -269,7 +283,7 @@ class MasterLink:
                 motors=dict(self._motors),
                 master=dict(self._master) if self._master else None,
                 slaves={k: dict(v) for k, v in self._slaves.items()},
-                last_control_resp=dict(self._last_ctrl) if self._last_ctrl else None,
+                robot=dict(self._robot) if self._robot else None,
                 stamp_ns=time.monotonic_ns())
 
     # ── startup liveness ────────────────────────────────────────────────────────
@@ -301,6 +315,11 @@ class MasterLink:
         with self._tx_lock:
             try:
                 self._ser.write(frame)
+                # No flush(): pyserial flush()=tcdrain() blocks the caller (the
+                # runner thread) until the OS drains the TX buffer. The earlier
+                # write starvation was the saturated 714 B telemetry stream, now
+                # fixed by the master transmitting only the populated tele prefix
+                # (~26 KB/s), so the link isn't saturated and writes deliver promptly.
             except (serial.SerialException, OSError) as e:
                 with self._lock:
                     self._tx_errors += 1
@@ -311,14 +330,15 @@ class MasterLink:
         self._log.write(LOG.TX_FRAME, frame, ts_ns=ts)
         return True
 
-    def send_mit(self, cmds) -> None:
-        """Send one MSG_MOTOR_CMD per command (any subset of motors).
+    def send_robot_cmd(self, cmds) -> None:
+        """Send one MSG_ROBOT_CMD (cmd_robot_t) for this tick from a list of
+        MotorCommand. Commands are grouped into per-slave chains (chain_id = slave).
 
-        All commands in one call share a single cmd_seq (one per policy tick):
-        latency.py measures a tick as applied once every commanded motor reports
-        last_applied_seq >= this value. The counter advances once per call, starting
-        at 1 and skipping 0 on wrap (0 = CMD_SEQ_NONE, "none applied")."""
-        import struct
+        All motors in one call share a single cmd_seq (one per tick): latency.py
+        treats a tick as applied once every commanded motor reports
+        last_applied_seq >= it. The counter advances once per call, starting at 1
+        and skipping 0 on wrap (0 = CMD_SEQ_NONE). cycle_id echoes the last master
+        cycle seen (deadline/apply semantics come with the master-clock task)."""
         cmds = list(cmds)
         if not cmds:
             return
@@ -326,17 +346,28 @@ class MasterLink:
         if seq > 0xFFFF:
             seq = 1
         self._cmd_seq = seq
-        for c in cmds:
-            payload = struct.pack(P.FMT_MOTOR_CMD, c.slave, c.local,
-                                  c.pos, c.vel, c.kp, c.kd, c.tau_ff, seq)
-            self._write_frame(P.encode_frame(P.MSG_MOTOR_CMD, P.NODE_JETSON,
-                                             P.NODE_MASTER, payload))
+        with self._lock:
+            cycle_id = self._cycle_id
 
-    def send_control(self, req: ControlRequest) -> None:
-        import struct
-        payload = struct.pack(P.FMT_CONTROL_REQ, req.slave, req.local,
-                              _CTRL_OPCODE[req.kind], 0)
-        self._write_frame(P.encode_frame(P.MSG_CONTROL_REQ, P.NODE_JETSON,
+        # Group by slave → chains, motors ordered by local index.
+        by_slave: dict = {}
+        for c in cmds:
+            by_slave.setdefault(c.slave, []).append(c)
+        chains = []
+        for sid in sorted(by_slave):
+            motors = []
+            for c in sorted(by_slave[sid], key=lambda m: m.local):
+                flags = P.CMD_FLAG_VALID
+                if c.use_config_gains:
+                    flags |= P.CMD_FLAG_USE_CONFIG_GAINS
+                if c.fault_reset:
+                    flags |= P.CMD_FLAG_FAULT_RESET
+                motors.append(dict(mode_req=c.mode, pos=c.pos, vel=c.vel,
+                                   kp=c.kp, kd=c.kd, tau_ff=c.tau_ff, flags=flags))
+            chains.append(dict(chain_id=sid, motors=motors))
+
+        payload = P.pack_robot_cmd(cycle_id, seq, chains)
+        self._write_frame(P.encode_frame(P.MSG_ROBOT_CMD, P.NODE_JETSON,
                                          P.NODE_MASTER, payload))
 
     # ── log helpers (for the runner) ──────────────────────────────────────────

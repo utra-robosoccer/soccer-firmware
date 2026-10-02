@@ -13,8 +13,8 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.abspath(os.path.join(HERE, "..", ".."))
 sys.path.insert(0, os.path.join(ROOT, "host", "apps"))   # run_policy is a script, not a pkg
 
-from policies.base import Policy, Action                       # noqa: E402
-from policies.man_1s_1m_policy import Man1s1mPolicy, _MIT, SINE_OMEGA, SINE_FREQ_HZ  # noqa: E402
+from policies.base import Policy, Action, MODE_MIT             # noqa: E402
+from policies.man_1s_1m_policy import Man1s1mPolicy, SINE_OMEGA, SINE_FREQ_HZ  # noqa: E402
 
 
 class _FakeState:
@@ -36,8 +36,7 @@ class _FakeLink:
     def wait_until_live(self, keys=None, timeout=2.0):
         return True, set()
 
-    def send_mit(self, cmds): pass
-    def send_control(self, req): pass
+    def send_robot_cmd(self, cmds): pass
     def log_event(self, text): pass
     def log_annotation(self, text): pass
     def log_loop_timing(self, *a): pass
@@ -102,10 +101,10 @@ class RunPolicyLiveGate(unittest.TestCase):
 class ManMitUsesInjectedTime(unittest.TestCase):
     def test_mit_phase_follows_t_ns(self):
         p = Man1s1mPolicy()
-        s, l, kp, kd, center, amp = p._motors[0]
-        # simulate an 's' (ARM_MIT) keypress without a keyboard/clock
+        s, l, center, amp = p._motors[0]
+        # simulate an 's' (MIT) keypress without a keyboard/clock
         with p._lock:
-            p._mode = _MIT
+            p._mode = MODE_MIT
             p._mit_restart = True
 
         # Use times far from the real clock to prove no clock is read.
@@ -113,21 +112,25 @@ class ManMitUsesInjectedTime(unittest.TestCase):
         quarter_ns = int((0.25 / SINE_FREQ_HZ) * 1e9)   # T/4
 
         a0 = p.step(None, t0)             # first MIT tick → seeds phase origin, sin(0)=0
-        self.assertTrue(a0.mit)
-        self.assertAlmostEqual(a0.mit[0].pos, center, places=6)
-        self.assertAlmostEqual(a0.mit[0].vel, amp * SINE_OMEGA, places=6)  # cos(0)=1
+        self.assertTrue(a0.motors)
+        self.assertEqual(a0.motors[0].mode, MODE_MIT)
+        self.assertAlmostEqual(a0.motors[0].pos, center, places=6)
+        self.assertAlmostEqual(a0.motors[0].vel, amp * SINE_OMEGA, places=6)  # cos(0)=1
 
         a1 = p.step(None, t0 + quarter_ns)               # quarter period → +peak
-        self.assertAlmostEqual(a1.mit[0].pos, center + amp, places=4)
-        self.assertAlmostEqual(a1.mit[0].vel, 0.0, places=4)
+        self.assertAlmostEqual(a1.motors[0].pos, center + amp, places=4)
+        self.assertAlmostEqual(a1.motors[0].vel, 0.0, places=4)
 
         a2 = p.step(None, t0)            # back to origin time → back to center (pure fn of t_ns)
-        self.assertAlmostEqual(a2.mit[0].pos, center, places=6)
+        self.assertAlmostEqual(a2.motors[0].pos, center, places=6)
 
     def test_step_accepts_t_ns_signature(self):
-        # listen and man both accept (state, t_ns)
+        # listen now requests IDLE for every motor each tick (not empty).
         from policies.listen_policy import ListenPolicy
-        self.assertTrue(ListenPolicy().step(_FakeState(), 123).is_empty())
+        from master_link.link import MODE_IDLE
+        act = ListenPolicy().step(_FakeState(), 123)
+        self.assertTrue(act.motors)
+        self.assertTrue(all(c.mode == MODE_IDLE for c in act.motors))
 
 
 if __name__ == "__main__":

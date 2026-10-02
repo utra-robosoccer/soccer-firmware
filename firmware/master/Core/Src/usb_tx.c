@@ -2,14 +2,19 @@
 #include "usbd_cdc_if.h"
 #include <string.h>
 
-#define RING_SIZE  4096u   /* must be power-of-two */
+#define RING_SIZE  8192u   /* must be power-of-two */
 #define RING_MASK  (RING_SIZE - 1u)
-#define PKT_MAX    64u     /* USB FS CDC max packet */
+/* Per-transfer drain chunk = one USB FS packet. Larger multi-packet IN transfers
+   raise TX throughput but starve the shared OTG core's multi-packet OUT reception
+   (host→master ROBOT_CMD frames then never complete). We don't need the extra TX
+   headroom: the master transmits only the POPULATED telemetry prefix (emit_robot_tele),
+   so one chain is ~129 B; at 200 Hz that's ~26 KB/s, well under this ~64 KB/s ceiling. */
+#define TX_CHUNK   64u
 
 static uint8_t  ring[RING_SIZE];
 static uint16_t head = 0;   /* write pointer */
 static uint16_t tail = 0;   /* read  pointer */
-static uint8_t  staging[PKT_MAX];
+static uint8_t  staging[TX_CHUNK];
 
 static uint16_t ring_used(void) { return (head - tail) & RING_MASK; }
 static uint16_t ring_free(void) { return (RING_SIZE - 1u) - ring_used(); }
@@ -38,7 +43,7 @@ void usb_tx_pump(void)
     uint16_t avail = ring_used();
     if (avail == 0u) return;
 
-    uint16_t n = (avail > PKT_MAX) ? PKT_MAX : avail;
+    uint16_t n = (avail > TX_CHUNK) ? TX_CHUNK : avail;
 
     /* Peek: copy without consuming */
     uint16_t peek = tail;

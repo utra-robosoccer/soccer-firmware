@@ -51,3 +51,13 @@ MOTOR_SOFT_MAX = [m["soft_max"] for m in MOTORS]
 
 # Motor counts per slave, in slave order.
 SLAVE_MOTOR_COUNTS = [len(s["motors"]) for s in SLAVES]
+
+# ── Configured rates (Hz) — mirror the firmware motor_config.h; recorded in the
+# .bin header and used as the run_policy --rate default (HOST_CMD_HZ). ──────────
+MASTER_POLL_HZ = 200
+TELEMETRY_HZ   = 200
+SLAVE_TICK_HZ  = 200
+HOST_CMD_HZ    = 50
+
+RATES = dict(master_poll_hz=MASTER_POLL_HZ, telemetry_hz=TELEMETRY_HZ,
+             slave_tick_hz=SLAVE_TICK_HZ, host_cmd_hz=HOST_CMD_HZ)

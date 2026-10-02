@@ -1,74 +1,43 @@
 /*
- * spi_proto.h — SPI master<->slave frame codec (pure, host-testable).
+ * spi_proto.h — SPI master↔slave frame codec (pure, host-testable).
  *
- * Owns the wire framing that used to be scattered across main.c (telemetry
- * assembly + command parse) and motor_runtime.c (pack_tele). No HAL / hardware
- * dependency: it operates only on byte buffers and the wire structs defined in
- * the single shared common/include/protocol.h, so it compiles and is unit-tested
- * on the host (see firmware/common/test/test_spi_proto.c).
+ * PROTO_VERSION 3 hierarchy: one chain per slave, so each SPI transfer carries a
+ * single cmd_chain_t / tele_chain_t (fixed size). No HAL dependency — operates on
+ * byte buffers and the shared wire structs in common/include/protocol.h, so it is
+ * unit-tested on the host (firmware/common/test/test_spi_proto.c).
  *
- * The frame layout itself is unchanged — this is a faithful extraction, and the
- * host golden tests require byte-identical output to the pre-extraction code.
+ *   master → slave: [opcode u8][spi_seq u8][cycle_id u16][cmd_seq u16]
+ *                   [cmd_chain_t][crc16]
+ *   slave → master: [tele_chain_t][crc16]
  */
 #ifndef SPI_PROTO_H
 #define SPI_PROTO_H
 
 #include <stdint.h>
 #include <stddef.h>
-#include "proto_common.h"  /* MotorState, SpiMitCmd, SPI_* macros, proto_crc16,
-                              MOTOR_*_MIN/MAX, SPI_STATE_PACK (via protocol.h +
-                              motor_config.h). One shared header, no mirroring. */
+#include "proto_common.h"   /* protocol.h wire structs + proto_crc16 + SPI_* macros */
 
 #ifdef __cplusplus
 extern "C" {
 #endif
 
-/* Neutral per-motor sample the control layer produces; the codec turns it into
-   the 16-byte wire MotorState atom. Keeping this separate from MotorRuntime lets
-   the codec stay independent of the control layer (and of HAL). */
+/* Decoded master→slave command header (the bytes before the cmd_chain_t). */
 typedef struct {
-    float    pos;          /* rad   */
-    float    vel;          /* rad/s */
-    float    tau;          /* Nm    */
-    float    temp;         /* deg C */
-    uint8_t  life;         /* MotorLifecycle  (low nibble of state)  */
-    uint8_t  cause;        /* MotorFaultCause (high nibble of state) */
-    uint8_t  motor_fault;  /* packed RS fault bits                   */
-    uint8_t  cmd_flags;    /* SPI_CMDFLAG_*                          */
-    uint32_t fault_word;   /* latched 0x3022                         */
-    uint32_t fb_age_ms;    /* ms since last feedback (codec saturates to u8) */
-    uint16_t last_applied_seq; /* host cmd_seq last confirmed applied (0 = none) */
-} MotorSample;
+    uint8_t  opcode;    /* SPI_OP_NOP / SPI_OP_ROBOT_CMD                 */
+    uint8_t  spi_seq;   /* SPI link-health seq to echo back              */
+    uint16_t cycle_id;  /* master poll counter                          */
+    uint16_t cmd_seq;   /* host command sequence (one per host tick)     */
+} SpiCmdHdr;
 
-/* Encode one sample into a wire atom. Byte-identical to the former
-   motor_runtime_pack_tele(): float->raw scaling, temp clamp, state nibble pack,
-   fb_age saturation at 255, reserved_v2 = 0. */
-void spi_proto_encode_atom(MotorState *out, const MotorSample *s);
+/* Verify the command-frame CRC, extract the header, and copy out the cmd_chain_t.
+ * Returns 1 on a CRC-valid frame (*hdr and *chain filled), 0 otherwise (*hdr and
+ * *chain zeroed). The caller owns dispatch and error counting. */
+uint8_t spi_proto_parse_cmd(const uint8_t *frame, SpiCmdHdr *hdr, cmd_chain_t *chain);
 
-/* Assemble a full slave->master telemetry frame into `frame` (which must be
-   SPI_TELE_FRAME_SIZE(n) bytes): [alive_mask][echo_seq][atom x n]
-   [cmd_crc_errors u32 LE | zero_rejects u32 LE][crc16]. */
-void spi_proto_build_tele(uint8_t *frame, uint8_t n,
-                          uint8_t alive_mask, uint8_t echo_seq,
-                          const MotorSample *samples,
-                          uint32_t cmd_crc_errors, uint32_t zero_rejects);
-
-/* Decoded master->slave command header (no side effects). */
-typedef struct {
-    uint8_t opcode;     /* cmd low nibble (SPI_CMD_*)                 */
-    uint8_t seq;        /* command seq to echo back                  */
-    uint8_t motor_idx;  /* cmd high nibble (ARM / GOTO_ZERO target)  */
-    uint8_t n_mit;      /* SpiMitCmd slot count carried (== n)       */
-} ParsedCmd;
-
-/* Verify the command-frame CRC and extract the header fields. Returns 1 when the
-   CRC is valid (and *out is filled), 0 otherwise (*out zeroed). The caller owns
-   dispatch and error counting. */
-uint8_t spi_proto_parse(const uint8_t *frame, uint8_t n, ParsedCmd *out);
-
-/* Copy MIT slot i out of a command frame into *out (memcpy — unaligned-safe,
-   matching the pre-extraction parse). */
-void spi_proto_read_mit(const uint8_t *frame, uint8_t i, SpiMitCmd *out);
+/* Assemble a full slave→master telemetry frame into `frame` (SPI_TELE_FRAME_SIZE
+ * bytes): the tele_chain_t followed by a CRC16 over it. `chain` is the fully
+ * populated wire struct. */
+void spi_proto_build_tele(uint8_t *frame, const tele_chain_t *chain);
 
 #ifdef __cplusplus
 }

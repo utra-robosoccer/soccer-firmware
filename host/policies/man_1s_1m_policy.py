@@ -1,26 +1,21 @@
-"""man_1s_1m — MANual, 1 Slave, 1 Motor.
+"""man_1s_1m — MANual, keyboard-driven bench policy (all motors together).
 
-A keyboard-driven policy for bench bring-up. Same key bindings as test_client /
-dashboard, but with **no per-motor selection**: every command applies to ALL
-configured motors at once. There is no live view — run_policy is already logging
-the session, so plot the .bin afterwards.
+Level-triggered: every tick it sends the CURRENT mode request for all configured
+motors (one cmd_robot_t). Same key feel as before, now over the mode state machine.
 
 Keys (all motors together):
-    a   ARM_HOLD    → ARMED_HOLD (firmware holds position)
-    z   GOTO_ZERO   → crawl to zero, then hold
-    s   ARM_MIT     → stream a sine inside the soft limits (arm with `a` first)
-    d   IDLE        → DISABLE (motor goes to IDLE)
-    q   QUIT        → clean shutdown (run_policy disables + flushes the log)
+    a   HOLD       → arm + hold current position (the only arm-from-IDLE path)
+    z   TO_ZERO    → creep to home-frame 0 and hold (arm with `a` first)
+    s   MIT        → stream an in-range sine (arm with `a` first)
+    x   DAMPED     → Kp=0 + damping Kd (backdrive by hand; arm first)
+    d   IDLE       → disarm
+    f   fault-reset→ clear a latched fault (sent once, with the current mode)
+    q   QUIT       → clean shutdown
     ?   help
 
 The sine is centred on each motor's soft-limit midpoint and peaks SINE_MARGIN_DEG
-INSIDE the limits, so it never engages the slave's clamp — the same in-range sweep
-the dashboard used. (Commanding past the limits instead drives the joint into the
-clamp; on turn-around the preserved return-velocity feedforward spikes the kd
-torque term and trips CAUSE_OVERTORQUE — which is why a full ±90° command tripped
-while this in-range sweep does not.) Control frames (a/z/d) are edge-triggered —
-sent once per keypress; the MIT sine streams every tick while in ARM_MIT. Send rate
-is run_policy's --rate (bump it, e.g. --rate 200, for a smoother sine).
+INSIDE the limits, so it never engages the slave's clamp. Send rate is
+run_policy's --rate.
 """
 import math
 import os
@@ -32,25 +27,29 @@ import threading
 import tty
 
 from master_link.motor_config_gen import (
-    MOTORS, MOTOR_DEFAULT_KP, MOTOR_DEFAULT_KD, MOTOR_SOFT_MIN, MOTOR_SOFT_MAX,
+    MOTORS, MOTOR_SOFT_MIN, MOTOR_SOFT_MAX,
 )
 
-from .base import Policy, Action, MitCommand, ControlRequest, ControlKind, LinkState
+from .base import (
+    Policy, Action, MotorCommand, LinkState,
+    MODE_IDLE, MODE_HOLD, MODE_MIT, MODE_DAMPED, MODE_TO_ZERO,
+)
 
 # ── sine parameters (stays inside the soft limits — never hits the clamp) ────────
-SINE_FREQ_HZ    = 0.4                       # matches the dashboard/test_client sweep
+SINE_FREQ_HZ    = 0.4
 SINE_OMEGA      = 2.0 * math.pi * SINE_FREQ_HZ
-SINE_MARGIN_DEG = 5.0                       # keep the peaks this far inside each limit
+SINE_MARGIN_DEG = 5.0
 SINE_MARGIN_RAD = math.radians(SINE_MARGIN_DEG)
 
-# ── modes ───────────────────────────────────────────────────────────────────
-_NONE, _IDLE, _ZERO, _HOLD, _MIT = range(5)
-_CTRL_OF = {_IDLE: ControlKind.DISABLE, _ZERO: ControlKind.GOTO_ZERO, _HOLD: ControlKind.ARM}
-_MODE_NAME = {_NONE: "—", _IDLE: "IDLE", _ZERO: "GOTO_ZERO", _HOLD: "ARM_HOLD", _MIT: "ARM_MIT"}
+_MODE_OF = {
+    "a": MODE_HOLD, "z": MODE_TO_ZERO, "s": MODE_MIT, "x": MODE_DAMPED, "d": MODE_IDLE,
+}
+_MODE_NAME = {MODE_IDLE: "IDLE", MODE_HOLD: "HOLD", MODE_MIT: "MIT",
+              MODE_DAMPED: "DAMPED", MODE_TO_ZERO: "TO_ZERO"}
 
 _HELP = (
-    "  a ARM_HOLD (all)   z GOTO_ZERO (all)   s ARM_MIT/sine in-range (all)\n"
-    "  d IDLE (all)       q QUIT             ? help\n"
+    "  a HOLD   z TO_ZERO   s MIT/sine   x DAMPED   d IDLE\n"
+    "  f fault-reset        q QUIT       ? help\n"
 )
 
 
@@ -58,21 +57,17 @@ class Man1s1mPolicy(Policy):
     name = "man_1s_1m"
 
     def __init__(self):
-        # Every configured motor, addressed together (no selection). Each carries
-        # its own sine center/amplitude derived from its soft limits, so the sweep
-        # stays SINE_MARGIN_DEG inside the clamp on every motor.
         self._motors = []
         for g, m in enumerate(MOTORS):
             lo, hi = MOTOR_SOFT_MIN[g], MOTOR_SOFT_MAX[g]
             center = 0.5 * (lo + hi)
             amp = max(0.0, 0.5 * (hi - lo) - SINE_MARGIN_RAD)
-            self._motors.append((m["slave"], m["idx"], MOTOR_DEFAULT_KP[g],
-                                 MOTOR_DEFAULT_KD[g], center, amp))
+            self._motors.append((m["slave"], m["idx"], center, amp))
         self._lock = threading.Lock()
-        self._mode = _NONE
-        self._ctrl_pending = False   # edge-triggered: emit one control frame this tick
-        self._mit_t0 = 0             # ns; captured from the runner's t_ns on MIT entry
-        self._mit_restart = False    # set on MIT entry; step() re-seeds _mit_t0 from t_ns
+        self._mode = MODE_IDLE
+        self._fault_reset_pending = False
+        self._mit_t0 = 0
+        self._mit_restart = False
 
         self._stop = threading.Event()
         self._kb = None
@@ -87,7 +82,7 @@ class Man1s1mPolicy(Policy):
             return
         self._fd = sys.stdin.fileno()
         self._old_term = termios.tcgetattr(self._fd)
-        tty.setcbreak(self._fd)   # leaves ISIG on, so Ctrl-C still reaches run_policy
+        tty.setcbreak(self._fd)
         print("\n── man_1s_1m (all motors together) ──")
         print(_HELP, flush=True)
         self._kb = threading.Thread(target=self._kb_loop, name="man-kbd", daemon=True)
@@ -105,10 +100,8 @@ class Man1s1mPolicy(Policy):
     def _set_mode(self, mode: int) -> None:
         with self._lock:
             self._mode = mode
-            if mode == _MIT:
-                self._mit_restart = True    # step() seeds _mit_t0 from the injected t_ns
-            else:
-                self._ctrl_pending = True   # control modes send one frame on entry
+            if mode == MODE_MIT:
+                self._mit_restart = True
         print(f"→ {_MODE_NAME[mode]} (all)", flush=True)
 
     def _kb_loop(self) -> None:
@@ -125,17 +118,14 @@ class Man1s1mPolicy(Policy):
                 break
             if not ch:
                 continue
-            if ch == "a":
-                self._set_mode(_HOLD)
-            elif ch == "z":
-                self._set_mode(_ZERO)
-            elif ch == "s":
-                self._set_mode(_MIT)
-            elif ch == "d":
-                self._set_mode(_IDLE)
+            if ch in _MODE_OF:
+                self._set_mode(_MODE_OF[ch])
+            elif ch == "f":
+                with self._lock:
+                    self._fault_reset_pending = True
+                print("→ fault-reset (once)", flush=True)
             elif ch in ("q", "\x03", "\x04"):
                 print("→ QUIT", flush=True)
-                # Trigger run_policy's clean KeyboardInterrupt shutdown path.
                 os.kill(os.getpid(), signal.SIGINT)
                 break
             elif ch == "?":
@@ -145,21 +135,20 @@ class Man1s1mPolicy(Policy):
     def step(self, state: LinkState, t_ns: int) -> Action:
         with self._lock:
             mode = self._mode
-            if mode in _CTRL_OF and self._ctrl_pending:
-                self._ctrl_pending = False
-                kind = _CTRL_OF[mode]
-                return Action(control=[ControlRequest(s, l, kind)
-                                       for (s, l, _kp, _kd, _c, _a) in self._motors])
-            if mode == _MIT and self._mit_restart:   # seed phase origin from injected time
+            if mode == MODE_MIT and self._mit_restart:
                 self._mit_t0 = t_ns
                 self._mit_restart = False
             t0 = self._mit_t0
+            fault_reset = self._fault_reset_pending
+            self._fault_reset_pending = False
 
-        if mode == _MIT:
-            t = (t_ns - t0) / 1e9
-            s_wt = math.sin(SINE_OMEGA * t)
-            c_wt = math.cos(SINE_OMEGA * t)
-            return Action(mit=[MitCommand(s, l, pos=center + amp * s_wt,
-                                          vel=amp * SINE_OMEGA * c_wt, kp=kp, kd=kd)
-                               for (s, l, kp, kd, center, amp) in self._motors])
-        return Action()
+        cmds = []
+        for (s, l, center, amp) in self._motors:
+            pos = vel = 0.0
+            if mode == MODE_MIT:
+                t = (t_ns - t0) / 1e9
+                pos = center + amp * math.sin(SINE_OMEGA * t)
+                vel = amp * SINE_OMEGA * math.cos(SINE_OMEGA * t)
+            cmds.append(MotorCommand(s, l, mode=mode, pos=pos, vel=vel,
+                                     use_config_gains=True, fault_reset=fault_reset))
+        return Action(motors=cmds)

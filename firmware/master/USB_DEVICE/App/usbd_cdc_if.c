@@ -263,8 +263,10 @@ static int8_t CDC_Control_FS(uint8_t cmd, uint8_t* pbuf, uint16_t length)
 static int8_t CDC_Receive_FS(uint8_t* Buf, uint32_t *Len)
 {
   /* USER CODE BEGIN 6 */
-  /* ── framed protocol decoder ──────────────────────────────────────────── */
-  static uint8_t  accum[128];
+  /* ── framed protocol decoder ──────────────────────────────────────────────
+     Sized to hold MSG_HEADER_SIZE + the largest host payload (cmd_robot_t = 378 B)
+     with slack; a ROBOT_CMD frame is 16 + 378 = 394 B. */
+  static uint8_t  accum[512];
   static uint16_t accum_len = 0;
 
   uint32_t rx_len = *Len;
@@ -306,11 +308,11 @@ static int8_t CDC_Receive_FS(uint8_t* Buf, uint32_t *Len)
       /* Dispatch */
       const uint8_t *payload = accum + MSG_HEADER_SIZE;
       switch ((MsgType)hdr.type) {
-          case MSG_CONTROL_REQ:
-              if (hdr.len >= sizeof(ControlReq)) {
-                  ControlReq req;
-                  memcpy(&req, payload, sizeof(req));
-                  MotorMaster_HandleControlReq(&req, hdr.seq);
+          case MSG_ROBOT_CMD:
+              if (hdr.len >= sizeof(cmd_robot_t)) {
+                  cmd_robot_t cmd;
+                  memcpy(&cmd, payload, sizeof(cmd));
+                  MotorMaster_HandleRobotCmd(&cmd);
               } else {
                   master_link_errors++;
               }
@@ -327,17 +329,6 @@ static int8_t CDC_Receive_FS(uint8_t* Buf, uint32_t *Len)
               if (n > 0u) usb_tx_post_from_isr(frame, n);
               break;
           }
-
-          case MSG_MOTOR_CMD:
-              if (hdr.len >= sizeof(MotorCmd)) {
-                  MotorCmd mc;
-                  memcpy(&mc, payload, sizeof(mc));
-                  MotorMaster_SetMitCmd(mc.slave_id, mc.motor_idx, mc.pos, mc.vel,
-                                        mc.kp, mc.kd, mc.tau_ff, mc.cmd_seq);
-              } else {
-                  master_link_errors++;
-              }
-              break;
 
           default:
               master_link_errors++;

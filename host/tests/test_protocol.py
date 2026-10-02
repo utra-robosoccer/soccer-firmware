@@ -1,108 +1,128 @@
-"""Tests for the canonical host protocol library (host/jetson/protocol.py).
+"""Tests for the canonical host protocol library (host/master_link/protocol.py),
+PROTO_VERSION 3 robot/chain/motor hierarchy.
 
-Includes a cross-language fixture test: it compiles and runs the C fixture
-(firmware/common/test/gen_fixture.c), which packs a known MotorState atom and a
-full SPI telemetry frame using protocol.h, and byte-compares against the same
-values packed in Python. This catches C<->Python layout / CRC drift in CI.
+Covers: fixed-point encode/decode round trips + saturation, cmd/tele pack↔parse
+round trips, wrong-version drop+count, wrap-aware seq compare, and a cross-language
+fixture that compiles firmware/common/test/gen_fixture.c and byte-compares a full
+cmd_robot_t and tele_robot_t against the Python packers.
 """
 import os
 import shutil
 import struct
 import subprocess
-import sys
 import unittest
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.abspath(os.path.join(HERE, "..", ".."))   # host/tests → host → repo root
 
-import master_link.protocol as P  # noqa: E402 (pip install -e host/)
-
-# Known fixture values — MUST match firmware/common/test/gen_fixture.c.
-_LIFE0, _CAUSE0 = 3, 1      # MOTOR_ARMED_HOLD, CAUSE_OVERTORQUE
-_LIFE1, _CAUSE1 = 7, 0      # MOTOR_ARMED_MIT, CAUSE_NONE
-_FLAGS = P.CMDFLAG_CLAMPED_POS | P.CMDFLAG_CMD_STALE
+import master_link.protocol as P  # noqa: E402
 
 
-def _atom(pos_raw: int, life: int, cause: int, last_applied_seq: int = 0) -> bytes:
-    # motor_fault (0x0A) distinct from cmd_flags (_FLAGS=0x05) so a byte swap is caught.
-    return struct.pack(P.MOTORSTATE_FMT, pos_raw, 40000, 30000, 42,
-                       (life & 0x0F) | (cause << 4), 0x0A, _FLAGS,
-                       0xDEADBEEF, 250, 0, last_applied_seq)
+class FixedPoint(unittest.TestCase):
+    def test_round_trip(self):
+        for x, scale in [(0.5, P.POS_SCALE), (-1.25, P.VEL_SCALE), (0.3, P.TAU_SCALE)]:
+            r, sat = P.enc_i16(x, scale)
+            self.assertFalse(sat)
+            self.assertAlmostEqual(P.dec_i16(r, scale), x, places=3)
+        for x, scale in [(15.0, P.KP_SCALE), (1.0, P.KD_SCALE), (500.0, P.KP_SCALE)]:
+            r, sat = P.enc_u16(x, scale)
+            self.assertFalse(sat)
+            self.assertAlmostEqual(P.dec_u16(r, scale), x, places=2)
+
+    def test_saturation(self):
+        # Position beyond ±π saturates i16 and flags.
+        r, sat = P.enc_i16(4.0, P.POS_SCALE)
+        self.assertEqual(r, 32767)
+        self.assertTrue(sat)
+        r, sat = P.enc_i16(-4.0, P.POS_SCALE)
+        self.assertEqual(r, -32768)
+        self.assertTrue(sat)
+        # Large-actuator gains fit (KP×10 covers 0..5000); above that saturates.
+        self.assertEqual(P.enc_u16(5000.0, P.KP_SCALE), (50000, False))
+        self.assertEqual(P.enc_u16(7000.0, P.KP_SCALE), (65535, True))
+        self.assertEqual(P.enc_u16(100.0, P.KD_SCALE), (10000, False))
 
 
-class MotorStateDecode(unittest.TestCase):
-    def test_lifecycle_cause_split_and_flags(self):
-        payload = struct.pack(P.FMT_MOTOR_STATE_HDR, 1, 2) + _atom(12345, _LIFE0, _CAUSE0)
-        d = P.parse_motor_state(payload)
-        self.assertEqual(d["slave_id"], 1)
-        self.assertEqual(d["motor_idx"], 2)
-        self.assertEqual(d["state"], _LIFE0)
-        self.assertEqual(d["cause"], _CAUSE0)
-        self.assertEqual(d["motor_fault"], 0x0A)
-        self.assertEqual(d["fault_word"], 0xDEADBEEF)
-        self.assertEqual(d["fb_age"], 250)
-        ms = d["atom"]
-        self.assertTrue(ms.clamped_pos)
-        self.assertFalse(ms.clamped_tau)
-        self.assertTrue(ms.cmd_stale)
+class CmdRoundTrip(unittest.TestCase):
+    def test_pack_parse(self):
+        chains = [{"chain_id": 0, "motors": [
+            {"mode_req": P.REQ_MIT, "pos": 0.5, "vel": -1.25, "kp": 15.0, "kd": 1.0,
+             "tau_ff": 0.3, "flags": P.CMD_FLAG_VALID}]}]
+        b = P.pack_robot_cmd(7, 42, chains)
+        self.assertEqual(len(b), P.SZ_CMD_ROBOT)
+        d = P.parse_robot_cmd(b)
+        self.assertEqual((d["cycle_id"], d["cmd_seq"], d["n_chains"]), (7, 42, 1))
+        m = d["chains"][0]["motors"][0]
+        self.assertEqual(m["mode_req"], P.REQ_MIT)
+        self.assertAlmostEqual(m["pos"], 0.5, places=3)
+        self.assertAlmostEqual(m["vel"], -1.25, places=2)
+        self.assertAlmostEqual(m["kp"], 15.0, places=1)
+        self.assertEqual(m["flags"] & P.CMD_FLAG_VALID, P.CMD_FLAG_VALID)
 
-    def test_raw_decode_uses_transport_bounds(self):
-        payload = struct.pack(P.FMT_MOTOR_STATE_HDR, 0, 0) + _atom(0, 0, 0)
-        d = P.parse_motor_state(payload)
-        # pos_raw=0 -> lower bound; vel_raw=40000, tau_raw=30000 within bounds.
-        self.assertAlmostEqual(d["pos"], P.MOTOR_P_MIN, places=4)
-        self.assertAlmostEqual(
-            d["vel"], P.MOTOR_V_MIN + 40000 * (P.MOTOR_V_MAX - P.MOTOR_V_MIN) / 65535.0,
-            places=4)
+
+class TeleRoundTrip(unittest.TestCase):
+    def test_pack_parse(self):
+        pr, _ = P.enc_i16(0.5, P.POS_SCALE)
+        vr, _ = P.enc_i16(-1.25, P.VEL_SCALE)
+        tr, _ = P.enc_i16(0.3, P.TAU_SCALE)
+        motor = dict(pos_raw=pr, vel_raw=vr, tau_raw=tr, temp_c=42, state=P.LIFE_MIT,
+                     cause=P.CAUSE_NONE, motor_mode=2, motor_fault=0x0A,
+                     flags=P.TELE_FLAG_TO_ZERO_ARRIVED, fb_age_ms=250,
+                     fault_word=0xDEADBEEF, last_applied_seq=0x1234)
+        chains = [dict(chain_id=0, spi_seq_echo=0x2A, slave_time_us=7777,
+                       cmd_crc_errors=3, can_tx_errors=1, motors=[motor])]
+        b = P.pack_robot_tele(9, 123456, 42, 0, P.ROBOT_STATE_NAMES and 1, chains)
+        self.assertEqual(len(b), P.SZ_TELE_ROBOT)
+        d = P.parse_robot_tele(b)
+        self.assertEqual((d["cycle_id"], d["last_cmd_seq_rx"], d["n_chains"]), (9, 42, 1))
+        ch = d["chains"][0]
+        self.assertEqual((ch["spi_seq_echo"], ch["cmd_crc_errors"], ch["can_tx_errors"]),
+                         (0x2A, 3, 1))
+        mo = ch["motors"][0]
+        self.assertAlmostEqual(mo.pos, 0.5, places=3)
+        self.assertAlmostEqual(mo.vel, -1.25, places=2)
+        self.assertEqual(mo.lifecycle_name, "MIT")
+        self.assertEqual(mo.motor_mode_name, "NORMAL")
+        self.assertEqual(mo.last_applied_seq, 0x1234)
+        self.assertTrue(mo.to_zero_arrived)
 
 
 class FrameCodec(unittest.TestCase):
-    def test_frame_round_trip(self):
-        payload = struct.pack(P.FMT_MOTOR_STATE_HDR, 0, 1) + _atom(1000, _LIFE1, _CAUSE1)
-        fr = P.encode_frame(P.MSG_MOTOR_STATE, P.NODE_MASTER, P.NODE_JETSON, payload)
-        buf = bytearray(fr)
-        r = P.decode_frame(buf)
+    def test_round_trip(self):
+        payload = P.pack_robot_cmd(1, 1, [{"chain_id": 0, "motors": [
+            {"mode_req": P.REQ_HOLD, "flags": P.CMD_FLAG_VALID}]}])
+        fr = P.encode_frame(P.MSG_ROBOT_CMD, P.NODE_JETSON, P.NODE_MASTER, payload)
+        r = P.decode_frame(bytearray(fr))
         self.assertIsNotNone(r)
-        self.assertEqual(r[0], P.MSG_MOTOR_STATE)
+        self.assertEqual(r[0], P.MSG_ROBOT_CMD)
         self.assertEqual(r[3], payload)
 
     def test_bad_crc_resyncs(self):
         fr = bytearray(P.encode_frame(P.MSG_PING, P.NODE_JETSON, P.NODE_MASTER))
-        fr[-1] ^= 0x01                      # corrupt the CRC
+        fr[-1] ^= 0x01
         self.assertIsNone(P.decode_frame(bytearray(fr)))
 
     def test_wrong_version_dropped_and_counted(self):
-        # Build a CRC-valid frame, then rewrite ver_flags low byte to a version other
-        # than the current PROTO_VERSION and fix the CRC so it passes CRC but fails
-        # the version gate.
         wrong = (P.PROTO_VERSION + 1) & 0xFF
-        payload = struct.pack(P.FMT_MOTOR_STATE_HDR, 0, 0) + _atom(0, 0, 0)
-        fr = bytearray(P.encode_frame(P.MSG_MOTOR_STATE, P.NODE_MASTER, P.NODE_JETSON, payload))
-        fr[12] = wrong                  # ver_flags low byte (header offset 12)
-        fr[14] = 0                      # zero the CRC field, then recompute like the codec
+        fr = bytearray(P.encode_frame(P.MSG_PING, P.NODE_JETSON, P.NODE_MASTER))
+        fr[12] = wrong                  # ver_flags low byte
+        fr[14] = 0
         fr[15] = 0
         crc = P.crc16(bytes(fr))
         fr[14] = crc & 0xFF
         fr[15] = (crc >> 8) & 0xFF
         before = P.version_errors
-        self.assertIsNone(P.decode_frame(bytearray(fr)))   # dropped, no frame returned
-        self.assertEqual(P.version_errors, before + 1)     # and counted
-
-        # A current-version frame still round-trips.
-        ok = bytearray(P.encode_frame(P.MSG_MOTOR_STATE, P.NODE_MASTER, P.NODE_JETSON, payload))
-        self.assertIsNotNone(P.decode_frame(ok))
+        self.assertIsNone(P.decode_frame(bytearray(fr)))
+        self.assertEqual(P.version_errors, before + 1)
 
 
 class WrapAwareSeq(unittest.TestCase):
     def test_seq_ge_basic_and_wrap(self):
-        # Simple ordering, no wrap.
         self.assertTrue(P.seq_ge(5, 5))
         self.assertTrue(P.seq_ge(6, 5))
         self.assertFalse(P.seq_ge(5, 6))
-        # Across the 65535 → 1 wrap: 2 is "ahead of" 65535.
         self.assertTrue(P.seq_ge(2, 65535))
         self.assertFalse(P.seq_ge(65535, 2))
-        # Just under half the space ahead reads as ahead; the mirror reads behind.
         self.assertTrue(P.seq_ge(0x7FFF, 0))
         self.assertFalse(P.seq_ge(0, 0x7FFF))
 
@@ -117,7 +137,8 @@ class CrossLanguageFixture(unittest.TestCase):
         src = os.path.join(ROOT, "firmware", "common", "test", "gen_fixture.c")
         inc = os.path.join(ROOT, "firmware", "common", "include")
         exe = os.path.join(HERE, "_gen_fixture_bin")
-        subprocess.check_call([gcc, "-std=c11", "-I", inc, src, "-o", exe])
+        subprocess.check_call([gcc, "-std=c11", "-Wall", "-Wextra", "-Werror",
+                               "-I", inc, src, "-o", exe])
         try:
             out = subprocess.check_output([exe]).decode()
         finally:
@@ -128,27 +149,26 @@ class CrossLanguageFixture(unittest.TestCase):
             fields[parts[0]] = bytes(int(x, 16) for x in parts[1:])
         return fields
 
-    def test_atom_and_frame_match_c(self):
+    def test_cmd_and_tele_match_c(self):
         got = self._build_and_run()
 
-        atom0 = _atom(12345, _LIFE0, _CAUSE0, 0x1234)
-        self.assertEqual(got["ATOM"], atom0, "MotorState atom layout drift C<->Python")
+        chains = [{"chain_id": 0, "motors": [
+            {"mode_req": P.REQ_MIT, "pos": 0.5, "vel": -1.25, "kp": 15.0, "kd": 1.0,
+             "tau_ff": 0.3, "flags": P.CMD_FLAG_VALID}]}]
+        py_cmd = P.pack_robot_cmd(7, 42, chains)
+        self.assertEqual(py_cmd, got["ROBOTCMD"], "cmd_robot_t layout drift C↔Python")
 
-        atom1 = _atom(1000, _LIFE1, _CAUSE1, 0x5678)
-        frame = bytearray(struct.pack("<BB", 0x03, 0x2A) + atom0 + atom1 + b"\x00" * 8 + b"\x00\x00")
-        crc = P.crc16(bytes(frame[:-2]))
-        frame[-2] = crc & 0xFF
-        frame[-1] = crc >> 8
-        self.assertEqual(bytes(frame), got["FRAME"], "SPI frame layout/CRC drift C<->Python")
-
-        # Command frame (master→slave): [cmd][seq][SpiMitCmd×2][crc16].
-        spimit = "<ffBH"   # pos, vel, valid, cmd_seq — 11 B, matches packed C SpiMitCmd
-        body = (struct.pack("<BB", 0x05, 0x2A)
-                + struct.pack(spimit, 1.5, -2.25, 1, 0x1111)
-                + struct.pack(spimit, -0.75, 3.5, 0, 0x2222))
-        ccrc = P.crc16(body)
-        cmdframe = body + bytes([ccrc & 0xFF, ccrc >> 8])
-        self.assertEqual(cmdframe, got["CMDFRAME"], "command-frame layout/CRC drift C<->Python")
+        pr, _ = P.enc_i16(0.5, P.POS_SCALE)
+        vr, _ = P.enc_i16(-1.25, P.VEL_SCALE)
+        tr, _ = P.enc_i16(0.3, P.TAU_SCALE)
+        motor = dict(pos_raw=pr, vel_raw=vr, tau_raw=tr, temp_c=42, state=P.LIFE_MIT,
+                     cause=P.CAUSE_NONE, motor_mode=2, motor_fault=0x0A,
+                     flags=P.TELE_FLAG_TO_ZERO_ARRIVED, fb_age_ms=250,
+                     fault_word=0xDEADBEEF, last_applied_seq=0x1234)
+        tchains = [dict(chain_id=0, spi_seq_echo=0x2A, slave_time_us=7777,
+                        cmd_crc_errors=3, can_tx_errors=1, motors=[motor])]
+        py_tele = P.pack_robot_tele(9, 123456, 42, 0, 1, tchains)
+        self.assertEqual(py_tele, got["ROBOTTELE"], "tele_robot_t layout drift C↔Python")
 
 
 if __name__ == "__main__":
