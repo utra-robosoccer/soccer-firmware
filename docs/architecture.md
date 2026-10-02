@@ -333,8 +333,23 @@ injector (`-DSPI_INJECT_TEST`) clocks one deliberately short exchange for the re
 
 ### Triggers / buffering
 - Triggered by the master's 200 Hz poll clock. The slave uses **ping-pong (double-buffered)
-  DMA**: hardware clocks one buffer while the main loop fills the other; buffers swap at
-  end-of-transfer only if a fresh frame is ready → no torn frames, neither side stalls.
+  DMA**: hardware clocks one buffer while the main loop fills the other → no torn frames,
+  neither side stalls.
+- **Late arm (removes the one-exchange telemetry lag).** `TxRxCplt(A)` no longer arms the next
+  exchange (the motor's reply to A's command isn't in yet). Instead a one-shot `TIM3`
+  (`tx_arm_timer.c`) fires `TX_ARM_DEADLINE_US` (0.6 cycle, 3 ms @200 Hz) later; its ISR
+  `spi_arm_tx()` swaps in the freshly-staged frame and arms — so the reply rides exchange A+1,
+  not A+2 (master-clock answered→confirmed 2 cycles, not 3). The staged frame publishes its
+  ready flag after the whole frame incl. CRC is written (with a barrier), so the ISR never arms
+  a half-written buffer. TIM3 runs at the SPI-DMA priority (0) so the arm and the exchange-
+  complete callback don't preempt each other; `slave_spi_resync` masks TIM3 while it resets.
+  > **Known issue (revisit before 400 Hz):** an *early* "all motors replied → arm now" path was
+  > tried and reverted — it skipped `last_applied` values (≈24 % superseded), most likely a
+  > per-cycle "replied" tracking bug (crediting the previous frame's reply), **not** a timing
+  > property. Today's fixed deadline is deterministic and, at 200 Hz, sits after all replies.
+  > At 400 Hz the deadline is 1.5 ms, which can precede the last of 5 motor replies → a correct
+  > early-arm (fixing the tracking bug) or a longer/smarter deadline is needed. Measure the last
+  > reply time vs the deadline and the arm→NSS margin on real multi-motor hardware first.
 - The slave parses the received command from a main-owned copy (`cmd_local`) taken under a
   brief IRQ mask (the SPI ISR can reswap the inbox pointer mid-parse).
 

@@ -19,7 +19,13 @@ void tx_arm_timer_init(uint32_t deadline_us)
     TIM3->SR   = 0u;                                 /* clear the UG-raised update flag   */
     TIM3->DIER = TIM_DIER_UIE;                       /* update interrupt                  */
 
-    HAL_NVIC_SetPriority(TIM3_IRQn, 1, 0);           /* below SPI1/DMA (prio 0)           */
+    /* Same preempt priority as the SPI DMA streams (DMA2_Stream0/3 = 0). The deadline ISR's
+       spi_arm_tx() and the exchange-complete callback both drive the same SPI/DMA, so they
+       must NOT preempt each other — equal priority serialises them (they tail-chain). It also
+       sits above SPI1_IRQn (error, prio 1): if TIM3 is mid-arm an SPI error waits, and if the
+       error handler is running TIM3 can preempt but its spi_arm_tx no-ops (error claims the
+       cycle first). The main-loop resync masks TIM3 explicitly. */
+    HAL_NVIC_SetPriority(TIM3_IRQn, 0, 0);
     HAL_NVIC_EnableIRQ(TIM3_IRQn);
 }
 

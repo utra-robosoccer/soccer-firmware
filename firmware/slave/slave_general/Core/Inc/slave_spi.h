@@ -30,6 +30,7 @@ extern volatile uint8_t data_receive_flag;
 extern volatile uint8_t data_tx_ready_flag;
 extern volatile uint8_t spi_error_flag;
 extern volatile uint8_t spi_resyncs;      // DMA realigns (wraps; host takes deltas)
+extern volatile uint32_t spi_tx_arm_fails; // HAL TX-arm failures (then retried; wraps)
 
 void spi_dma_init(SPI_HandleTypeDef *hspi);
 void spi_write_next_tx_buf(const uint8_t* src_frame, uint8_t* dst);
@@ -42,9 +43,9 @@ void spi_write_next_tx_buf(const uint8_t* src_frame, uint8_t* dst);
 uint8_t slave_spi_resync(SPI_HandleTypeDef *hspi);
 
 /* Arm the DMA for the NEXT exchange (swap in a freshly-staged telemetry frame if ready).
-   Idempotent per exchange: the first caller this cycle arms, the rest no-op. Called from
-   the main loop once every live motor has replied, and from the TX-arm deadline timer ISR
-   as the guaranteed fallback — so the fresh reply rides the next exchange (no lag). */
+   Called from the TX-arm deadline timer ISR (TX_ARM_DEADLINE_US after each exchange), after
+   the motor replies are in — so the fresh reply rides the next exchange (no one-exchange lag).
+   Idempotent per cycle (armed_this_cycle); resync/error claim the cycle so this no-ops. */
 void spi_arm_tx(void);
 
 
