@@ -314,13 +314,14 @@ int main(void)
         slave_spi_resync(&hspi1);
       } else {
         spi_echo_seq = hdr.spi_seq;   /* echo the SPI link-health seq */
-        /* A valid frame (NOP or ROBOT_CMD) proves the master link is alive —
-           refresh EVERY motor's watchdog. */
-        for (uint8_t _w = 0; _w < N_MOTORS; _w++)
-          motor_runtime_refresh_watchdog(_w);
+        uint8_t cmd_fresh = (hdr.opcode == SPI_OP_ROBOT_CMD) ? 1u : 0u;
 
-        if (hdr.opcode == SPI_OP_ROBOT_CMD) {
-          /* Level-triggered per-motor mode requests. One chain per slave. */
+        if (cmd_fresh) {
+          /* Only a real command refreshes the master-link watchdog — a NOP keepalive does
+             NOT (task 6), so the slave's master-loss ramp still fires if the master falls
+             back to keepalives or dies. Level-triggered per-motor mode requests. */
+          for (uint8_t _w = 0; _w < N_MOTORS; _w++)
+            motor_runtime_refresh_watchdog(_w);
           uint8_t n = (chain.n_motors > N_MOTORS) ? N_MOTORS : chain.n_motors;
           for (uint8_t _i = 0; _i < n; _i++) {
             motor_runtime_apply_cmd(_i, &chain.motors[_i], hdr.cmd_seq);
@@ -332,11 +333,11 @@ int main(void)
            (now - watchdog_ms) underflows u32 → a spurious WATCHDOG trip right after arming. */
         now     = HAL_GetTick();
         now_cyc = DWT->CYCCNT;
-        /* Forward service: send to all motors now (ROBOT_CMD applied new targets;
-           NOP holds the current ones). The min-guard prevents a double send. */
+        /* Forward service: drive the applied command (cmd_fresh) or, on a NOP, hold/ramp.
+           The min-guard prevents a double send. */
         if (slave_service_due(SVC_EXCHANGE, 1u, now_cyc, last_send_cyc, last_exch_cyc,
                               svc_min_ticks, svc_fb_ticks)) {
-          motor_runtime_update(now);
+          motor_runtime_update(now, cmd_fresh);
           last_send_cyc = now_cyc;
           last_exch_cyc = now_cyc;
           need_stage = 1u;
@@ -351,7 +352,7 @@ int main(void)
       loop_next_poll_ms += LOOP_POLL_PERIOD_MS;
       if (slave_service_due(SVC_FALLBACK, 1u, now_cyc, last_send_cyc, last_exch_cyc,
                             svc_min_ticks, svc_fb_ticks)) {
-        motor_runtime_update(now);
+        motor_runtime_update(now, /*cmd_fresh=*/0u);   /* no command → hold/ramp */
         last_send_cyc = now_cyc;
         need_stage = 1u;
       }

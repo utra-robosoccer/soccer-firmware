@@ -57,10 +57,11 @@ void motor_runtime_init(void);
    after carries the freshest state + this cycle's confirmation. */
 void motor_runtime_on_feedback(uint32_t now_ms);
 
-/* Service (send): call once per master cycle (forward on a valid exchange, else the
-   fallback tick). Runs the fault detectors on the mirrored state and drives CAN output
-   for the current per-motor lifecycle. */
-void motor_runtime_update(uint32_t now_ms);
+/* Service (send): call once per master cycle. cmd_fresh=1 on a forward service (a fresh
+   ROBOT_CMD was applied this cycle) → drive the commanded lifecycle. cmd_fresh=0 on the
+   fallback tick (no fresh command) → a still-armed motor runs the master-loss ramp
+   (HOLD-grace → DAMPED → IDLE). Also runs the fault detectors on the mirrored state. */
+void motor_runtime_update(uint32_t now_ms, uint8_t cmd_fresh);
 
 /* Apply one motor's level-triggered mode request + targets for this cycle (the
    mode-request state machine). `cmd_seq` is the robot-level command sequence from

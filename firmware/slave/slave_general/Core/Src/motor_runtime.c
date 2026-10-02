@@ -3,6 +3,8 @@
 #include "robostride.h"
 #include "enable_monitor.h"
 #include "mode_sm.h"
+#include "../../../../common/include/master_watchdog.h"   /* master-loss ramp (task 6) */
+#include "../../../../common/include/soft_limit.h"         /* one-sided soft-limit clamp */
 #include <math.h>
 #include <string.h>
 
@@ -61,19 +63,18 @@ static uint8_t pack_faults(const motor_t *m)
     return f;
 }
 
-/* One-sided soft-limit clamp on a commanded (pos, vel). Returns clamp flag bits
-   (TELE_FLAG_CLAMPED_POS/TAU); cancels only feedforward driving further INTO the
-   limit so leaving it stays smooth. */
+/* Soft-limit clamp on a commanded (pos, vel). One-sided about the shaft's ACTUAL position
+   (soft_clamp_pos): a joint parked outside [lo,hi] can be held or driven back, never further
+   out — so arming/commanding it never fights the shaft into an overtorque. Returns clamp
+   flag bits; also cancels feedforward velocity driving further out. */
 static uint8_t apply_soft_clamp(const MotorRuntime *r, float *pos, float *vel)
 {
-    float lo = r->cfg->soft_min, hi = r->cfg->soft_max;
+    float before = *pos;
     uint8_t clamp = 0u;
-    if (*pos > hi) {
-        *pos = hi; clamp |= TELE_FLAG_CLAMPED_POS;
-        if (*vel > 0.0f) { *vel = 0.0f; clamp |= TELE_FLAG_CLAMPED_TAU; }
-    } else if (*pos < lo) {
-        *pos = lo; clamp |= TELE_FLAG_CLAMPED_POS;
-        if (*vel < 0.0f) { *vel = 0.0f; clamp |= TELE_FLAG_CLAMPED_TAU; }
+    if (soft_clamp_pos(pos, r->pos, r->cfg->soft_min, r->cfg->soft_max)) {
+        clamp |= TELE_FLAG_CLAMPED_POS;
+        if (before > *pos && *vel > 0.0f)      { *vel = 0.0f; clamp |= TELE_FLAG_CLAMPED_TAU; }
+        else if (before < *pos && *vel < 0.0f) { *vel = 0.0f; clamp |= TELE_FLAG_CLAMPED_TAU; }
     }
     return clamp;
 }
@@ -298,7 +299,7 @@ void motor_runtime_on_feedback(uint32_t now_ms)
     }
 }
 
-void motor_runtime_update(uint32_t now_ms)
+void motor_runtime_update(uint32_t now_ms, uint8_t cmd_fresh)
 {
     for (uint8_t i = 0; i < N_MOTORS; i++) {
         uint8_t cid = motor_configs[i].can_id;
@@ -328,43 +329,50 @@ void motor_runtime_update(uint32_t now_ms)
             fault_to(i, CAUSE_OVERTORQUE);
         }
 
-        switch (motors_rt[i].state) {
+        /* Master-loss ramp (task 6): a cycle with NO fresh ROBOT_CMD (the fallback tick)
+           means SPI exchanges stopped — master reset/dead. A still-armed joint ramps down
+           by time since the last command (watchdog_ms, refreshed ONLY by ROBOT_CMD): hold
+           the position with v_des/tau_ff zeroed for the grace, then DAMPED (config Kd),
+           then IDLE. Recompute driving first — a fault above may have cleared it. */
+        driving = (motors_rt[i].state == LIFE_HOLD || motors_rt[i].state == LIFE_MIT ||
+                   motors_rt[i].state == LIFE_DAMPED || motors_rt[i].state == LIFE_TO_ZERO);
+        if (driving && !cmd_fresh) {
+            uint32_t since = (uint32_t)ms_since(now_ms, motors_rt[i].watchdog_ms);
+            MasterLossPhase ph = master_loss_phase(since, MASTER_LOST_GRACE_MS,
+                                                   MASTER_LOST_DAMP_MS);
+            if (ph == MASTER_HOLD_GRACE) {
+                send_mit(i, 0.0f, motors_rt[i].hold_pos, 0.0f,       /* v_des=0, tau_ff=0 */
+                         motors_rt[i].cmd_kp, motors_rt[i].cmd_kd);
+            } else if (ph == MASTER_DAMPED) {
+                motors_rt[i].state  = LIFE_DAMPED;
+                motors_rt[i].cause  = CAUSE_MASTER_LOST;
+                motors_rt[i].cmd_kp = 0.0f;
+                motors_rt[i].cmd_kd = motors_rt[i].cfg->default_kd;  /* config Kd */
+                send_mit(i, 0.0f, motors_rt[i].pos, 0.0f, 0.0f, motors_rt[i].cfg->default_kd);
+            } else {   /* MASTER_IDLE */
+                can_disable_motor(cid, CAN_MASTER_ID);
+                motors_rt[i].state          = LIFE_IDLE;
+                motors_rt[i].cause          = CAUSE_MASTER_LOST;
+                motors_rt[i].hold_vel       = 0.0f;
+                motors_rt[i].target_cmd_seq = CMD_SEQ_NONE;
+                cmd_seq_reset(&motors_rt[i].cmd_track);
+            }
+        } else switch (motors_rt[i].state) {
             case LIFE_IDLE:
                 can_read_motor_state(cid);
                 break;
 
             case LIFE_HOLD:
-                send_mit(i, 0.0f, motors_rt[i].hold_pos, motors_rt[i].hold_vel,
-                         motors_rt[i].cmd_kp, motors_rt[i].cmd_kd);
-                if (ms_since(now_ms, motors_rt[i].watchdog_ms) > (int32_t)MOTOR_WATCHDOG_MS) {
-                    can_disable_motor(cid, CAN_MASTER_ID);
-                    motors_rt[i].state    = LIFE_IDLE;
-                    motors_rt[i].hold_vel = 0.0f;
-                    motors_rt[i].cause    = CAUSE_WATCHDOG;
-                }
-                break;
-
             case LIFE_MIT:
+                /* With a fresh command every cycle, HOLD and MIT both drive the current
+                   targets; master-loss is handled by the ramp above, not here. */
                 send_mit(i, 0.0f, motors_rt[i].hold_pos, motors_rt[i].hold_vel,
                          motors_rt[i].cmd_kp, motors_rt[i].cmd_kd);
-                if (ms_since(now_ms, motors_rt[i].watchdog_ms) > (int32_t)MOTOR_WATCHDOG_MS) {
-                    /* MIT stream stopped — lock position and fall back to HOLD. */
-                    motors_rt[i].hold_pos = motors_rt[i].pos;
-                    motors_rt[i].hold_vel = 0.0f;
-                    motors_rt[i].cmd_kp   = motors_rt[i].cfg->default_kp;
-                    motors_rt[i].cmd_kd   = motors_rt[i].cfg->default_kd;
-                    motors_rt[i].state    = LIFE_HOLD;
-                }
                 break;
 
             case LIFE_DAMPED:
                 /* Kp=0 so home_pos is inert; Kd provides damping. */
                 send_mit(i, 0.0f, motors_rt[i].pos, 0.0f, 0.0f, motors_rt[i].cmd_kd);
-                if (ms_since(now_ms, motors_rt[i].watchdog_ms) > (int32_t)MOTOR_WATCHDOG_MS) {
-                    can_disable_motor(cid, CAN_MASTER_ID);
-                    motors_rt[i].state = LIFE_IDLE;
-                    motors_rt[i].cause = CAUSE_WATCHDOG;
-                }
                 break;
 
             case LIFE_TO_ZERO: {
@@ -384,15 +392,7 @@ void motor_runtime_update(uint32_t now_ms)
                     break;
                 }
 
-                /* (2) master-link watchdog. */
-                if (ms_since(now_ms, motors_rt[i].watchdog_ms) > (int32_t)MOTOR_WATCHDOG_MS) {
-                    can_disable_motor(cid, CAN_MASTER_ID);
-                    motors_rt[i].state = LIFE_IDLE;
-                    motors_rt[i].cause = CAUSE_WATCHDOG;
-                    break;
-                }
-
-                /* (3) arrival = ramp done + within tol for SETTLE_TICKS. Hold at 0
+                /* (2) arrival = ramp done + within tol for SETTLE_TICKS. Hold at 0
                    and set the arrived flag; STAY in TO_ZERO (never writes mech zero,
                    never disables/re-enables — the old arrival sequence is removed). */
                 if (fabsf(motors_rt[i].hold_pos) < 1e-4f && abs_pos < MOTOR_ZERO_TOL) {
@@ -404,7 +404,7 @@ void motor_runtime_update(uint32_t now_ms)
                 }
                 motors_rt[i].zero_settle = 0u;
 
-                /* (4) leashed creep toward 0. */
+                /* (3) leashed creep toward 0. */
                 float sign = (pos > 0.0f) ? -1.0f : 1.0f;
                 float lead = motors_rt[i].hold_pos - pos;
                 float vff  = 0.0f;
