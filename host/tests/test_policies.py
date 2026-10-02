@@ -205,26 +205,25 @@ class RunPolicyLiveGate(unittest.TestCase):
 
 
 class ManMitUsesInjectedTime(unittest.TestCase):
-    def test_mit_phase_follows_t_ns(self):
+    def test_mit_starts_from_current_pos_on_master_time(self):
         p = Man1s1mPolicy()
-        s, l, center, amp = p._motors[0]
+        s, l, lo, hi, amp = p._motors[0]
+        k = (s, l)
+        st = _FakeState(motors={k: _Snap(0.2)})     # current position 0.2
         with p._lock:
             p._mode = MODE_MIT
             p._mit_restart = True
         t0 = 1_000_000_000_000
-        quarter_ns = int((0.25 / SINE_FREQ_HZ) * 1e9)
 
-        a0 = p.step(None, t0)
+        a0 = p.step(st, t0)                          # MIT start → move begins at p0
         self.assertEqual(a0.motors[0].mode, MODE_MIT)
-        self.assertAlmostEqual(a0.motors[0].pos, center, places=6)
-        self.assertAlmostEqual(a0.motors[0].vel, amp * SINE_OMEGA, places=6)
+        self.assertAlmostEqual(a0.motors[0].pos, 0.2, places=5)   # first cmd == current pos
+        self.assertAlmostEqual(a0.motors[0].vel, 0.0, places=5)   # zero velocity at start
 
-        a1 = p.step(None, t0 + quarter_ns)
-        self.assertAlmostEqual(a1.motors[0].pos, center + amp, places=4)
-        self.assertAlmostEqual(a1.motors[0].vel, 0.0, places=4)
-
-        a2 = p.step(None, t0)
-        self.assertAlmostEqual(a2.motors[0].pos, center, places=6)
+        # Pure function of t_ns: the same time replays the same command (restart consumed).
+        a0b = p.step(st, t0)
+        self.assertAlmostEqual(a0b.motors[0].pos, a0.motors[0].pos, places=6)
+        self.assertAlmostEqual(a0b.motors[0].vel, a0.motors[0].vel, places=6)
 
     def test_listen_requests_idle(self):
         from policies.listen_policy import ListenPolicy
@@ -233,37 +232,69 @@ class ManMitUsesInjectedTime(unittest.TestCase):
         self.assertTrue(all(c.mode == MODE_IDLE for c in act.motors))
 
 
+class SineStartTraj(unittest.TestCase):
+    def _mk(self, amp=0.2, freq=0.4, vmax=0.5):
+        from policies.sine_start import SineStart
+        return SineStart(amp, 2 * math.pi * freq, vmax)
+
+    def test_first_sample_is_p0_zero_vel(self):
+        ss = self._mk(); ss.begin(0.6, 0)
+        pos, vel = ss.sample(0)
+        self.assertAlmostEqual(pos, 0.6, places=6)       # first command == p0
+        self.assertAlmostEqual(vel, 0.0, places=6)
+
+    def test_continuous_at_move_sine_join(self):
+        ss = self._mk(); ss.begin(0.6, 0)
+        T = ss.T
+        self.assertGreater(T, 0.0)
+        p_lo, v_lo = ss.sample(int((T - 1e-4) * 1e9))
+        p_hi, v_hi = ss.sample(int(T * 1e9))
+        self.assertAlmostEqual(p_lo, p_hi, places=3)     # position continuous
+        self.assertAlmostEqual(v_lo, v_hi, places=3)     # velocity continuous
+        self.assertAlmostEqual(p_hi, ss.peak, places=4)  # join is the peak...
+        self.assertAlmostEqual(v_hi, 0.0, places=4)      # ...with zero velocity
+
+    def test_sine_centered_on_zero(self):
+        ss = self._mk(amp=0.2, freq=0.4); ss.begin(0.6, 0)
+        T = ss.T; half = 0.5 / 0.4                        # half sine period (s)
+        p_peak, _ = ss.sample(int(T * 1e9))
+        p_opp, _  = ss.sample(int((T + half) * 1e9))
+        self.assertAlmostEqual(p_peak, 0.2, places=4)     # +A
+        self.assertAlmostEqual(p_opp, -0.2, places=4)     # -A → center (p_peak+p_opp)/2 == 0
+        self.assertAlmostEqual(0.5 * (p_peak + p_opp), 0.0, places=5)
+
+    def test_nearest_peak_sign(self):
+        ss = self._mk(); ss.begin(-0.6, 0)                # p0 < 0 → nearest peak is -A
+        self.assertLess(ss.peak, 0.0)
+        pos, _ = ss.sample(0)
+        self.assertAlmostEqual(pos, -0.6, places=6)
+
+    def test_refuses_over_soft_limits(self):
+        ss = self._mk(amp=0.9)
+        with self.assertRaises(ValueError):
+            ss.begin(0.0, 0, lo=-0.79, hi=0.79, who="s0.m0")
+
+
 class BenchSineBehavior(unittest.TestCase):
-    def test_arms_then_centers_sine_on_held_pos(self):
+    def test_arm_then_sine_starts_from_p0(self):
         from policies.bench_sine import BenchSinePolicy
         from master_link.motor_config_gen import MOTORS
         k = (MOTORS[0]["slave"], MOTORS[0]["idx"])
-        p = BenchSinePolicy(amp=0.1, freq=0.4, motors="all", arm_s=1.5)
-        st = _FakeState(motors={k: _Snap(0.25)})       # held at 0.25 rad
+        p = BenchSinePolicy(amp=0.1, freq=0.4, motors="all", arm_s=1.0, move_speed=0.5)
+        st = _FakeState(motors={k: _Snap(0.3)})
         p.setup(st, 0)
-
-        a = p.step(st, int(0.1e9))                     # early arm → HOLD + fault_reset
+        a = p.step(st, int(0.1e9))                        # arm → HOLD + fault_reset
         self.assertEqual(a.motors[0].mode, MODE_HOLD)
         self.assertTrue(a.motors[0].fault_reset)
-        a = p.step(st, int(1.0e9))                     # late arm → HOLD, no fault_reset
-        self.assertEqual(a.motors[0].mode, MODE_HOLD)
-        self.assertFalse(a.motors[0].fault_reset)
-
-        a = p.step(st, int(1.5e9))                     # MIT start: sin(0)=0 → pos == center
+        a = p.step(st, int(1.0e9))                        # MIT start → first cmd == p0
         self.assertEqual(a.motors[0].mode, MODE_MIT)
-        self.assertAlmostEqual(a.motors[0].pos, 0.25, places=5)
+        self.assertAlmostEqual(a.motors[0].pos, 0.3, places=5)
 
-    def test_clamps_to_soft_limits(self):
+    def test_refuses_amp_over_soft_limits(self):
         from policies.bench_sine import BenchSinePolicy
-        from master_link.motor_config_gen import MOTORS, MOTOR_SOFT_MAX
-        k = (MOTORS[0]["slave"], MOTORS[0]["idx"])
-        hi = MOTOR_SOFT_MAX[0]
-        p = BenchSinePolicy(amp=1.0, freq=0.4, motors="all", arm_s=0.0)  # big amp, held at hi
-        st = _FakeState(motors={k: _Snap(hi)})
-        p.setup(st, 0)
-        quarter = 0.25 / 0.4                            # sin peak = +1
-        a = p.step(st, int(quarter * 1e9))
-        self.assertLessEqual(a.motors[0].pos, hi + 1e-9)   # clamped, not hi + amp
+        p = BenchSinePolicy(amp=10.0, motors="all", arm_s=1.0)   # absurd amplitude
+        with self.assertRaises(ValueError):
+            p.setup(_FakeState(), 0)
 
 
 if __name__ == "__main__":

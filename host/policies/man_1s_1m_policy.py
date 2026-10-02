@@ -13,8 +13,10 @@ Keys (all motors together):
     q   QUIT       → clean shutdown
     ?   help
 
-The sine is centred on each motor's soft-limit midpoint and peaks SINE_MARGIN_DEG
-INSIDE the limits, so it never engages the slave's clamp. Send rate is
+The sine is centred on 0 with amplitude A = min(|lo|, hi) - SINE_MARGIN, so it stays
+inside the soft limits (never engages the slave's clamp). On 's' it starts from the
+motor's current position with a minimum-jerk move to the nearest peak (±A), then the
+sine from that peak's phase — position and velocity continuous from HOLD. Send rate is
 run_policy's --rate.
 """
 import math
@@ -34,12 +36,16 @@ from .base import (
     Policy, Action, MotorCommand, LinkState,
     MODE_IDLE, MODE_HOLD, MODE_MIT, MODE_DAMPED, MODE_TO_ZERO,
 )
+from .sine_start import SineStart
 
-# ── sine parameters (stays inside the soft limits — never hits the clamp) ────────
+# ── sine parameters: centered on 0, inside the soft limits (never hits the clamp). The
+# sine STARTS from the motor's current position via a minimum-jerk move to the nearest
+# peak, so position + velocity are continuous from HOLD into the sine. ───────────────────
 SINE_FREQ_HZ    = 0.4
 SINE_OMEGA      = 2.0 * math.pi * SINE_FREQ_HZ
 SINE_MARGIN_DEG = 5.0
 SINE_MARGIN_RAD = math.radians(SINE_MARGIN_DEG)
+MOVE_MAX_SPEED  = 0.5   # rad/s, min-jerk peak speed cap for the HOLD→peak move
 
 _MODE_OF = {
     "a": MODE_HOLD, "z": MODE_TO_ZERO, "s": MODE_MIT, "x": MODE_DAMPED, "d": MODE_IDLE,
@@ -60,13 +66,12 @@ class Man1s1mPolicy(Policy):
         self._motors = []
         for g, m in enumerate(MOTORS):
             lo, hi = MOTOR_SOFT_MIN[g], MOTOR_SOFT_MAX[g]
-            center = 0.5 * (lo + hi)
-            amp = max(0.0, 0.5 * (hi - lo) - SINE_MARGIN_RAD)
-            self._motors.append((m["slave"], m["idx"], center, amp))
+            amp = max(0.0, min(hi, -lo) - SINE_MARGIN_RAD)   # largest 0-centered amplitude
+            self._motors.append((m["slave"], m["idx"], lo, hi, amp))
+        self._traj = {}     # (slave, local) -> SineStart, planned on MIT entry
         self._lock = threading.Lock()
         self._mode = MODE_IDLE
         self._fault_reset_pending = False
-        self._mit_t0 = 0
         self._mit_restart = False
 
         self._stop = threading.Event()
@@ -135,20 +140,38 @@ class Man1s1mPolicy(Policy):
     def step(self, state: LinkState, t_ns: int) -> Action:
         with self._lock:
             mode = self._mode
-            if mode == MODE_MIT and self._mit_restart:
-                self._mit_t0 = t_ns
-                self._mit_restart = False
-            t0 = self._mit_t0
+            restart = self._mit_restart
+            self._mit_restart = False
             fault_reset = self._fault_reset_pending
             self._fault_reset_pending = False
 
+        if mode == MODE_MIT and restart:
+            # Plan each motor's smooth start from its CURRENT position; refuse (revert to
+            # HOLD) if a 0-centered ±A would leave the soft limits — never clamp silently.
+            trajs = {}
+            for (s, l, lo, hi, amp) in self._motors:
+                snap = state.motors.get((s, l)) if state and state.motors else None
+                p0 = snap.pos if snap else 0.0
+                tj = SineStart(amp, SINE_OMEGA, MOVE_MAX_SPEED)
+                try:
+                    tj.begin(p0, t_ns, lo, hi, who=f"s{s}.m{l}")
+                except ValueError as e:
+                    print(f"→ MIT refused: {e}", flush=True)
+                    with self._lock:
+                        self._mode = MODE_HOLD
+                    mode = MODE_HOLD
+                    trajs = {}
+                    break
+                trajs[(s, l)] = tj
+            self._traj = trajs
+
         cmds = []
-        for (s, l, center, amp) in self._motors:
+        for (s, l, lo, hi, amp) in self._motors:
             pos = vel = 0.0
             if mode == MODE_MIT:
-                t = (t_ns - t0) / 1e9
-                pos = center + amp * math.sin(SINE_OMEGA * t)
-                vel = amp * SINE_OMEGA * math.cos(SINE_OMEGA * t)
+                tj = self._traj.get((s, l))
+                if tj is not None:
+                    pos, vel = tj.sample(t_ns)
             cmds.append(MotorCommand(s, l, mode=mode, pos=pos, vel=vel,
                                      use_config_gains=True, fault_reset=fault_reset))
         return Action(motors=cmds)
