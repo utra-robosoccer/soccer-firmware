@@ -33,6 +33,7 @@ static uint8_t     pend_chain_valid[NUM_SLAVES];
 static uint16_t    pend_cmd_seq       = CMD_SEQ_NONE;
 static uint16_t    pend_cycle_echo    = 0;        /* cmd.cycle_id of the pending command */
 static uint8_t     pend_fresh         = 0;        /* a new complete set awaits the swap */
+static uint8_t     pend_fault_reset   = 0;        /* pending command carries CMD_FLAG_FAULT_RESET */
 
 static uint16_t    g_cmd_seq_rx       = CMD_SEQ_NONE; /* last cmd_seq received from host */
 static uint16_t    master_cycle_id    = 0;            /* master cycle counter (per cycle) */
@@ -40,6 +41,13 @@ static uint16_t    master_cycle_id    = 0;            /* master cycle counter (p
 /* Host-loop-vs-master-cycle counters, classified at the swap (reported in tele_robot_t,
    wrap; the host reports per-run deltas). */
 static uint16_t    cnt_on_time = 0, cnt_late = 0, cnt_missing = 0, cnt_duplicate = 0;
+
+/* Host-death dead-man (task 6): cycles since the last fresh host command, and the FSM that
+   drives the slaves DAMPED→IDLE when the host goes quiet while armed. */
+static uint32_t      g_cycles_since_fresh = 0;
+static uint8_t       g_fresh_fault_reset  = 0;   /* a fresh fault-reset command arrived this cycle */
+static HostWatchdog  g_host_wd;
+static HostLinkAction g_host_action = HOST_LINK_OK;
 
 /* ── master status counters ──────────────────────────────────────────────── */
 uint32_t master_link_errors = 0;
@@ -179,6 +187,23 @@ static RobotState compute_robot_state(uint8_t *alive_mask_out)
     return !any_alive ? ROBOT_INIT : (all_full ? ROBOT_READY : ROBOT_DEGRADED);
 }
 
+/* Any motor currently armed (HOLD/MIT/DAMPED/TO_ZERO), per the latest telemetry — gates
+   the host-death watchdog so it never trips when everything is already IDLE. */
+static uint8_t any_motor_armed(void)
+{
+    for (uint8_t s = 0; s < NUM_SLAVES; s++) {
+        if (!slave_alive[s]) continue;
+        uint8_t nm = (latest_tele[s].n_motors > MAX_MOTORS_PER_SLAVE)
+                     ? MAX_MOTORS_PER_SLAVE : latest_tele[s].n_motors;
+        for (uint8_t i = 0; i < nm; i++) {
+            uint8_t st = latest_tele[s].motors[i].state;
+            if (st == LIFE_HOLD || st == LIFE_MIT || st == LIFE_DAMPED || st == LIFE_TO_ZERO)
+                return 1u;
+        }
+    }
+    return 0u;
+}
+
 static void emit_master_status(uint32_t now_ms)
 {
     uint8_t alive_mask = 0u;
@@ -245,7 +270,8 @@ static void emit_robot_tele(uint32_t master_time_us)
     pay.cmd_late         = cnt_late;
     pay.cmd_missing      = cnt_missing;
     pay.cmd_duplicate    = cnt_duplicate;
-    pay.robot_state      = (uint8_t)compute_robot_state(NULL);
+    pay.robot_state      = (g_host_action != HOST_LINK_OK)
+                           ? (uint8_t)ROBOT_HOST_LOST : (uint8_t)compute_robot_state(NULL);
 
     uint8_t nc = 0u;
     for (uint8_t s = 0; s < NUM_SLAVES; s++) {
@@ -292,12 +318,18 @@ void MotorMaster_HandleRobotCmd(const cmd_robot_t *cmd)
     pend_cmd_seq    = cmd->cmd_seq;
     pend_cycle_echo = cmd->cycle_id;     /* the master cycle the host was answering */
     uint8_t n = (cmd->n_chains > MAX_CHAINS) ? MAX_CHAINS : cmd->n_chains;
+    uint8_t fr = 0u;                     /* does this command carry a fault-reset? */
     for (uint8_t c = 0; c < n; c++) {
         uint8_t s = cmd->chains[c].chain_id;
         if (s >= NUM_SLAVES) { master_link_errors++; continue; }
         pend_chain[s]       = cmd->chains[c];   /* struct copy (62 B) */
         pend_chain_valid[s] = 1u;
+        uint8_t nm = (cmd->chains[c].n_motors > MAX_MOTORS_PER_SLAVE)
+                     ? MAX_MOTORS_PER_SLAVE : cmd->chains[c].n_motors;
+        for (uint8_t m = 0; m < nm; m++)
+            if (cmd->chains[c].motors[m].flags & CMD_FLAG_FAULT_RESET) fr = 1u;
     }
+    pend_fault_reset = fr;
     pend_fresh = 1u;                     /* publish last: the swap now sees a complete set */
 }
 
@@ -319,9 +351,13 @@ static void mailbox_swap(void)
             }
         }
         g_cmd_seq_active = pend_cmd_seq;
+        g_cycles_since_fresh = 0u;
+        g_fresh_fault_reset  = pend_fault_reset;
         pend_fresh = 0u;
     } else {
         cnt_missing++;                   /* no new command → active set re-sent (hold) */
+        if (g_cycles_since_fresh < 0xFFFFFFFFu) g_cycles_since_fresh++;
+        g_fresh_fault_reset = 0u;
     }
 }
 
@@ -399,9 +435,11 @@ void MotorMaster_Init(SPI_HandleTypeDef *hspi, UART_HandleTypeDef *huart)
     memset(host_chain_valid, 0, sizeof(host_chain_valid));
     memset(pend_chain, 0, sizeof(pend_chain));
     memset(pend_chain_valid, 0, sizeof(pend_chain_valid));
-    pend_fresh = 0u; pend_cmd_seq = CMD_SEQ_NONE; pend_cycle_echo = 0u;
+    pend_fresh = 0u; pend_cmd_seq = CMD_SEQ_NONE; pend_cycle_echo = 0u; pend_fault_reset = 0u;
     g_cmd_seq_active = CMD_SEQ_NONE; g_cmd_seq_rx = CMD_SEQ_NONE;
     cnt_on_time = cnt_late = cnt_missing = cnt_duplicate = 0u;
+    g_cycles_since_fresh = 0u; g_fresh_fault_reset = 0u;
+    host_watchdog_reset(&g_host_wd); g_host_action = HOST_LINK_OK;
     memset(latest_tele, 0, sizeof(latest_tele));
     memset(slave_crc_errors, 0, sizeof(slave_crc_errors));
     memset(spi_seq, 0, sizeof(spi_seq));
@@ -433,12 +471,28 @@ static void poll_one_slave(uint8_t s)
         return;   /* skip the normal exchange this cycle */
     }
 #endif
-    /* Read this slave's ACTIVE command (set only by mailbox_swap at cycle start, same
-       main-loop context as this poll — no masking needed). A ROBOT_CMD chain if one has
-       been applied, else a NOP keepalive (still refreshes the watchdog + clocks tele). */
+    /* Decide the chain to send this slave (active buffer is set only by mailbox_swap at
+       cycle start, same main-loop context — no masking needed):
+         - host-death tripped → the master OVERRIDES with DAMPED or IDLE for every motor;
+         - else an applied host command → re-send it (ROBOT_CMD);
+         - else (nothing ever applied) → a NOP keepalive, which clocks telemetry but does
+           NOT refresh the slave's command watchdog (task 6). */
     uint8_t     opcode;
     cmd_chain_t chain_local;
-    if (host_chain_valid[s]) {
+    if (g_host_action != HOST_LINK_OK) {
+        opcode = SPI_OP_ROBOT_CMD;
+        memset(&chain_local, 0, sizeof(chain_local));
+        chain_local.chain_id = s;
+        uint8_t nm = slave_motor_counts[s];
+        chain_local.n_motors = nm;
+        uint8_t damped = (g_host_action == HOST_LINK_DAMPED);
+        uint8_t mode   = damped ? (uint8_t)REQ_DAMPED : (uint8_t)REQ_IDLE;
+        uint8_t flags  = (uint8_t)(CMD_FLAG_VALID | (damped ? CMD_FLAG_USE_CONFIG_GAINS : 0u));
+        for (uint8_t i = 0; i < nm && i < MAX_MOTORS_PER_SLAVE; i++) {
+            chain_local.motors[i].mode_req = mode;    /* DAMPED uses config Kd (gains flag) */
+            chain_local.motors[i].flags    = flags;
+        }
+    } else if (host_chain_valid[s]) {
         opcode      = SPI_OP_ROBOT_CMD;
         chain_local = host_chain[s];
     } else {
@@ -527,6 +581,11 @@ void MotorMaster_ProcessLoop(void)
         uint32_t t0 = cycle_us_now();           /* cycle service start (µs) */
         master_cycle_id++;
         mailbox_swap();                         /* apply-at-n+1: take the newest complete set */
+        /* Host-death dead-man: if the host went quiet for too long while armed, override
+           what we send the slaves (DAMPED → IDLE), latched until a fault-reset command. */
+        g_host_action = host_watchdog_step(&g_host_wd, g_cycles_since_fresh, any_motor_armed(),
+                                           g_fresh_fault_reset, HOST_LOST_CYCLES,
+                                           HOST_LOST_DAMP_CYCLES);
         for (uint8_t s = 0; s < NUM_SLAVES; s++) {
             poll_one_slave(s);
         }
