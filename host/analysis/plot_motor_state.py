@@ -21,7 +21,7 @@ import sys
 from collections import defaultdict
 
 import convert_log  # sibling module (host/analysis on sys.path when run as a script)
-from master_link.protocol import CAUSE_NAMES  # single source of truth
+from master_link.protocol import CAUSE_NAMES, LIFECYCLE_NAMES  # single source of truth
 
 
 def _f(x):
@@ -111,7 +111,7 @@ def _load_state(folder):
         if t is None:
             continue
         state[r["motor"]].append((t, _f(r["pos"]), _f(r["vel"]), _f(r["tau"]),
-                                  int(_f(r["cause"]) or 0)))
+                                  int(_f(r["cause"]) or 0), int(_f(r.get("state")) or 0)))
     return state, offset, ("master_ts_ms" if use_master else "host_ts")
 
 
@@ -138,11 +138,32 @@ def _load_cmd(folder, offset):
 
 def _fault_onsets(samples):
     onsets, prev = [], 0
-    for t, _p, _v, _tau, cause in samples:
+    for s in samples:
+        cause = s[4]
         if cause != 0 and prev == 0:
-            onsets.append((t, cause))
+            onsets.append((s[0], cause))
         prev = cause
     return onsets
+
+
+def _mode_transitions(samples):
+    """Lifecycle-state transitions [(t, state_int)] — one per change (incl. the first),
+    so the timeline shows HOLD/MIT/DAMPED/TO_ZERO/IDLE/FAULT as labeled markers."""
+    out, prev = [], None
+    for s in samples:
+        st = s[5]
+        if st != prev:
+            out.append((s[0], st))
+            prev = st
+    return out
+
+
+def _session_start(folder):
+    """(date, HH:MM:SS) parsed from logs/<date>/<HH-MM-SS>_<name> — the session wall start."""
+    base = os.path.basename(folder)
+    date = os.path.basename(os.path.dirname(folder))
+    hms = base.split("_", 1)[0].replace("-", ":")
+    return date, hms
 
 
 def main(argv=None):
@@ -173,6 +194,11 @@ def main(argv=None):
     cmds = _load_cmd(folder, offset)
     print(f"session: {folder}   time base: {base}")
 
+    clock = "master clock" if base == "master_ts_ms" else "host clock"
+    xlabel = f"Time since streaming start [s] ({clock})"
+    date, hms = _session_start(folder)
+    logname = os.path.basename(folder)
+
     t0 = min(s[0] for m in state.values() for s in m)
 
     for motor in sorted(state, key=lambda m: (m == "", m)):
@@ -183,7 +209,8 @@ def main(argv=None):
                   "tau [Nm]": [s[3] for s in samples]}
 
         fig, axes = plt.subplots(3, 1, sharex=True, figsize=(11, 7))
-        fig.suptitle(f"motor {motor}   ({os.path.basename(folder)})")
+        fig.suptitle(f"motor {motor}   —   {logname}\n"
+                     f"session start {date} {hms}  ({clock})", fontsize=10)
 
         mc = cmds.get(motor, {"mit": [], "ctrl": []})
         cmd_t = [m[0] - t0 for m in mc["mit"]]
@@ -199,16 +226,22 @@ def main(argv=None):
             ax.set_ylabel(label)
             ax.grid(True, alpha=0.3)
 
+        # Lifecycle mode changes (HOLD/MIT/DAMPED/TO_ZERO/IDLE/FAULT): labeled verticals.
+        for t, st in _mode_transitions(samples):
+            for ax in axes:
+                ax.axvline(t - t0, color="steelblue", ls="-", lw=0.8, alpha=0.5)
+            axes[0].annotate(LIFECYCLE_NAMES.get(st, f"?{st}"),
+                             xy=(t - t0, 0.02), xycoords=("data", "axes fraction"),
+                             color="steelblue", fontsize=7, rotation=90, va="bottom", ha="right")
+        # Fault onsets: red verticals labeled with the cause (top).
         for t, cause in _fault_onsets(samples):
             for ax in axes:
                 ax.axvline(t - t0, color="red", ls="--", lw=1.0, alpha=0.8)
             axes[0].annotate(CAUSE_NAMES.get(cause, f"?{cause}"),
                              xy=(t - t0, 1.0), xycoords=("data", "axes fraction"),
                              color="red", fontsize=8, rotation=90, va="top", ha="right")
-        for t, _op in mc["ctrl"]:
-            axes[0].axvline(t - t0, color="gray", ls=":", lw=0.7, alpha=0.5)
 
-        axes[-1].set_xlabel("t [s]")
+        axes[-1].set_xlabel(xlabel)
         fig.tight_layout()
         if args.save or (not args.no_show and not interactive):
             out = os.path.join(folder, f"motor_{motor or 'NA'}.png")
