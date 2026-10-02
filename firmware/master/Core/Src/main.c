@@ -94,7 +94,23 @@ int main(void)
   SystemClock_Config();
 
   /* USER CODE BEGIN SysInit */
-
+  /* USB soft-disconnect at boot. After an ST-Link reflash/reset the host often keeps
+     the stale CDC-ACM device node, and the OTG OUT endpoint can wedge so multi-packet
+     ROBOT_CMD frames never complete — previously only a power cycle cleared it. Driving
+     USB D+ (PA12) low for ~10 ms makes the host see a disconnect; when MX_USB_DEVICE_Init
+     re-enables the DP pull-up the host re-enumerates fresh, so a reflash alone recovers. */
+  __HAL_RCC_GPIOA_CLK_ENABLE();
+  {
+      GPIO_InitTypeDef dp = {0};
+      dp.Pin   = GPIO_PIN_12;            /* USB_OTG_FS D+ */
+      dp.Mode  = GPIO_MODE_OUTPUT_PP;
+      dp.Pull  = GPIO_NOPULL;
+      dp.Speed = GPIO_SPEED_FREQ_LOW;
+      HAL_GPIO_Init(GPIOA, &dp);
+      HAL_GPIO_WritePin(GPIOA, GPIO_PIN_12, GPIO_PIN_RESET);
+      HAL_Delay(10);
+      HAL_GPIO_DeInit(GPIOA, GPIO_PIN_12);   /* release; USB init reclaims PA12 as AF */
+  }
   /* USER CODE END SysInit */
 
   /* Initialize all configured peripherals */
