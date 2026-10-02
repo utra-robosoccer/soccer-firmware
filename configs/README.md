@@ -14,7 +14,7 @@ configs/
   active            <- one line: the active setup name (e.g. `1s_5m`)
   1s_5m/
     slave0.yaml
-  2s_7m/
+  2s_10m/
     slave0.yaml
     slave1.yaml
   robot/
