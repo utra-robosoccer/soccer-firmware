@@ -24,6 +24,7 @@ import sys
 
 from master_link import protocol as P
 from master_link import motor_config_gen as mc
+from master_link.timeutil import U32Unwrapper
 from master_link.datalog import BinaryLogReader
 from master_link.datalog import format as LOG
 
@@ -41,7 +42,7 @@ STATUS_FIELDS = ["host_ts", "type", "robot_state", "slave_alive", "uptime_ms",
                  "link_errors", "rx_frames", "master_poll_hz", "telemetry_hz",
                  "slave_tick_hz", "host_cmd_hz", "slave_id", "motors_alive",
                  "crc_errors", "cmd_crc_errors", "seq_gaps",
-                 "cycle_id", "last_cmd_seq_rx", "missed_deadlines", "n_chains"]
+                 "cycle_id", "master_time_s", "last_cmd_seq_rx", "missed_deadlines", "n_chains"]
 EVENT_FIELDS = ["host_ts", "kind", "text"]
 LOOP_FIELDS = ["host_ts", "seq", "period_ms", "step_ms", "send_ms", "lateness_ms"]
 
@@ -80,6 +81,7 @@ def convert(path):
     event_w = _writer("events.csv", EVENT_FIELDS)
     loop_w = _writer("loop_timing.csv", LOOP_FIELDS)
 
+    mtu = U32Unwrapper()   # unwrap the 32-bit master_time_us across the log
     c = dict(rx=0, tx=0, discard_records=0, discard_bytes=0, version_frames=0,
              dropped_records=0, drop_events=0)
 
@@ -103,6 +105,7 @@ def convert(path):
                 status_w.writerow({"host_ts": ht, "type": "ROBOT",
                                    "robot_state": d["robot_state"],
                                    "cycle_id": d["cycle_id"],
+                                   "master_time_s": mtu.update(d["master_time_us"]) / 1e6,
                                    "last_cmd_seq_rx": d["last_cmd_seq_rx"],
                                    "missed_deadlines": d["missed_deadlines"],
                                    "n_chains": d["n_chains"]})

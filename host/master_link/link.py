@@ -18,6 +18,7 @@ from serial.tools import list_ports
 from . import protocol as P
 from . import config_meta
 from . import motor_config_gen as _mc
+from .timeutil import U32Unwrapper
 from .datalog import BinaryLogWriter
 from .datalog import format as LOG
 
@@ -165,6 +166,7 @@ class MasterLink:
         self._slaves: dict = {}
         self._robot: dict | None = None  # latest tele_robot_t meta (cycle_id etc.)
         self._cycle_id = 0               # last master cycle_id seen (echoed in commands)
+        self._mtu = U32Unwrapper()       # unwrap the 32-bit master_time_us (wraps ~71 min)
         self._live: dict = {}            # (slave, local) -> _LiveDetector
         self._live_logged = False        # EVENT "live" emitted once, on first live motor
 
@@ -238,6 +240,7 @@ class MasterLink:
             log_live = False
             with self._lock:
                 self._robot = dict(cycle_id=d["cycle_id"], master_time_us=d["master_time_us"],
+                                   master_time_us_mono=self._mtu.update(d["master_time_us"]),
                                    last_cmd_seq_rx=d["last_cmd_seq_rx"],
                                    missed_deadlines=d["missed_deadlines"],
                                    n_chains=d["n_chains"], robot_state=d["robot_state"],

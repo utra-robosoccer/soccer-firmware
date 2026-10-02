@@ -115,16 +115,16 @@ boundaries are found by CRC resync.
 | `ver_flags` | u16 | low byte = `PROTO_VERSION` (=3), high byte reserved 0 |
 | `crc16` | u16 | CRC16-CCITT over header(crc=0)+payload |
 
-### Hierarchy (shared `protocol.h`; fixed WIRE caps MAX_CHAINS=6, MAX_MOTORS_PER_CHAIN=5)
+### Hierarchy (shared `protocol.h`; fixed WIRE caps MAX_CHAINS=4, MAX_MOTORS_PER_CHAIN=5)
 - `cmd_motor_t` (12 B): `mode_req`, pos/vel/kp/kd/tau_ff (fixed-point), `flags`
   (`VALID` / `USE_CONFIG_GAINS` / `FAULT_RESET`).
 - `cmd_chain_t` (62 B): `chain_id`, `n_motors`, `cmd_motor_t[5]`.
-- `cmd_robot_t` (378 B): `cycle_id`, `cmd_seq`, `n_chains`, `cmd_chain_t[6]`.
+- `cmd_robot_t` (254 B): `cycle_id`, `cmd_seq`, `n_chains`, `cmd_chain_t[4]`.
 - `tele_motor_t` (21 B, §5): pos/vel/tau, temp, `state`, `cause`, `motor_mode`, `motor_fault`,
   `flags`, `fb_age_ms`, `fault_word`, `last_applied_seq`, reserved.
 - `tele_chain_t` (117 B): `chain_id`, `n_motors`, `spi_seq_echo`, `slave_time_us`,
   `cmd_crc_errors`, `can_tx_errors`, `tele_motor_t[5]`.
-- `tele_robot_t` (714 B): `cycle_id`, `master_time_us`, `last_cmd_seq_rx`, `missed_deadlines`,
+- `tele_robot_t` (480 B): `cycle_id`, `master_time_us`, `last_cmd_seq_rx`, `missed_deadlines`,
   `n_chains`, `robot_state`, `tele_chain_t[6]`.
 
 ### Messages — host → master
@@ -136,7 +136,7 @@ boundaries are found by CRC resync.
 ### Messages — master → host
 | type | struct | fields / encoding | built | parsed | trigger/rate |
 |---|---|---|---|---|---|
-| `MSG_ROBOT_TELE` 0x09 | `tele_robot_t` | whole-robot telemetry; the master transmits only the **populated prefix** (header + `n_chains` chains ≈ 129 B for one chain, not the full 714 B) — emission-gated at chain granularity (a dead slave's chain is omitted → that chain goes silent on the host) | `emit_robot_tele` (`spi_master.c`) | `MasterLink._ingest`→`parse_robot_tele` | 200 Hz |
+| `MSG_ROBOT_TELE` 0x09 | `tele_robot_t` | whole-robot telemetry; the master transmits only the **populated prefix** (header + `n_chains` chains ≈ 129 B for one chain, not the full 480 B) — emission-gated at chain granularity (a dead slave's chain is omitted → that chain goes silent on the host) | `emit_robot_tele` (`spi_master.c`) | `MasterLink._ingest`→`parse_robot_tele` | 200 Hz |
 | `MSG_MASTER_STATUS` 0x02 | `MasterStatus{robot_state,slave_alive,uptime_ms,link_errors,rx_frames, master_poll_hz,telemetry_hz,slave_tick_hz,host_cmd_hz}` | now carries the configured rates (§10) | `emit_master_status` | `parse_master_status` | 20 Hz |
 | `MSG_SLAVE_STATUS` 0x03 | `SlaveStatus{slave_id,motors_alive,uptime_ms,crc_errors,cmd_crc_errors,seq_gaps}` | counters | `emit_slave_status` | `parse_slave_status` | 20 Hz |
 | `MSG_PING` 0x01 (PONG) | (empty) | **echoes request `seq`** | `usbd_cdc_if.c` → posted to TX ring | logged as RX_FRAME | on PING |
@@ -167,7 +167,7 @@ boundaries are found by CRC resync.
   multi-packet OUT reception — it's capped at one packet for that reason; the telemetry
   prefix-truncation keeps the stream ~26 KB/s, well under the ~64 KB/s single-packet ceiling).
 - Master ingress: `accum[512]` reassembly (USB-ISR context) — must hold a full
-  `MSG_HEADER + cmd_robot_t` (394 B) across ~7 USB OUT packets.
+  `MSG_HEADER + cmd_robot_t` (394 B) across ~5 USB OUT packets.
 - **USB soft-disconnect at boot** (`main.c` SysInit): drives D+ (PA12) low ~10 ms so the host
   re-enumerates fresh after an ST-Link reflash — without it the OTG OUT endpoint could wedge
   (multi-packet OUT stops completing) until a power cycle.
@@ -189,7 +189,7 @@ boundaries are found by CRC resync.
     Comparable to the v2 ~19 ms (slightly higher: larger frames + the DAMPED/TO_ZERO-capable
     path). It lands below the ~29 ms physical torque-onset because the echo flips on the
     controller's acknowledgement, before a measurable torque departure.
-  - **Throughput note (v3):** the full 714 B `tele_robot_t` at 200 Hz (~146 KB/s) swamped the
+  - **Throughput note (v3):** the full 480 B `tele_robot_t` at 200 Hz (~96 KB/s) swamped the
     pure-Python host and built a ~400 ms backlog. Resolved by (a) the master transmitting only
     the populated prefix (~129 B, ~26 KB/s), (b) `binascii.crc_hqx` on the host (decode
     ~37 k frames/s, ≫ the 200 Hz stream), and (c) dropping the blocking `flush()` in
@@ -199,20 +199,34 @@ boundaries are found by CRC resync.
 
 ## 3. Master internals
 
-STM32F446 (`firmware/master/`). No motor logic — it is a USB↔SPI bridge + command stager +
-telemetry forwarder. Main loop drives three timers.
+STM32F446 (`firmware/master/`). No motor logic — it is a USB↔SPI bridge + command mailbox +
+telemetry forwarder. The 200 Hz cycle is driven by a **hardware timer (TIM2)**, not
+`HAL_GetTick` deadlines (`master_cycle.c`).
 
 ### Loops / rates
-| loop | period | does |
-|---|---|---|
-| command poll | `MASTER_POLL_PERIOD_MS = 5 ms` (200 Hz) | `poll_one_slave` — one SPI full-duplex exchange per slave; `master_cycle_id++` per round |
-| telemetry emit | `MASTER_TELE_PERIOD_MS = 5 ms` (200 Hz) | `emit_robot_tele` — one `MSG_ROBOT_TELE` for the robot (populated-prefix) |
-| status emit | `MASTER_STATUS_PERIOD_MS = 50 ms` (20 Hz) | `emit_master_status` + `emit_slave_status` |
+TIM2 (32-bit) runs free at 1 MHz as a monotonic µs clock; its CH1 output-compare fires at
+`MASTER_POLL_HZ` on an absolute grid (`CCR1 += period`, no drift). The ISR does **no work** —
+it sets a "cycle due" flag + the fire time; `MotorMaster_ProcessLoop` does the work:
 
-(Periods are generated into `motor_config.h` / `system_config.h` from the configured rates,
-§10.) A CRC-passed poll updates `latest_tele[s]` and marks the slave alive; `emit_robot_tele`
-includes only currently-alive slaves' chains, so a failed/absent poll drops that chain
-(silence = dead). `missed_deadlines` counts poll/tele rounds that fell a full period behind.
+| loop | trigger | does |
+|---|---|---|
+| cycle (poll **+** telemetry) | TIM2 CH1 @ `MASTER_POLL_HZ` (200 Hz) | `master_cycle_id++`; `poll_one_slave` for every slave in order; then `emit_robot_tele` immediately (telemetry is **tied to the poll**, no separate timer). `master_time_us` = the cycle's TIM2 µs timestamp. |
+| status emit | cycle divider (every `MASTER_POLL_HZ/20` = 10 cycles ⇒ 20 Hz) | `emit_master_status` + `emit_slave_status` |
+| USB TX drain | every main-loop iteration | `usb_tx_pump_responses` + `usb_tx_pump` |
+
+(Rates are generated into `motor_config.h` / `system_config.h` from the config, §10; the TIM2
+period = `1e6 / MASTER_POLL_HZ` µs.) A CRC-passed poll updates `latest_tele[s]` and marks the
+slave alive; `emit_robot_tele` includes only currently-alive slaves' chains, so a failed/absent
+poll drops that chain (silence = dead). **`missed_deadlines` now = cycle overruns** —
+`master_cycle_overruns()`, incremented when a cycle's due-flag is still set as the next TIM2
+tick fires (the main loop fell a full period behind); replaces the old `HAL_GetTick` heuristic.
+
+**Measured (1 slave, TIM2, 2026-10-01):** cycle period 5000 µs, σ ≈ 9 µs idle / 26 µs under
+load (min 4907, max 5093); poll+assembly ≈ 2.55 ms/cycle (max 2.60, headroom to 5 ms);
+flag→service delay ≈ 2 µs (max 4); 0 overruns. cmd_seq latency **median 23.0 ms** (p95 23.8,
+max 24.4, 0 never-applied/1000) — vs the pre-TIM2 24.4 ms the median is slightly lower and the
+spread collapses from ~11 ms to ~2.5 ms (the hardware grid removes the 1 ms `HAL_GetTick`
+cadence jitter; the ~5 ms command→cycle quantization is structural, unchanged).
 
 ### Command mailbox (USB-ISR writes, main reads)
 Level-triggered, so there is no one-shot staging or priority ladder anymore.
@@ -673,7 +687,7 @@ median, `logs/2026-10-01/16-36-18_man_1s_1m.bin`):
 
 ```
 t=0   host send_robot_cmd (cmd_seq k)
-  │  USB OUT (~7 pkts) + master CDC RX ISR  ~0.5–1 ms   → host_chain[s] (latest-wins)
+  │  USB OUT (~5 pkts) + master CDC RX ISR  ~0.5–1 ms   → host_chain[s] (latest-wins)
   │  wait for next master SPI poll          0–5 ms      (200 Hz quantization)
   │  SPI transfer (blocking)                ~0.1 ms     → slave cmd_inbox
   │  wait for next slave control tick       0–5 ms      (200 Hz) → apply_cmd stores target

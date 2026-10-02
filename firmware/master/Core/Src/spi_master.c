@@ -6,9 +6,10 @@
 static SPI_HandleTypeDef  *master_hspi  = NULL;
 static UART_HandleTypeDef *master_huart = NULL;
 
-/* Loop cadences: MASTER_POLL_PERIOD_MS / MASTER_TELE_PERIOD_MS are GENERATED into
- * motor_config.h (from configs/<setup>/system.yaml). Status stays a local 20 Hz. */
-#define MASTER_STATUS_PERIOD_MS 50u   /* 20 Hz MASTER/SLAVE_STATUS */
+/* The 200 Hz cycle is driven by the TIM2 hardware interrupt (master_cycle): one
+ * cycle = poll all slaves then emit tele_robot_t. Rates come from the generated
+ * MASTER_POLL_HZ. Status is a cycle divider off that (20 Hz). */
+#define MASTER_STATUS_DIV (MASTER_POLL_HZ / 20u)   /* cycles per status emit (=10 @ 200 Hz) */
 
 /* ── legacy USB-command path (unused, kept per spec / .h ABI) ────────────── */
 uint8_t new_usb_packet_rx_flag = 0;
@@ -326,47 +327,30 @@ static void poll_one_slave(uint8_t s)
 
 void MotorMaster_ProcessLoop(void)
 {
-    static uint32_t next_poll_ms   = 0;
-    static uint32_t next_tele_ms   = 0;
-    static uint32_t next_status_ms = 0;
-    uint32_t now = HAL_GetTick();
+    static uint16_t cycles_since_status = 0;
 
-    /* Move ISR-posted responses (ControlResp/PONG) into the ring — this is the
-       only place they enter usb_tx_write, keeping it single-producer — then drain
-       the ring to USB. */
+    /* Drain the USB RX ring (scan + dispatch host frames) and pump the TX ring
+       every iteration — both single-producer here in the main loop. */
+    MotorMaster_ProcessUsbRx();
     usb_tx_pump_responses();
     usb_tx_pump();
 
-    /* SPI poll — command delivery at MASTER_POLL_HZ, every slave each tick. One
-       cycle_id per poll round (the master's poll counter, echoed in telemetry). */
-    if ((int32_t)(now - next_poll_ms) >= 0) {
-        if ((int32_t)(now - next_poll_ms) > (int32_t)MASTER_POLL_PERIOD_MS) {
-            master_missed_deadlines++;   /* fell a full period behind */
-        }
-        next_poll_ms += MASTER_POLL_PERIOD_MS;
+    /* One hardware-timed cycle (TIM2 ISR only flagged us; the work is here): poll
+       every slave in order, then immediately emit this cycle's tele_robot_t. */
+    if (master_cycle_take(NULL)) {
+        uint32_t t0 = cycle_us_now();           /* cycle service start (µs) */
         master_cycle_id++;
         for (uint8_t s = 0; s < NUM_SLAVES; s++) {
             poll_one_slave(s);
         }
-    }
+        emit_robot_tele(t0);                     /* stamp master_time_us = cycle start */
 
-    /* Telemetry emit — one MSG_ROBOT_TELE for the whole robot. Emission-gated at
-       chain granularity inside emit_robot_tele: a slave whose most recent poll
-       failed CRC is omitted, so on the host that chain goes silent (freshness). */
-    if ((int32_t)(now - next_tele_ms) >= 0) {
-        if ((int32_t)(now - next_tele_ms) > (int32_t)MASTER_TELE_PERIOD_MS) {
-            master_missed_deadlines++;
-        }
-        next_tele_ms += MASTER_TELE_PERIOD_MS;
-        emit_robot_tele(now);
-    }
-
-    /* Status emit at 20 Hz */
-    if ((int32_t)(now - next_status_ms) >= 0) {
-        next_status_ms += MASTER_STATUS_PERIOD_MS;
-        emit_master_status(now);
-        for (uint8_t s = 0; s < NUM_SLAVES; s++) {
-            emit_slave_status(s, now);
+        /* 20 Hz status — cycle divider off the 200 Hz cycle (its own schedule). */
+        if (++cycles_since_status >= MASTER_STATUS_DIV) {
+            cycles_since_status = 0;
+            uint32_t now_ms = HAL_GetTick();
+            emit_master_status(now_ms);
+            for (uint8_t s = 0; s < NUM_SLAVES; s++) emit_slave_status(s, now_ms);
         }
     }
 }

@@ -24,6 +24,7 @@
 /* USER CODE BEGIN Includes */
 #include "spi_master.h"
 #include "usb_tx.h"
+#include "master_cycle.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -127,6 +128,9 @@ int main(void)
   HAL_GPIO_WritePin(GREEN_LED_GPIO_Port, GREEN_LED_Pin, GPIO_PIN_SET);
   HAL_Delay(3000);
   HAL_GPIO_WritePin(GREEN_LED_GPIO_Port, GREEN_LED_Pin, GPIO_PIN_RESET);
+
+  /* Drive the 200 Hz cycle from TIM2 (period from the generated MASTER_POLL_HZ). */
+  master_cycle_init(1000000u / MASTER_POLL_HZ);
 
 
 
