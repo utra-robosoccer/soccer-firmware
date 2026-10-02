@@ -31,6 +31,7 @@
 #include "motor_chain.h"
 #include "slave_spi.h"
 #include "motor_runtime.h"
+#include "../../../../common/include/slave_service.h"  /* slave_service_due — forward/fallback */
 #include "spi_proto.h"     /* SPI frame codec: build telemetry, parse commands */
 
 /* USER CODE END Includes */
@@ -180,6 +181,29 @@ static void dbg_print_motor_state(const motor_t *motor)
 }
 #endif /* SLAVE_UART_DEBUG */
 
+/* Assemble + stage this slave's tele_chain_t for the next SPI exchange. Called once per
+   loop iteration after the service (send) and feedback handling, so it carries the
+   freshest mirrored motor state and the cmd_seq confirmation paired from the most recent
+   reply — which the master then reads on the very next exchange. */
+static void stage_telemetry(void)
+{
+    tele_chain_t chain;
+    memset(&chain, 0, sizeof(chain));
+    chain.chain_id       = 0u;
+    chain.n_motors       = N_MOTORS;
+    chain.spi_seq_echo   = spi_echo_seq;
+    chain.spi_resyncs    = spi_resyncs;                        /* DMA realigns (wraps) */
+    chain.slave_time_us  = (uint32_t)(HAL_GetTick() * 1000u);  /* ms→µs (no µs timer) */
+    chain.cmd_crc_errors = (uint16_t)cmd_crc_errors;
+    chain.can_tx_errors  = (uint16_t)can_tx_error_count;
+    for (uint8_t _i = 0; _i < N_MOTORS; _i++) {
+        motor_runtime_sample(&chain.motors[_i], _i);
+    }
+    uint8_t frame[PAYLOAD_LENGTH];
+    spi_proto_build_tele(frame, &chain);
+    spi_write_next_tx_buf(frame, tele_stage_buf);
+}
+
 /* USER CODE END 0 */
 
 /**
@@ -234,6 +258,17 @@ int main(void)
 
   loop_next_poll_ms   = HAL_GetTick();
   last_feedback_count = can_feedback_count;
+
+  /* µs-resolution timebase (DWT cycle counter) for forward/fallback service gating.
+     Thresholds scale with the generated master cycle, so 200/400 Hz both work. */
+  CoreDebug->DEMCR |= CoreDebug_DEMCR_TRCENA_Msk;
+  DWT->CYCCNT = 0u;
+  DWT->CTRL  |= DWT_CTRL_CYCCNTENA_Msk;
+  const uint32_t cyc_per_us    = SystemCoreClock / 1000000u;
+  const uint32_t svc_min_ticks = (MASTER_CYCLE_US / 2u) * cyc_per_us;         /* 0.5 cycle */
+  const uint32_t svc_fb_ticks  = ((MASTER_CYCLE_US * 8u) / 5u) * cyc_per_us;  /* 1.6 cycle */
+  uint32_t last_send_cyc = 0u;   /* last service of any kind (cycles)       */
+  uint32_t last_exch_cyc = 0u;   /* last exchange-driven service (cycles)   */
 #if SLAVE_UART_DEBUG
   dbg_last_print_ms   = HAL_GetTick();
 #endif
@@ -250,55 +285,13 @@ int main(void)
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
-    uint32_t now = HAL_GetTick();
+    uint32_t now     = HAL_GetTick();
+    uint32_t now_cyc = DWT->CYCCNT;
+    uint8_t  need_stage = 0u;   /* stage telemetry once at iteration end if anything changed */
 
-    /* 200 Hz CAN poll — motor_runtime handles MIT hold vs read-state per motor */
-    if ((int32_t)(now - loop_next_poll_ms) >= 0) {
-      loop_next_poll_ms += LOOP_POLL_PERIOD_MS;
-      motor_runtime_update(now);
-    }
-
-    /* On each new CAN feedback: refresh SPI telemetry buffer */
-    if (can_feedback_count != last_feedback_count) {
-      last_feedback_count = can_feedback_count;
-      HAL_GPIO_WritePin(STATUS_LED_GPIO_Port, STATUS_LED_Pin, GPIO_PIN_SET);
-      status_led_off_ms = now + STATUS_LED_PULSE_MS;
-
-#if SLAVE_UART_DEBUG
-      if ((now - dbg_last_print_ms) >= DBG_PRINT_PERIOD_MS) {
-        dbg_last_print_ms = now;
-        motor_t snap0;
-        motor_get_snapshot(0, &snap0);          /* coherent read for the debug print */
-        dbg_print_motor_state(&snap0);
-      }
-#endif
-
-      /* Assemble this slave's tele_chain_t (one chain), then CRC it. Each motor's
-         wire tele_motor_t is produced by motor_runtime_sample(); the codec adds
-         the CRC. (protocol.h: [tele_chain_t][crc16].) */
-      tele_chain_t chain;
-      memset(&chain, 0, sizeof(chain));
-      chain.chain_id       = 0u;
-      chain.n_motors       = N_MOTORS;
-      chain.spi_seq_echo   = spi_echo_seq;
-      chain.spi_resyncs    = spi_resyncs;                        /* DMA realigns (wraps) */
-      chain.slave_time_us  = (uint32_t)(HAL_GetTick() * 1000u);  /* ms→µs (no µs timer) */
-      chain.cmd_crc_errors = (uint16_t)cmd_crc_errors;
-      chain.can_tx_errors  = (uint16_t)can_tx_error_count;
-      for (uint8_t _i = 0; _i < N_MOTORS; _i++) {
-        motor_runtime_sample(&chain.motors[_i], _i);
-      }
-      uint8_t frame[PAYLOAD_LENGTH];
-      spi_proto_build_tele(frame, &chain);
-      spi_write_next_tx_buf(frame, tele_stage_buf);
-    }
-
-    if (status_led_off_ms != 0U && (int32_t)(now - status_led_off_ms) >= 0) {
-      HAL_GPIO_WritePin(STATUS_LED_GPIO_Port, STATUS_LED_Pin, GPIO_PIN_RESET);
-      status_led_off_ms = 0U;
-    }
-
-    /* SPI command handler — dispatch to motor_runtime state machine */
+    /* SPI command handler FIRST — forward-on-command: service the motors immediately
+       on every valid (CRC-OK) exchange, so a new command reaches the motor without
+       waiting for the slave's own tick. Each exchange is one master cycle. */
     if (data_receive_flag) {
       /* Fix 1 (torn-parse): cmd_inbox_buf is a pointer the SPI ISR reswaps, so
          parsing it in place could split a command across two transfers. Copy the
@@ -311,17 +304,13 @@ int main(void)
       data_receive_flag = 0;
       __enable_irq();
 
-      /* Verify the command-frame CRC + extract the header and cmd_chain_t. On
-         failure apply nothing this tick (a corrupt command must not refresh
-         watchdogs or move a motor) and count it; the master re-sends every poll
-         and the watchdog covers sustained loss. */
+      /* Verify the command-frame CRC + extract the header and cmd_chain_t. On a CRC
+         failure apply nothing (a corrupt command must not refresh watchdogs or move a
+         motor), count it, and resync the DMA — send nothing this exchange. */
       SpiCmdHdr   hdr;
       cmd_chain_t chain;
       if (!spi_proto_parse_cmd(cmd_local, &hdr, &chain)) {
         cmd_crc_errors++;
-        /* A CRC failure can mean the SPI-slave DMA has desynced (one bad exchange
-           offsets every later one). Re-align it so the next exchange recovers —
-           a single bad exchange must never wedge the slave. */
         slave_spi_resync(&hspi1);
       } else {
         spi_echo_seq = hdr.spi_seq;   /* echo the SPI link-health seq */
@@ -331,16 +320,75 @@ int main(void)
           motor_runtime_refresh_watchdog(_w);
 
         if (hdr.opcode == SPI_OP_ROBOT_CMD) {
-          /* Level-triggered per-motor mode requests (the mode-request state
-             machine). One chain per slave; apply the valid slots. */
+          /* Level-triggered per-motor mode requests. One chain per slave. */
           uint8_t n = (chain.n_motors > N_MOTORS) ? N_MOTORS : chain.n_motors;
           for (uint8_t _i = 0; _i < n; _i++) {
             motor_runtime_apply_cmd(_i, &chain.motors[_i], hdr.cmd_seq);
           }
         }
-        /* SPI_OP_NOP: watchdog refresh only (keepalive). */
+        /* apply_cmd → arm_enable can BLOCK ~25 ms (CAN enable handshake + settle delays),
+           so refresh the time base before servicing. Otherwise the watchdog/fault checks
+           run against the pre-arm `now` while watchdog_ms was just set to a later tick, and
+           (now - watchdog_ms) underflows u32 → a spurious WATCHDOG trip right after arming. */
+        now     = HAL_GetTick();
+        now_cyc = DWT->CYCCNT;
+        /* Forward service: send to all motors now (ROBOT_CMD applied new targets;
+           NOP holds the current ones). The min-guard prevents a double send. */
+        if (slave_service_due(SVC_EXCHANGE, 1u, now_cyc, last_send_cyc, last_exch_cyc,
+                              svc_min_ticks, svc_fb_ticks)) {
+          motor_runtime_update(now);
+          last_send_cyc = now_cyc;
+          last_exch_cyc = now_cyc;
+          need_stage = 1u;
+        }
       }
     }
+
+    /* Fallback tick — services ONLY when exchanges have stopped (SPI link lost), so
+       the motors keep holding until the watchdog trips. In normal streaming every
+       exchange forwards, so this never fires (no double send). */
+    if ((int32_t)(now - loop_next_poll_ms) >= 0) {
+      loop_next_poll_ms += LOOP_POLL_PERIOD_MS;
+      if (slave_service_due(SVC_FALLBACK, 1u, now_cyc, last_send_cyc, last_exch_cyc,
+                            svc_min_ticks, svc_fb_ticks)) {
+        motor_runtime_update(now);
+        last_send_cyc = now_cyc;
+        need_stage = 1u;
+      }
+    }
+
+    /* On each new CAN feedback: mirror the reply into motor state + pair cmd_seq NOW
+       (not at the next exchange), so the telemetry staged below carries the freshest
+       state and this reply's confirmation → read by the master on the next exchange. */
+    if (can_feedback_count != last_feedback_count) {
+      last_feedback_count = can_feedback_count;
+      motor_runtime_on_feedback(now);
+      need_stage = 1u;
+      HAL_GPIO_WritePin(STATUS_LED_GPIO_Port, STATUS_LED_Pin, GPIO_PIN_SET);
+      status_led_off_ms = now + STATUS_LED_PULSE_MS;
+
+#if SLAVE_UART_DEBUG
+      if ((now - dbg_last_print_ms) >= DBG_PRINT_PERIOD_MS) {
+        dbg_last_print_ms = now;
+        motor_t snap0;
+        motor_get_snapshot(0, &snap0);          /* coherent read for the debug print */
+        dbg_print_motor_state(&snap0);
+      }
+#endif
+    }
+
+    /* Stage telemetry once per iteration, after both the service (send + any state/fault
+       change) and feedback (fresh state + confirmation) — so the next exchange carries the
+       freshest frame. Gated so an idle spin doesn't rebuild needlessly. */
+    if (need_stage) {
+      stage_telemetry();
+    }
+
+    if (status_led_off_ms != 0U && (int32_t)(now - status_led_off_ms) >= 0) {
+      HAL_GPIO_WritePin(STATUS_LED_GPIO_Port, STATUS_LED_Pin, GPIO_PIN_RESET);
+      status_led_off_ms = 0U;
+    }
+
   }
   /* USER CODE END 3 */
 }

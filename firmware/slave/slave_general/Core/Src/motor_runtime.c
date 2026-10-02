@@ -153,6 +153,8 @@ static void arm_enable(uint8_t idx)
     enable_monitor_reset(idx);
     r->to_zero_arrived = 0u;
     r->watchdog_ms = HAL_GetTick();
+    r->armed_ms    = HAL_GetTick();   /* CAN-timeout grace: a just-disabled motor has a
+                                         stale last_fb; don't trip until it can reply. */
 }
 
 /* ── public API ──────────────────────────────────────────────────────────── */
@@ -247,11 +249,13 @@ void motor_runtime_apply_cmd(uint8_t idx, const cmd_motor_t *m, uint16_t cmd_seq
     r->state = d.next_state;
 }
 
-void motor_runtime_update(uint32_t now_ms)
+/* Feedback-driven: mirror the latest Type-2 into motors_rt, step the enable monitor,
+   and pair cmd_seq (last_applied). Run when fresh feedback arrives, BEFORE telemetry is
+   staged, so the staged frame carries the freshest state + this cycle's confirmation. */
+void motor_runtime_on_feedback(uint32_t now_ms)
 {
+    (void)now_ms;
     for (uint8_t i = 0; i < N_MOTORS; i++) {
-        uint8_t cid = motor_configs[i].can_id;
-
         motor_t snap;
         motor_get_snapshot(i, &snap);
 
@@ -271,26 +275,41 @@ void motor_runtime_update(uint32_t now_ms)
                            motors_rt[i].state == LIFE_DAMPED ||
                            motors_rt[i].state == LIFE_TO_ZERO);
 
-        /* Enable monitor + cmd_seq reply pairing, both on a FRESH feedback frame. */
         uint8_t mon_fresh = (snap.fb_count != motors_rt[i].mon_prev_fb_count);
-        EnableMonVerdict mon = enable_monitor_step(
+        motors_rt[i].mon_verdict = (uint8_t)enable_monitor_step(
             driving, mon_fresh, (uint8_t)(snap.status == RS_MODE_NORMAL),
             MOTOR_ENABLE_MON_K, &motors_rt[i].mon_not_enabled);
         if (mon_fresh) {
             motors_rt[i].mon_prev_fb_count = snap.fb_count;
-            cmd_seq_on_reply(&motors_rt[i].cmd_track);   /* pairs with last tick's MIT */
+            cmd_seq_on_reply(&motors_rt[i].cmd_track);   /* pairs this reply with its MIT */
         }
+    }
+}
 
-        /* Fault detection while driving (priority order; first trip latches FAULT). */
+void motor_runtime_update(uint32_t now_ms)
+{
+    for (uint8_t i = 0; i < N_MOTORS; i++) {
+        uint8_t cid = motor_configs[i].can_id;
+
+        uint8_t driving = (motors_rt[i].state == LIFE_HOLD ||
+                           motors_rt[i].state == LIFE_MIT  ||
+                           motors_rt[i].state == LIFE_DAMPED ||
+                           motors_rt[i].state == LIFE_TO_ZERO);
+
+        /* Fault detection on the mirrored feedback state (priority; first trip latches).
+           CAN-timeout is time-based (feedback absence) so it belongs here in the per-cycle
+           service, not the feedback path; the armed_ms grace covers the first cycles after
+           an arm (a just-disabled motor's last_fb is stale). */
         if (driving &&
-            (uint32_t)(now_ms - snap.last_fb_ms) >= MOTOR_CAN_FB_TIMEOUT_MS) {
+            (uint32_t)(now_ms - motors_rt[i].last_fb_ms) >= MOTOR_CAN_FB_TIMEOUT_MS &&
+            (uint32_t)(now_ms - motors_rt[i].armed_ms)   >= MOTOR_CAN_FB_TIMEOUT_MS) {
             fault_to(i, CAUSE_CAN_TIMEOUT);
         } else if (driving && motors_rt[i].motor_fault != 0u) {
             fault_to(i, CAUSE_MOTOR_FAULT);
             motor_set_fault_word(i, 0xFFFFFFFFu);
             motors_rt[i].fault_word = 0xFFFFFFFFu;
             can_read_single_param(cid, CAN_MASTER_ID, 0x3022u);
-        } else if (driving && mon == ENABLE_MON_FAULT_NOT_ENABLED) {
+        } else if (driving && motors_rt[i].mon_verdict == ENABLE_MON_FAULT_NOT_ENABLED) {
             fault_to(i, CAUSE_NOT_ENABLED);
         } else if (driving &&
                    fabsf(motors_rt[i].tau) > motors_rt[i].cfg->max_tau) {

@@ -75,6 +75,7 @@ def analyze(path):
     tele_by_motor = {}   # (slave, local) -> [(ts_ns, last_applied_seq), ...] (time order)
     cmd_by_motor = {}    # (slave, local) -> [(ts_ns, cmd_seq), ...]
     tick_cmds = {}       # cmd_seq -> {"ts": first_ts_ns, "motors": set((slave, local))}
+    tele_cmd_rx = []     # (ts_ns, last_cmd_seq_rx) — for master command-bunching analysis
 
     for rec in r:
         if rec.kind == LOG.RX_FRAME:
@@ -85,6 +86,7 @@ def analyze(path):
             if mt == P.MSG_ROBOT_TELE:
                 d = P.parse_robot_tele(pl)
                 if d:
+                    tele_cmd_rx.append((rec.ts_ns, d["last_cmd_seq_rx"]))
                     for ch in d["chains"]:
                         sid = ch["chain_id"]
                         for local, mo in enumerate(ch["motors"]):
@@ -145,44 +147,54 @@ def analyze(path):
         step_lat.append((hit - tx_ns) / 1e6)
 
     # ── cmd_seq latency (primary; wrap-aware, includes the return path) ─────────
-    def _first_apply_ns(tele, tx_ns, target_seq):
-        """ns of the first telemetry at/after tx_ns whose last_applied_seq ≥ target_seq
-        (wrap-aware), within APPLY_WINDOW_S; None if never applied in that window."""
+    # last_applied_seq is monotonic, so the first telemetry with applied ≥ target is
+    # either EXACTLY target (truly applied → real latency) or already PAST it
+    # (the master's latest-wins mailbox replaced target with a newer seq before the
+    # slave applied it → "superseded", a drop, NOT a +1-cycle latency). Reporting the
+    # ≥-match as latency for a superseded command inflates the tail, so split them.
+    def _classify(tele, tx_ns, target_seq):
         lo = bisect.bisect_left(tele, (tx_ns,))
         deadline = tx_ns + int(APPLY_WINDOW_S * 1e9)
         for k in range(lo, len(tele)):
             ts, applied = tele[k]
             if ts > deadline:
-                return None
+                return ("never", None)
             if P.seq_ge(applied, target_seq):
-                return ts
-        return None
+                return ("applied", ts) if applied == target_seq else ("superseded", ts)
+        return ("never", None)
 
     per_motor_lat = []
     per_motor_never = 0
+    per_motor_superseded = 0
     for key, cmds in cmd_by_motor.items():
         tele = tele_by_motor.get(key, [])
         for tx_ns, cmd_seq in cmds:
-            hit = _first_apply_ns(tele, tx_ns, cmd_seq)
-            if hit is None:
-                per_motor_never += 1
+            kind, ts = _classify(tele, tx_ns, cmd_seq)
+            if kind == "applied":
+                per_motor_lat.append((ts - tx_ns) / 1e6)
+            elif kind == "superseded":
+                per_motor_superseded += 1
             else:
-                per_motor_lat.append((hit - tx_ns) / 1e6)
+                per_motor_never += 1
 
     per_tick_lat = []
     per_tick_never = 0
+    per_tick_superseded = 0
     for cmd_seq, info in tick_cmds.items():
         tx_ns = info["ts"]
         worst = None
-        applied_all = True
+        verdict = "applied"
         for key in info["motors"]:
-            hit = _first_apply_ns(tele_by_motor.get(key, []), tx_ns, cmd_seq)
-            if hit is None:
-                applied_all = False
-                break
-            worst = hit if worst is None else max(worst, hit)
-        if applied_all and worst is not None:
+            kind, ts = _classify(tele_by_motor.get(key, []), tx_ns, cmd_seq)
+            if kind == "never":
+                verdict = "never"; break
+            if kind == "superseded":
+                verdict = "superseded"; break
+            worst = ts if worst is None else max(worst, ts)
+        if verdict == "applied" and worst is not None:
             per_tick_lat.append((worst - tx_ns) / 1e6)
+        elif verdict == "superseded":
+            per_tick_superseded += 1
         else:
             per_tick_never += 1
 
@@ -203,9 +215,29 @@ def analyze(path):
     print(f"threshold: max({NOISE_FLOOR_NM} Nm, {NOISE_SIGMA}·noise) over a "
           f"{BASELINE_WINDOW_S}s pre-step baseline; apply window {APPLY_WINDOW_S}s\n")
     _dist("cmd_seq latency per-tick  (TX → all motors applied)", per_tick_lat)
-    print(f"    never-applied ticks:  {per_tick_never} / {len(tick_cmds)}")
+    print(f"    never-applied ticks:  {per_tick_never} / {len(tick_cmds)}"
+          f"    superseded ticks: {per_tick_superseded}")
     _dist("cmd_seq latency per-motor (TX → that motor applied) ", per_motor_lat)
-    print(f"    never-applied motor-commands: {per_motor_never}")
+    print(f"    never-applied motor-commands: {per_motor_never}"
+          f"    superseded (mailbox latest-wins): {per_motor_superseded}")
+
+    # ── master command bunching (last_cmd_seq_rx advance per telemetry cycle) ───
+    # If ≥2 host cmd_seqs land in the master's mailbox within one ~5 ms cycle, the
+    # earlier one is overwritten (superseded) before it reaches the slave.
+    tele_cmd_rx.sort()
+    adv_hist = {}
+    for i in range(1, len(tele_cmd_rx)):
+        d = (tele_cmd_rx[i][1] - tele_cmd_rx[i - 1][1]) & 0xFFFF
+        if d > 8:
+            continue   # wrap/gap outlier — ignore
+        adv_hist[d] = adv_hist.get(d, 0) + 1
+    bunched = sum(n for d, n in adv_hist.items() if d >= 2)
+    total_cyc = sum(adv_hist.values()) or 1
+    hist_str = " ".join(f"+{d}:{n}" for d, n in sorted(adv_hist.items()))
+    print(f"    cmd bunching (last_cmd_seq_rx advance/tele-cycle): {hist_str}")
+    print(f"      cycles advancing ≥2 (bunched): {bunched}/{total_cyc} "
+          f"= {100.0*bunched/total_cyc:.1f}%")
+
     _dist("step latency  (cmd → torque response)              ", step_lat)
     _dist("ping RTT      (host ↔ master)                      ", ping_rtt)
 

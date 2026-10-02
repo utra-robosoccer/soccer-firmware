@@ -30,6 +30,10 @@ extern "C" {
 #define SLAVE_TICK_HZ   200u
 #define HOST_CMD_HZ     50u
 
+/* One master poll cycle (µs). The slave derives its forward/fallback service
+   thresholds from this, so they scale with the poll rate (incl. 400 Hz). */
+#define MASTER_CYCLE_US  5000u
+
 /* Master SPI1 clock divider off APB2 (72 MHz): MX_SPI1_Init maps it to the
    SPI_BAUDRATEPRESCALER_* enum. Valid: 2,4,8,16,32,64,128,256. */
 #define MASTER_SPI_PRESCALER_DIV  16u

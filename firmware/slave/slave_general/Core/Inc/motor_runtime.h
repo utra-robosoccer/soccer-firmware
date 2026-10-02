@@ -26,6 +26,8 @@ typedef struct {
     uint8_t            motor_fault;   /* packed Type-2 fault bits                 */
     uint32_t           fault_word;    /* telemetry mirror of the latched 0x3022   */
     uint32_t           last_fb_ms;    /* snapshot's last-Type-2 stamp, for fb_age */
+    uint32_t           armed_ms;      /* when arm_enable ran — CAN-timeout grace baseline */
+    uint8_t            mon_verdict;   /* latest EnableMonVerdict (set on feedback, read by service) */
     uint8_t            cause;         /* MotorFaultCause — LATCHED on trip         */
     uint8_t            last_apply_clamp; /* clamp bits from the most recent apply  */
     uint8_t            cmd_flags_latched; /* clamp|stale bits assembled each tick for tele */
@@ -50,8 +52,14 @@ extern MotorRuntime motors_rt[N_MOTORS];
 /* Lifecycle */
 void motor_runtime_init(void);
 
-/* Called every MOTOR_LOOP_PERIOD_MS from the control loop. Drives CAN output for
-   the current per-motor lifecycle and runs the fault detectors. */
+/* Feedback-driven: call when a fresh CAN Type-2 arrives. Mirrors motor state, steps
+   the enable monitor, and pairs cmd_seq (last_applied) — so telemetry staged right
+   after carries the freshest state + this cycle's confirmation. */
+void motor_runtime_on_feedback(uint32_t now_ms);
+
+/* Service (send): call once per master cycle (forward on a valid exchange, else the
+   fallback tick). Runs the fault detectors on the mirrored state and drives CAN output
+   for the current per-motor lifecycle. */
 void motor_runtime_update(uint32_t now_ms);
 
 /* Apply one motor's level-triggered mode request + targets for this cycle (the
