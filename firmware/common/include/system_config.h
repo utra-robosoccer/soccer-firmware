@@ -30,6 +30,10 @@ extern "C" {
 #define SLAVE_TICK_HZ   200u
 #define HOST_CMD_HZ     50u
 
+/* Master SPI1 clock divider off APB2 (72 MHz): MX_SPI1_Init maps it to the
+   SPI_BAUDRATEPRESCALER_* enum. Valid: 2,4,8,16,32,64,128,256. */
+#define MASTER_SPI_PRESCALER_DIV  16u
+
 /* Derived loop periods (ms) — do not hand-edit; change the rate instead. */
 #define MASTER_POLL_PERIOD_MS  5u
 #define MASTER_TELE_PERIOD_MS  5u

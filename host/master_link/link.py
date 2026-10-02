@@ -146,7 +146,9 @@ class MasterLink:
             raise RuntimeError(
                 "no master serial port found (looked for USB VID:PID "
                 f"{MASTER_VID:04x}:{MASTER_PID:04x}); pass --port explicitly")
-        self._ser = serial.Serial(self.port, baud, timeout=0)
+        # exclusive=True takes a POSIX advisory lock (TIOCEXCL) so nothing else
+        # (ModemManager, a second script) can open the port and inject bytes.
+        self._ser = serial.Serial(self.port, baud, timeout=0, exclusive=True)
         try:
             self._ser.reset_input_buffer()   # flush kernel buffer; live-detect handles the rest
         except (OSError, serial.SerialException):

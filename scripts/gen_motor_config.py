@@ -67,6 +67,10 @@ RATE_DEFAULTS = {
     "telemetry_hz":    200,   # MSG_ROBOT_TELE emission
     "slave_tick_hz":   200,   # slave control tick (motor_runtime_update)
     "host_cmd_hz":      50,   # expected host command rate (run_policy --rate default)
+    "master_spi_prescaler": 16,  # APB2(72MHz)/div SPI clock: 64→1.125MHz ... 8→9MHz.
+    # All of 64/32/16/8 are 2-min clean on the bench (short wiring); 16 = 4.5MHz is two
+    # steps of margin below the fastest tested (div 8), and the slave SPI resync recovers
+    # isolated glitches — re-validate on the robot harness via the CRC/resync counters.
 }
 TIMING_MS_DEFAULTS = {
     "motor_watchdog_ms":   200,   # master-link (SPI) watchdog → IDLE
@@ -105,6 +109,10 @@ def timing_block(rates, timeouts):
 #define TELEMETRY_HZ    {rates['telemetry_hz']}u
 #define SLAVE_TICK_HZ   {rates['slave_tick_hz']}u
 #define HOST_CMD_HZ     {rates['host_cmd_hz']}u
+
+/* Master SPI1 clock divider off APB2 (72 MHz): MX_SPI1_Init maps it to the
+   SPI_BAUDRATEPRESCALER_* enum. Valid: 2,4,8,16,32,64,128,256. */
+#define MASTER_SPI_PRESCALER_DIV  {rates['master_spi_prescaler']}u
 
 /* Derived loop periods (ms) — do not hand-edit; change the rate instead. */
 #define MASTER_POLL_PERIOD_MS  {poll_ms}u

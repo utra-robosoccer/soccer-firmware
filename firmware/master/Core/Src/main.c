@@ -124,7 +124,6 @@ int main(void)
   /* USER CODE BEGIN 2 */
 
   MotorMaster_Init(&hspi1, &huart4);
-  usb_printf("USB Test/r/n");
   HAL_GPIO_WritePin(GREEN_LED_GPIO_Port, GREEN_LED_Pin, GPIO_PIN_SET);
   HAL_Delay(3000);
   HAL_GPIO_WritePin(GREEN_LED_GPIO_Port, GREEN_LED_Pin, GPIO_PIN_RESET);
@@ -242,7 +241,26 @@ static void MX_SPI1_Init(void)
   /* USER CODE END SPI1_Init 0 */
 
   /* USER CODE BEGIN SPI1_Init 1 */
-
+  /* Map the generated MASTER_SPI_PRESCALER_DIV (system_config.h) → HAL enum. */
+#if   MASTER_SPI_PRESCALER_DIV == 2
+#define MASTER_SPI_BAUD SPI_BAUDRATEPRESCALER_2
+#elif MASTER_SPI_PRESCALER_DIV == 4
+#define MASTER_SPI_BAUD SPI_BAUDRATEPRESCALER_4
+#elif MASTER_SPI_PRESCALER_DIV == 8
+#define MASTER_SPI_BAUD SPI_BAUDRATEPRESCALER_8
+#elif MASTER_SPI_PRESCALER_DIV == 16
+#define MASTER_SPI_BAUD SPI_BAUDRATEPRESCALER_16
+#elif MASTER_SPI_PRESCALER_DIV == 32
+#define MASTER_SPI_BAUD SPI_BAUDRATEPRESCALER_32
+#elif MASTER_SPI_PRESCALER_DIV == 64
+#define MASTER_SPI_BAUD SPI_BAUDRATEPRESCALER_64
+#elif MASTER_SPI_PRESCALER_DIV == 128
+#define MASTER_SPI_BAUD SPI_BAUDRATEPRESCALER_128
+#elif MASTER_SPI_PRESCALER_DIV == 256
+#define MASTER_SPI_BAUD SPI_BAUDRATEPRESCALER_256
+#else
+#error "MASTER_SPI_PRESCALER_DIV must be a power of two in [2,256]"
+#endif
   /* USER CODE END SPI1_Init 1 */
   /* SPI1 parameter configuration*/
   hspi1.Instance = SPI1;
@@ -252,7 +270,7 @@ static void MX_SPI1_Init(void)
   hspi1.Init.CLKPolarity = SPI_POLARITY_LOW;
   hspi1.Init.CLKPhase = SPI_PHASE_1EDGE;
   hspi1.Init.NSS = SPI_NSS_SOFT;
-  hspi1.Init.BaudRatePrescaler = SPI_BAUDRATEPRESCALER_64;
+  hspi1.Init.BaudRatePrescaler = MASTER_SPI_BAUD;
   hspi1.Init.FirstBit = SPI_FIRSTBIT_MSB;
   hspi1.Init.TIMode = SPI_TIMODE_DISABLE;
   hspi1.Init.CRCCalculation = SPI_CRCCALCULATION_DISABLE;
