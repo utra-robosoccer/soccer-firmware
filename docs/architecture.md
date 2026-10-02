@@ -64,7 +64,7 @@ Pure-Python, on the Jetson/PC. Files: `host/policies/`, `host/apps/run_policy.py
   - `MotorCommand{slave, local, mode, pos, vel, kp, kd, tau_ff, use_config_gains, fault_reset}`
     — `mode ∈ {MODE_IDLE, MODE_HOLD, MODE_MIT, MODE_DAMPED, MODE_TO_ZERO}`; SI floats.
 - **`LinkState`** (`link.py`) — snapshot passed to the policy: `motors {(slave,local)→MotorSnap}`,
-  `master`, `slaves`, `robot` (tele_robot_t meta: cycle_id/last_cmd_seq_rx/missed_deadlines),
+  `master`, `slaves`, `robot` (tele_robot_t meta: cycle_id/last_cmd_seq_rx/cmd_seq_active/cmd_* counters),
   `stamp_ns`.
   - `MotorSnap` — decoded SI fields (`pos/vel/tau/temp`), `state`, `cause`, `motor_mode`,
     `motor_fault`, `flags` (+ `request_rejected`/`to_zero_arrived`/`saturated` props),
@@ -112,20 +112,22 @@ boundaries are found by CRC resync.
 | `src`,`dst` | u8,u8 | `NodeId` (JETSON=1, MASTER=2, SLAVE_0=3) |
 | `ts_ms` | u32 | sender `HAL_GetTick()` (master) / `monotonic_ns//1e6` (host) |
 | `len` | u16 | payload bytes |
-| `ver_flags` | u16 | low byte = `PROTO_VERSION` (=3), high byte reserved 0 |
+| `ver_flags` | u16 | low byte = `PROTO_VERSION` (=6), high byte reserved 0 |
 | `crc16` | u16 | CRC16-CCITT over header(crc=0)+payload |
 
 ### Hierarchy (shared `protocol.h`; fixed WIRE caps MAX_CHAINS=4, MAX_MOTORS_PER_CHAIN=5)
 - `cmd_motor_t` (12 B): `mode_req`, pos/vel/kp/kd/tau_ff (fixed-point), `flags`
   (`VALID` / `USE_CONFIG_GAINS` / `FAULT_RESET`).
 - `cmd_chain_t` (62 B): `chain_id`, `n_motors`, `cmd_motor_t[5]`.
-- `cmd_robot_t` (254 B): `cycle_id`, `cmd_seq`, `n_chains`, `cmd_chain_t[4]`.
+- `cmd_robot_t` (254 B): `cycle_id` (host's echo of the last telemetry cycle seen), `cmd_seq`,
+  `n_chains`, `reserved` (test sentinels), `cmd_chain_t[4]`.
 - `tele_motor_t` (21 B, §5): pos/vel/tau, temp, `state`, `cause`, `motor_mode`, `motor_fault`,
   `flags`, `fb_age_ms`, `fault_word`, `last_applied_seq`, reserved.
 - `tele_chain_t` (117 B): `chain_id`, `n_motors`, `spi_seq_echo`, `slave_time_us`,
   `cmd_crc_errors`, `can_tx_errors`, `tele_motor_t[5]`.
-- `tele_robot_t` (480 B): `cycle_id`, `master_time_us`, `last_cmd_seq_rx`, `missed_deadlines`,
-  `n_chains`, `robot_state`, `tele_chain_t[6]`.
+- `tele_robot_t` (488 B): `cycle_id`, `master_time_us`, `last_cmd_seq_rx`, `cmd_seq_active`,
+  `cmd_on_time`, `cmd_late`, `cmd_missing`, `cmd_duplicate`, `n_chains`, `robot_state`,
+  `tele_chain_t[4]` (see §3 command mailbox for the counters).
 
 ### Messages — host → master
 | type | struct | fields / encoding | built | parsed | trigger/rate |
@@ -217,9 +219,11 @@ it sets a "cycle due" flag + the fire time; `MotorMaster_ProcessLoop` does the w
 (Rates are generated into `motor_config.h` / `system_config.h` from the config, §10; the TIM2
 period = `1e6 / MASTER_POLL_HZ` µs.) A CRC-passed poll updates `latest_tele[s]` and marks the
 slave alive; `emit_robot_tele` includes only currently-alive slaves' chains, so a failed/absent
-poll drops that chain (silence = dead). **`missed_deadlines` now = cycle overruns** —
-`master_cycle_overruns()`, incremented when a cycle's due-flag is still set as the next TIM2
-tick fires (the main loop fell a full period behind); replaces the old `HAL_GetTick` heuristic.
+poll drops that chain (silence = dead). Hardware **cycle overruns** (`master_cycle_overruns()`,
+incremented when a cycle's due-flag is still set as the next TIM2 tick fires — the main loop
+fell a full period behind) are reported in `MasterStatus.missed_deadlines`. The old
+`tele_robot_t.missed_deadlines` field was **replaced** at `PROTO_VERSION 6` by the four
+host-loop command counters below (`cmd_on_time/late/missing/duplicate`) plus `cmd_seq_active`.
 
 **Measured (1 slave, TIM2, 2026-10-01):** cycle period 5000 µs, σ ≈ 9 µs idle / 26 µs under
 load (min 4907, max 5093); poll+assembly ≈ 2.55 ms/cycle (max 2.60, headroom to 5 ms);
@@ -228,14 +232,38 @@ max 24.4, 0 never-applied/1000) — vs the pre-TIM2 24.4 ms the median is slight
 spread collapses from ~11 ms to ~2.5 ms (the hardware grid removes the 1 ms `HAL_GetTick`
 cadence jitter; the ~5 ms command→cycle quantization is structural, unchanged).
 
-### Command mailbox (USB-ISR writes, main reads)
-Level-triggered, so there is no one-shot staging or priority ladder anymore.
-`MotorMaster_HandleRobotCmd` (USB-ISR) splits the host's `cmd_robot_t` into per-slave
-`host_chain[s]` mailboxes by `chain_id` (**latest wins**) and records `host_cmd_seq`.
-`poll_one_slave` snapshots the slave's chain under a brief `__disable_irq()` and sends it as
-`SPI_OP_ROBOT_CMD`; if no host command has arrived it sends `SPI_OP_NOP` (still refreshes the
-slave watchdog and clocks telemetry). There is **no `CONTROL_RESP`** — telemetry (the motor's
-`state` / `last_applied_seq`) is the acknowledgement.
+### Command mailbox (double-buffered, swapped at the cycle boundary)
+Level-triggered, so there is no one-shot staging or priority ladder. The mailbox is
+**double-buffered** so command application is deterministic: a command received during cycle
+*n* is applied at cycle *n+1*, and a cycle never reads a half-written set.
+
+- `MotorMaster_HandleRobotCmd` (main-loop USB dispatch) fills the **pending** back-buffer
+  (`pend_chain[s]` by `chain_id`, latest wins), records `pend_cmd_seq` and `pend_cycle_echo`
+  (= `cmd.cycle_id`, the master cycle the host was answering), and sets `pend_fresh` **last**,
+  after the whole set is copied — so a swap can never take a partial set.
+- `mailbox_swap()` runs at the start of every cycle (right after `master_cycle_id++`, before
+  the poll). If `pend_fresh`, it classifies the command and swaps it into the **active** buffer
+  (`host_chain[s]`, `g_cmd_seq_active`); otherwise it holds the active set (re-sent) and counts
+  a missing cycle. `poll_one_slave` sends the active chain as `SPI_OP_ROBOT_CMD` (or `SPI_OP_NOP`
+  if none ever arrived) carrying `g_cmd_seq_active`.
+
+**Host-loop-vs-master-cycle counters** (reported in `tele_robot_t`, free-running u16, host
+reports per-run deltas; classified at the swap against `latest = master_cycle_id − 1`, the last
+telemetry cycle the host could have answered, `d = (int16)(latest − pend_cycle_echo)`):
+
+| counter | meaning |
+|---|---|
+| `cmd_on_time`   | applied a fresh command with `d ≤ 0` — the host answered the latest telemetry cycle |
+| `cmd_late`      | applied a fresh command with `d > 0` — the host answered an **older** cycle (lagged `d` cycles) |
+| `cmd_missing`   | no fresh command that cycle → the active set was **held** and re-sent |
+| `cmd_duplicate` | `HandleRobotCmd` overwrote a still-unapplied pending set → the host produced **>1 command for one cycle**; the older is dropped |
+
+`cmd_seq_active` (also in `tele_robot_t`) is the `cmd_seq` actually sent to the slaves this
+cycle; the host's `latency.py` uses it as the **applied cycle** for the master-clock latency
+(`answered → applied → confirmed`). There is **no `CONTROL_RESP`** — telemetry (the motor's
+`state` / `last_applied_seq`) is the acknowledgement. The test-only SPI-desync / USB-TX
+sentinels live in `cmd.reserved` (`0xDE` / `0xB0`), not `cmd.cycle_id` (which now carries the
+host's real cycle echo).
 
 ### Checks / failure
 - SPI telemetry CRC verified in `spi_exchange`; fail → `crc_errors++`, no emit that tick.

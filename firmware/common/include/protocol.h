@@ -92,7 +92,7 @@ typedef enum {
 
 /* Wire-contract version. Carried in MsgHeader.ver_flags low byte; both ends drop
  * and count any frame whose version != this. High byte reserved (0). */
-#define PROTO_VERSION 5u
+#define PROTO_VERSION 6u
 
 /* cmd_seq sentinel: 0 = "no host command applied yet" (tele_motor_t.last_applied_seq
  * for pre-arm / idle). The host starts cmd_seq at 1 and skips 0 on wrap. */
@@ -182,14 +182,21 @@ typedef struct PROTO_PACKED {
 } tele_chain_t;                   /* 12 + 21·5 = 117 bytes */
 
 typedef struct PROTO_PACKED {
-    uint16_t     cycle_id;         /* master poll counter at build time         */
+    uint16_t     cycle_id;         /* this telemetry's master cycle (increments/cycle) */
     uint32_t     master_time_us;   /* master uptime (µs)                        */
     uint16_t     last_cmd_seq_rx;  /* last cmd_seq the master received from host */
-    uint16_t     missed_deadlines; /* master-side missed poll/tele deadlines    */
+    uint16_t     cmd_seq_active;   /* cmd_seq actually sent to the slaves THIS cycle
+                                      (the applied command; 0 = holding, none applied) */
+    /* Host-loop timing vs the master cycle, classified at the cycle-start mailbox swap
+       (see docs/architecture.md). Free-running counters; the host reports deltas. */
+    uint16_t     cmd_on_time;      /* applied a fresh command echoing the latest tele cycle */
+    uint16_t     cmd_late;         /* applied a fresh command echoing an OLDER cycle         */
+    uint16_t     cmd_missing;      /* cycle with no fresh command → held current targets     */
+    uint16_t     cmd_duplicate;    /* command overwritten unapplied (host sent >1 per cycle) */
     uint8_t      n_chains;
     uint8_t      robot_state;      /* RobotState                                */
     tele_chain_t chains[MAX_CHAINS];
-} tele_robot_t;                    /* 12 + 117·4 = 480 bytes */
+} tele_robot_t;                    /* 20 + 117·4 = 488 bytes */
 
 /* ── status (unchanged cadence, 20 Hz) ───────────────────────────────────── */
 typedef struct PROTO_PACKED {
@@ -263,7 +270,7 @@ _Static_assert(sizeof(cmd_chain_t) == 62u,                      "cmd_chain_t mus
 _Static_assert(sizeof(cmd_robot_t) == 6u + 62u * MAX_CHAINS,    "cmd_robot_t size");
 _Static_assert(sizeof(tele_motor_t) == 21u,                     "tele_motor_t must be 21 bytes");
 _Static_assert(sizeof(tele_chain_t) == 117u,                    "tele_chain_t must be 117 bytes");
-_Static_assert(sizeof(tele_robot_t) == 12u + 117u * MAX_CHAINS, "tele_robot_t size");
+_Static_assert(sizeof(tele_robot_t) == 20u + 117u * MAX_CHAINS, "tele_robot_t size");
 _Static_assert(sizeof(MasterStatus) == 30u,                     "MasterStatus must be 30 bytes");
 _Static_assert(sizeof(SlaveStatus)  == 18u,                     "SlaveStatus must be 18 bytes");
 _Static_assert(LIFE_FAULT  <= 255u,                             "MotorLifecycle fits u8");

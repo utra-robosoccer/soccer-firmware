@@ -148,8 +148,9 @@ static void arm_enable(uint8_t idx)
 
     send_mit(idx, 0.0f, r->hold_pos, 0.0f, r->cmd_kp, r->cmd_kd);
 
-    r->target_cmd_seq = CMD_SEQ_NONE;
-    cmd_seq_reset(&r->cmd_track);
+    /* cmd_seq re-baseline (target_cmd_seq = NONE, last_applied → 0) is done centrally in
+       apply_cmd from ModeDecision.reset_cmd_seq, which covers this arm plus re-hold /
+       goto-zero / disable. */
     enable_monitor_reset(idx);
     r->to_zero_arrived = 0u;
     r->watchdog_ms = HAL_GetTick();
@@ -206,8 +207,6 @@ void motor_runtime_apply_cmd(uint8_t idx, const cmd_motor_t *m, uint16_t cmd_seq
     if (d.do_disable) {
         can_disable_motor(cid, CAN_MASTER_ID);
         r->hold_vel        = 0.0f;
-        r->target_cmd_seq  = CMD_SEQ_NONE;
-        cmd_seq_reset(&r->cmd_track);
         r->to_zero_arrived = 0u;
     }
     if (d.do_arm) {
@@ -227,6 +226,13 @@ void motor_runtime_apply_cmd(uint8_t idx, const cmd_motor_t *m, uint16_t cmd_seq
         r->zero_progress_ms = HAL_GetTick();
         r->zero_settle      = 0u;
         r->to_zero_arrived  = 0u;
+    }
+    /* Central cmd_seq re-baseline: any arm / re-hold / goto-zero / disable starts the next
+       command stream from last_applied_seq = 0 (fixes a stale seq surviving across a
+       re-hold of an already-armed motor). MIT/DAMPED below then set the live target. */
+    if (d.reset_cmd_seq) {
+        cmd_seq_reset(&r->cmd_track);
+        r->target_cmd_seq = CMD_SEQ_NONE;
     }
 
     uint8_t use_cfg = (m->flags & CMD_FLAG_USE_CONFIG_GAINS) != 0u;
@@ -248,6 +254,12 @@ void motor_runtime_apply_cmd(uint8_t idx, const cmd_motor_t *m, uint16_t cmd_seq
 
     r->state = d.next_state;
 }
+
+/* Wrap/stale-safe elapsed-time test. If `t` was stamped after `now` was captured (e.g. a
+   timestamp set inside the just-run ~25 ms arm handshake), the signed difference is
+   negative → "not yet elapsed", instead of a huge unsigned value that would false-trip a
+   timeout. Thresholds are small ms, far from the ±2^31 wrap. */
+static inline int32_t ms_since(uint32_t now, uint32_t t) { return (int32_t)(now - t); }
 
 /* Feedback-driven: mirror the latest Type-2 into motors_rt, step the enable monitor,
    and pair cmd_seq (last_applied). Run when fresh feedback arrives, BEFORE telemetry is
@@ -301,8 +313,8 @@ void motor_runtime_update(uint32_t now_ms)
            service, not the feedback path; the armed_ms grace covers the first cycles after
            an arm (a just-disabled motor's last_fb is stale). */
         if (driving &&
-            (uint32_t)(now_ms - motors_rt[i].last_fb_ms) >= MOTOR_CAN_FB_TIMEOUT_MS &&
-            (uint32_t)(now_ms - motors_rt[i].armed_ms)   >= MOTOR_CAN_FB_TIMEOUT_MS) {
+            ms_since(now_ms, motors_rt[i].last_fb_ms) >= (int32_t)MOTOR_CAN_FB_TIMEOUT_MS &&
+            ms_since(now_ms, motors_rt[i].armed_ms)   >= (int32_t)MOTOR_CAN_FB_TIMEOUT_MS) {
             fault_to(i, CAUSE_CAN_TIMEOUT);
         } else if (driving && motors_rt[i].motor_fault != 0u) {
             fault_to(i, CAUSE_MOTOR_FAULT);
@@ -324,7 +336,7 @@ void motor_runtime_update(uint32_t now_ms)
             case LIFE_HOLD:
                 send_mit(i, 0.0f, motors_rt[i].hold_pos, motors_rt[i].hold_vel,
                          motors_rt[i].cmd_kp, motors_rt[i].cmd_kd);
-                if ((now_ms - motors_rt[i].watchdog_ms) > MOTOR_WATCHDOG_MS) {
+                if (ms_since(now_ms, motors_rt[i].watchdog_ms) > (int32_t)MOTOR_WATCHDOG_MS) {
                     can_disable_motor(cid, CAN_MASTER_ID);
                     motors_rt[i].state    = LIFE_IDLE;
                     motors_rt[i].hold_vel = 0.0f;
@@ -335,7 +347,7 @@ void motor_runtime_update(uint32_t now_ms)
             case LIFE_MIT:
                 send_mit(i, 0.0f, motors_rt[i].hold_pos, motors_rt[i].hold_vel,
                          motors_rt[i].cmd_kp, motors_rt[i].cmd_kd);
-                if ((now_ms - motors_rt[i].watchdog_ms) > MOTOR_WATCHDOG_MS) {
+                if (ms_since(now_ms, motors_rt[i].watchdog_ms) > (int32_t)MOTOR_WATCHDOG_MS) {
                     /* MIT stream stopped — lock position and fall back to HOLD. */
                     motors_rt[i].hold_pos = motors_rt[i].pos;
                     motors_rt[i].hold_vel = 0.0f;
@@ -348,7 +360,7 @@ void motor_runtime_update(uint32_t now_ms)
             case LIFE_DAMPED:
                 /* Kp=0 so home_pos is inert; Kd provides damping. */
                 send_mit(i, 0.0f, motors_rt[i].pos, 0.0f, 0.0f, motors_rt[i].cmd_kd);
-                if ((now_ms - motors_rt[i].watchdog_ms) > MOTOR_WATCHDOG_MS) {
+                if (ms_since(now_ms, motors_rt[i].watchdog_ms) > (int32_t)MOTOR_WATCHDOG_MS) {
                     can_disable_motor(cid, CAN_MASTER_ID);
                     motors_rt[i].state = LIFE_IDLE;
                     motors_rt[i].cause = CAUSE_WATCHDOG;
@@ -364,7 +376,7 @@ void motor_runtime_update(uint32_t now_ms)
                     motors_rt[i].zero_best_abs    = abs_pos;
                     motors_rt[i].zero_progress_ms = now_ms;
                 }
-                if ((now_ms - motors_rt[i].zero_progress_ms) > MOTOR_ZERO_STALL_MS) {
+                if (ms_since(now_ms, motors_rt[i].zero_progress_ms) > (int32_t)MOTOR_ZERO_STALL_MS) {
                     send_mit(i, 0.0f, 0.0f, 0.0f, 0.0f, MOTOR_ZERO_DAMP_KD);
                     motors_rt[i].state    = LIFE_FAULT;
                     motors_rt[i].cause    = CAUSE_ZERO_TIMEOUT;
@@ -373,7 +385,7 @@ void motor_runtime_update(uint32_t now_ms)
                 }
 
                 /* (2) master-link watchdog. */
-                if ((now_ms - motors_rt[i].watchdog_ms) > MOTOR_WATCHDOG_MS) {
+                if (ms_since(now_ms, motors_rt[i].watchdog_ms) > (int32_t)MOTOR_WATCHDOG_MS) {
                     can_disable_motor(cid, CAN_MASTER_ID);
                     motors_rt[i].state = LIFE_IDLE;
                     motors_rt[i].cause = CAUSE_WATCHDOG;

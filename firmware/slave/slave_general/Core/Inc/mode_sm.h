@@ -33,6 +33,9 @@ typedef struct {
     uint8_t do_disable;      /* drop CAN output (→ IDLE)                          */
     uint8_t capture_hold;    /* capture current position into hold (armed → HOLD) */
     uint8_t enter_to_zero;   /* initialise the TO_ZERO creep                      */
+    uint8_t reset_cmd_seq;   /* re-baseline cmd_seq tracking: last_applied → 0 on any
+                                arm / re-hold / goto-zero / disable, so a fresh command
+                                stream never sees a stale last_applied_seq            */
 } ModeDecision;
 
 /* Decide the transition for one motor this cycle.

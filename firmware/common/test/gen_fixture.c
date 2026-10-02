@@ -44,7 +44,11 @@ int main(void)
     t.cycle_id         = 9u;
     t.master_time_us   = 123456u;
     t.last_cmd_seq_rx  = 42u;
-    t.missed_deadlines = 0u;
+    t.cmd_seq_active   = 41u;
+    t.cmd_on_time      = 1000u;
+    t.cmd_late         = 7u;
+    t.cmd_missing      = 3u;
+    t.cmd_duplicate    = 2u;
     t.n_chains         = 1u;
     t.robot_state      = ROBOT_READY;
     t.chains[0].chain_id       = 0u;

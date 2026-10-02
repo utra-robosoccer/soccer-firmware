@@ -90,6 +90,24 @@ static void test_invalid_slot(void)
     ModeDecision d = mode_sm_step(LIFE_MIT, REQ_IDLE, 0u, 0u, 0u);
     CHECK(d.next_state == LIFE_MIT && !d.do_disable && !d.rejected && !d.do_arm,
           "invalid slot is a no-op");
+    CHECK(!d.reset_cmd_seq, "no-op does not reset cmd_seq");
+}
+
+static void test_reset_cmd_seq(void)
+{
+    /* Re-baseline on arm / re-hold / goto-zero / disable so a fresh command stream never
+       inherits a stale last_applied_seq (the superseded-first-MIT bug). */
+    CHECK(step(LIFE_IDLE, REQ_HOLD).reset_cmd_seq, "arm resets cmd_seq");
+    CHECK(step(LIFE_MIT, REQ_HOLD).reset_cmd_seq, "re-hold resets cmd_seq");
+    CHECK(step(LIFE_HOLD, REQ_IDLE).reset_cmd_seq, "disable resets cmd_seq");
+    CHECK(step(LIFE_HOLD, REQ_TO_ZERO).reset_cmd_seq, "goto-zero entry resets cmd_seq");
+
+    /* Live command modes carry cmd_seq → must NOT reset. */
+    CHECK(!step(LIFE_HOLD, REQ_MIT).reset_cmd_seq, "arm→MIT keeps cmd_seq");
+    CHECK(!step(LIFE_MIT, REQ_MIT).reset_cmd_seq, "MIT→MIT keeps cmd_seq");
+    CHECK(!step(LIFE_MIT, REQ_DAMPED).reset_cmd_seq, "MIT→DAMPED keeps cmd_seq");
+    CHECK(!step(LIFE_TO_ZERO, REQ_TO_ZERO).reset_cmd_seq, "TO_ZERO re-request no reset");
+    CHECK(!step(LIFE_IDLE, REQ_IDLE).reset_cmd_seq, "IDLE→IDLE no reset");
 }
 
 int main(void)
@@ -98,6 +116,7 @@ int main(void)
     test_armed_transitions();
     test_fault_latch_and_reset();
     test_invalid_slot();
+    test_reset_cmd_seq();
     if (failures == 0) { printf("mode_sm tests: OK\n"); return 0; }
     fprintf(stderr, "mode_sm tests: %d FAILURE(S)\n", failures);
     return 1;

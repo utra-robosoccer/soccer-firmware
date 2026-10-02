@@ -85,7 +85,8 @@ KP_SCALE  = 10.0      # Kp    → u16
 KD_SCALE  = 100.0     # Kd    → u16
 
 # ── wire-contract version ─────────────────────────────────────────────────────
-PROTO_VERSION = 5   # v5: +rx_resyncs/rx_discarded_bytes in MasterStatus (resync RX)
+PROTO_VERSION = 6   # v6: tele_robot_t replaces missed_deadlines with cmd_seq_active +
+                    #     cmd_on_time/late/missing/duplicate (host-loop vs master-cycle)
                     # v4: MAX_CHAINS 6→4 (4 slave chains) shrank the robot frames
 
 # ── wire layouts (little-endian, packed) ──────────────────────────────────────
@@ -106,8 +107,9 @@ FMT_TELE_MOTOR    = "<hhhBBBBBBBIHH"  # pos,vel,tau,temp,state,cause,mode,fault,
 SZ_TELE_MOTOR     = struct.calcsize(FMT_TELE_MOTOR)
 FMT_TELE_CHAIN_HDR = "<BBBBIHH"   # chain_id,n_motors,spi_seq_echo,spi_resyncs,slave_time_us,cmd_crc_errors,can_tx_errors
 SZ_TELE_CHAIN     = 12 + SZ_TELE_MOTOR * MAX_MOTORS_PER_CHAIN        # 117
-FMT_TELE_ROBOT_HDR = "<HIHHBB"    # cycle_id,master_time_us,last_cmd_seq_rx,missed_deadlines,n_chains,robot_state
-SZ_TELE_ROBOT     = 12 + SZ_TELE_CHAIN * MAX_CHAINS                  # 480 (12 + 117*4)
+FMT_TELE_ROBOT_HDR = "<HIHHHHHHBB"  # cycle_id,master_time_us,last_cmd_seq_rx,cmd_seq_active,
+                                    # cmd_on_time,cmd_late,cmd_missing,cmd_duplicate,n_chains,robot_state
+SZ_TELE_ROBOT     = struct.calcsize(FMT_TELE_ROBOT_HDR) + SZ_TELE_CHAIN * MAX_CHAINS  # 488 (20 + 117*4)
 
 assert HDR_SIZE == 16, HDR_SIZE
 assert SZ_CMD_MOTOR == 12, SZ_CMD_MOTOR
@@ -115,7 +117,7 @@ assert SZ_CMD_CHAIN == 62, SZ_CMD_CHAIN
 assert SZ_CMD_ROBOT == 254, SZ_CMD_ROBOT
 assert SZ_TELE_MOTOR == 21, SZ_TELE_MOTOR
 assert SZ_TELE_CHAIN == 117, SZ_TELE_CHAIN
-assert SZ_TELE_ROBOT == 480, SZ_TELE_ROBOT
+assert SZ_TELE_ROBOT == 488, SZ_TELE_ROBOT
 assert struct.calcsize(FMT_MASTER_STATUS) == 30
 assert struct.calcsize(FMT_SLAVE_STATUS) == 18
 
@@ -219,16 +221,17 @@ def pack_cmd_motor(mode_req: int, pos: float = 0.0, vel: float = 0.0,
     return struct.pack(FMT_CMD_MOTOR, mode_req & 0xFF, p, v, kpi, kdi, t, flags & 0xFF)
 
 
-def pack_robot_cmd(cycle_id: int, cmd_seq: int, chains: list) -> bytes:
-    """Build a full cmd_robot_t (248 B).
+def pack_robot_cmd(cycle_id: int, cmd_seq: int, chains: list, reserved: int = 0) -> bytes:
+    """Build a full cmd_robot_t (254 B).
 
     ``chains`` is a list (≤ MAX_CHAINS) of dicts:
         {"chain_id": int, "motors": [ {mode_req, pos, vel, kp, kd, tau_ff, flags}, ... ]}
-    Unused chain/motor slots are zero-filled (invalid)."""
+    Unused chain/motor slots are zero-filled (invalid). ``reserved`` carries the master
+    test sentinels (0xDE arm SPI-desync, 0xB0 arm USB-TX test; 0 in normal operation)."""
     out = bytearray()
     n_chains = len(chains)
     out += struct.pack(FMT_CMD_ROBOT_HDR, cycle_id & 0xFFFF, cmd_seq & 0xFFFF,
-                       n_chains & 0xFF, 0)
+                       n_chains & 0xFF, reserved & 0xFF)
     for ci in range(MAX_CHAINS):
         if ci < n_chains:
             ch = chains[ci]
@@ -287,15 +290,20 @@ def pack_tele_motor(pos_raw: int, vel_raw: int, tau_raw: int, temp_c: int,
 
 
 def pack_robot_tele(cycle_id: int, master_time_us: int, last_cmd_seq_rx: int,
-                    missed_deadlines: int, robot_state: int, chains: list) -> bytes:
-    """Build a full tele_robot_t (480 B). ``chains`` (≤ MAX_CHAINS) is a list of
+                    cmd_seq_active: int, robot_state: int, chains: list, *,
+                    cmd_on_time: int = 0, cmd_late: int = 0,
+                    cmd_missing: int = 0, cmd_duplicate: int = 0) -> bytes:
+    """Build a full tele_robot_t (488 B). ``chains`` (≤ MAX_CHAINS) is a list of
     dicts {chain_id, spi_seq_echo, slave_time_us, cmd_crc_errors, can_tx_errors,
-    motors:[raw-field dict ...]}; unused slots zero-filled."""
+    motors:[raw-field dict ...]}; unused slots zero-filled. The four cmd_* counters
+    are keyword-only (default 0)."""
     out = bytearray()
     n_chains = len(chains)
     out += struct.pack(FMT_TELE_ROBOT_HDR, cycle_id & 0xFFFF,
                        master_time_us & 0xFFFFFFFF, last_cmd_seq_rx & 0xFFFF,
-                       missed_deadlines & 0xFFFF, n_chains & 0xFF, robot_state & 0xFF)
+                       cmd_seq_active & 0xFFFF, cmd_on_time & 0xFFFF, cmd_late & 0xFFFF,
+                       cmd_missing & 0xFFFF, cmd_duplicate & 0xFFFF,
+                       n_chains & 0xFF, robot_state & 0xFF)
     for ci in range(MAX_CHAINS):
         if ci < n_chains:
             ch = chains[ci]
@@ -323,10 +331,11 @@ def parse_robot_tele(p: bytes) -> dict:
 
     Accepts either the full fixed-size struct or just the populated prefix (the
     master transmits header + n_chains chains to keep the 200 Hz stream small)."""
-    base0 = struct.calcsize(FMT_TELE_ROBOT_HDR)   # 12
+    base0 = struct.calcsize(FMT_TELE_ROBOT_HDR)   # 20
     if len(p) < base0:
         return {}
-    cycle_id, master_us, last_cmd_seq_rx, missed, n_chains, robot_state = \
+    (cycle_id, master_us, last_cmd_seq_rx, cmd_seq_active, cmd_on_time, cmd_late,
+     cmd_missing, cmd_duplicate, n_chains, robot_state) = \
         struct.unpack_from(FMT_TELE_ROBOT_HDR, p, 0)
     if len(p) < base0 + n_chains * SZ_TELE_CHAIN:
         return {}
@@ -345,7 +354,9 @@ def parse_robot_tele(p: bytes) -> dict:
                            slave_time_us=slave_us,
                            cmd_crc_errors=cmd_crc, can_tx_errors=can_tx, motors=motors))
     return dict(cycle_id=cycle_id, master_time_us=master_us,
-                last_cmd_seq_rx=last_cmd_seq_rx, missed_deadlines=missed,
+                last_cmd_seq_rx=last_cmd_seq_rx, cmd_seq_active=cmd_seq_active,
+                cmd_on_time=cmd_on_time, cmd_late=cmd_late,
+                cmd_missing=cmd_missing, cmd_duplicate=cmd_duplicate,
                 n_chains=n_chains, robot_state=robot_state, chains=chains)
 
 

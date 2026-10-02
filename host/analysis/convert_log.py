@@ -42,7 +42,8 @@ STATUS_FIELDS = ["host_ts", "type", "robot_state", "slave_alive", "uptime_ms",
                  "link_errors", "rx_frames", "master_poll_hz", "telemetry_hz",
                  "slave_tick_hz", "host_cmd_hz", "slave_id", "motors_alive",
                  "crc_errors", "cmd_crc_errors", "seq_gaps",
-                 "cycle_id", "master_time_s", "last_cmd_seq_rx", "missed_deadlines", "n_chains"]
+                 "cycle_id", "master_time_s", "last_cmd_seq_rx", "cmd_seq_active",
+                 "cmd_on_time", "cmd_late", "cmd_missing", "cmd_duplicate", "n_chains"]
 EVENT_FIELDS = ["host_ts", "kind", "text"]
 LOOP_FIELDS = ["host_ts", "seq", "period_ms", "step_ms", "send_ms", "lateness_ms"]
 
@@ -107,7 +108,11 @@ def convert(path):
                                    "cycle_id": d["cycle_id"],
                                    "master_time_s": mtu.update(d["master_time_us"]) / 1e6,
                                    "last_cmd_seq_rx": d["last_cmd_seq_rx"],
-                                   "missed_deadlines": d["missed_deadlines"],
+                                   "cmd_seq_active": d["cmd_seq_active"],
+                                   "cmd_on_time": d["cmd_on_time"],
+                                   "cmd_late": d["cmd_late"],
+                                   "cmd_missing": d["cmd_missing"],
+                                   "cmd_duplicate": d["cmd_duplicate"],
                                    "n_chains": d["n_chains"]})
                 for ch in d["chains"]:
                     sid = ch["chain_id"]

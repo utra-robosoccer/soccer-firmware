@@ -16,15 +16,30 @@ static UART_HandleTypeDef *master_huart = NULL;
 uint8_t new_usb_packet_rx_flag = 0;
 uint8_t buf_rx_jet2master[NUM_SLV * MAX_MOTORS_PER_SLAVE * USB_BYTES_PER_MOTOR];
 
-/* ── per-slave command mailbox (latest cmd_chain_t from the host) ──────────
-   The host sends one cmd_robot_t per tick; the USB ISR splits it into per-slave
-   cmd_chain_t here (latest wins). Each SPI poll forwards the slave's chain
-   (SPI_OP_ROBOT_CMD) or a keepalive (SPI_OP_NOP) if none has arrived. Mode
-   requests are level-triggered, so re-sending the last chain is correct. */
-static cmd_chain_t host_chain[NUM_SLAVES];
+/* ── double-buffered per-slave command mailbox ────────────────────────────
+   The host sends one cmd_robot_t per tick. MotorMaster_HandleRobotCmd (main-loop
+   USB dispatch) fills the PENDING back-buffer; mailbox_swap() at the start of every
+   master cycle moves the newest complete set into the ACTIVE buffer that poll_one_slave
+   reads. So a command received during cycle n is applied at n+1 (never the same cycle,
+   never a half-written set), and with no new command the active set is held and re-sent.
+   Mode requests are level-triggered: a slave absent from the latest command keeps its
+   last active chain. See docs/architecture.md. */
+static cmd_chain_t host_chain[NUM_SLAVES];        /* ACTIVE: applied + re-sent each cycle */
 static uint8_t     host_chain_valid[NUM_SLAVES];
-static uint16_t    host_cmd_seq      = CMD_SEQ_NONE;  /* last cmd_seq from the host   */
-static uint16_t    master_cycle_id   = 0;             /* master cycle counter         */
+static uint16_t    g_cmd_seq_active   = CMD_SEQ_NONE; /* cmd_seq sent to slaves THIS cycle */
+
+static cmd_chain_t pend_chain[NUM_SLAVES];        /* PENDING: filled by USB dispatch   */
+static uint8_t     pend_chain_valid[NUM_SLAVES];
+static uint16_t    pend_cmd_seq       = CMD_SEQ_NONE;
+static uint16_t    pend_cycle_echo    = 0;        /* cmd.cycle_id of the pending command */
+static uint8_t     pend_fresh         = 0;        /* a new complete set awaits the swap */
+
+static uint16_t    g_cmd_seq_rx       = CMD_SEQ_NONE; /* last cmd_seq received from host */
+static uint16_t    master_cycle_id    = 0;            /* master cycle counter (per cycle) */
+
+/* Host-loop-vs-master-cycle counters, classified at the swap (reported in tele_robot_t,
+   wrap; the host reports per-run deltas). */
+static uint16_t    cnt_on_time = 0, cnt_late = 0, cnt_missing = 0, cnt_duplicate = 0;
 
 /* ── master status counters ──────────────────────────────────────────────── */
 uint32_t master_link_errors = 0;
@@ -37,7 +52,7 @@ uint32_t master_rx_overflows = 0;  /* RX ring overruns (producer outran consumer
 volatile uint8_t g_spi_inject = 0; /* test-only: clock one short SPI exchange to desync the slave */
 #endif
 #ifdef USB_TX_TEST
-static volatile uint8_t g_txtest = 0; /* test-only: armed by a 0xB00B cycle_id sentinel */
+static volatile uint8_t g_txtest = 0; /* test-only: armed by a 0xB0 cmd.reserved sentinel */
 #endif
 
 /* ── USB RX ring: CDC ISR produces, main loop consumes (SPSC, lock-free) ───── */
@@ -216,14 +231,20 @@ static void emit_robot_tele(uint32_t master_time_us)
        last CRC-valid tele_chain_t (emission-gated at chain granularity — a dead
        slave's chain is omitted, so the host sees it go silent). The master never
        touches motor data; the host decodes fixed-point raw→units.
-       master_time_us is this cycle's real TIM2 µs timestamp (stamped by the caller);
-       missed_deadlines now carries the hardware-cycle overrun count. */
+       master_time_us is this cycle's real TIM2 µs timestamp (stamped by the caller).
+       cmd_seq_active is the command actually applied this cycle; the four cmd_* counters
+       classify host-loop timing against the master clock (see mailbox_swap). Hardware
+       cycle overruns remain in MasterStatus.missed_deadlines. */
     tele_robot_t pay;
     memset(&pay, 0, sizeof(pay));
     pay.cycle_id         = master_cycle_id;
     pay.master_time_us   = master_time_us;
-    pay.last_cmd_seq_rx  = host_cmd_seq;
-    pay.missed_deadlines = (uint16_t)master_cycle_overruns();
+    pay.last_cmd_seq_rx  = g_cmd_seq_rx;
+    pay.cmd_seq_active   = g_cmd_seq_active;
+    pay.cmd_on_time      = cnt_on_time;
+    pay.cmd_late         = cnt_late;
+    pay.cmd_missing      = cnt_missing;
+    pay.cmd_duplicate    = cnt_duplicate;
     pay.robot_state      = (uint8_t)compute_robot_state(NULL);
 
     uint8_t nc = 0u;
@@ -251,26 +272,56 @@ static void emit_robot_tele(uint32_t master_time_us)
     if (n > 0u) usb_tx_write(frame, n);
 }
 
-/* ── ROBOT_CMD handler (called from the USB frame decoder, ISR context) ────
-   Split the host's cmd_robot_t into per-slave cmd_chain_t mailboxes (latest wins)
-   by chain_id. Mode requests are level-triggered, so the poll re-sends the stored
-   chain until a newer one arrives. No response frame — telemetry is the ack. */
+/* ── ROBOT_CMD handler (main-loop USB dispatch) ────────────────────────────
+   Fill the PENDING back-buffer (per-slave, latest wins by chain_id). pend_fresh is set
+   LAST, after the whole set is copied, so a mailbox_swap can never take a half-written
+   set. If a previous pending set had not yet been swapped, the host produced more than
+   one command for one cycle → the older is dropped (cmd_duplicate). Mode requests are
+   level-triggered: a slave absent from this command keeps its stored pending chain. */
 void MotorMaster_HandleRobotCmd(const cmd_robot_t *cmd)
 {
     if (cmd == NULL) return;
 #ifdef SPI_INJECT_TEST
-    if (cmd->cycle_id == 0xDEADu) g_spi_inject = 1u;   /* sentinel: arm the SPI desync injector */
+    if (cmd->reserved == 0xDEu) { g_spi_inject = 1u; return; } /* sentinel (reserved, not cycle_id) */
 #endif
 #ifdef USB_TX_TEST
-    if (cmd->cycle_id == 0xB00Bu) g_txtest = 1u;       /* sentinel: arm the USB-TX frame test */
+    if (cmd->reserved == 0xB0u) { g_txtest = 1u; return; }     /* sentinel (reserved, not cycle_id) */
 #endif
-    host_cmd_seq = cmd->cmd_seq;
+    if (pend_fresh) cnt_duplicate++;     /* overwriting an unapplied set */
+    g_cmd_seq_rx    = cmd->cmd_seq;
+    pend_cmd_seq    = cmd->cmd_seq;
+    pend_cycle_echo = cmd->cycle_id;     /* the master cycle the host was answering */
     uint8_t n = (cmd->n_chains > MAX_CHAINS) ? MAX_CHAINS : cmd->n_chains;
     for (uint8_t c = 0; c < n; c++) {
         uint8_t s = cmd->chains[c].chain_id;
         if (s >= NUM_SLAVES) { master_link_errors++; continue; }
-        host_chain[s]       = cmd->chains[c];   /* struct copy (62 B) */
-        host_chain_valid[s] = 1u;
+        pend_chain[s]       = cmd->chains[c];   /* struct copy (62 B) */
+        pend_chain_valid[s] = 1u;
+    }
+    pend_fresh = 1u;                     /* publish last: the swap now sees a complete set */
+}
+
+/* Called once at the start of every master cycle, before polling. If a fresh command set
+   is pending, classify it against the cycle it answered and swap it into the active
+   buffer (apply at n+1); otherwise hold the active set and count a missing cycle. */
+static void mailbox_swap(void)
+{
+    if (pend_fresh) {
+        /* latest telemetry the host could have answered = the cycle emitted last =
+           master_cycle_id - 1 (it was incremented at this cycle's start). Wrap-safe. */
+        int16_t d = (int16_t)((uint16_t)(master_cycle_id - 1u) - pend_cycle_echo);
+        if (d <= 0) cnt_on_time++;       /* answered the freshest cycle (d<0 clamps to on-time) */
+        else        cnt_late++;          /* answered an older cycle (host lagged d cycles) */
+        for (uint8_t s = 0; s < NUM_SLAVES; s++) {
+            if (pend_chain_valid[s]) {
+                host_chain[s]       = pend_chain[s];
+                host_chain_valid[s] = 1u;
+            }
+        }
+        g_cmd_seq_active = pend_cmd_seq;
+        pend_fresh = 0u;
+    } else {
+        cnt_missing++;                   /* no new command → active set re-sent (hold) */
     }
 }
 
@@ -346,6 +397,11 @@ void MotorMaster_Init(SPI_HandleTypeDef *hspi, UART_HandleTypeDef *huart)
     memset(slave_motors_alive, 0, sizeof(slave_motors_alive));
     memset(host_chain, 0, sizeof(host_chain));
     memset(host_chain_valid, 0, sizeof(host_chain_valid));
+    memset(pend_chain, 0, sizeof(pend_chain));
+    memset(pend_chain_valid, 0, sizeof(pend_chain_valid));
+    pend_fresh = 0u; pend_cmd_seq = CMD_SEQ_NONE; pend_cycle_echo = 0u;
+    g_cmd_seq_active = CMD_SEQ_NONE; g_cmd_seq_rx = CMD_SEQ_NONE;
+    cnt_on_time = cnt_late = cnt_missing = cnt_duplicate = 0u;
     memset(latest_tele, 0, sizeof(latest_tele));
     memset(slave_crc_errors, 0, sizeof(slave_crc_errors));
     memset(spi_seq, 0, sizeof(spi_seq));
@@ -377,13 +433,11 @@ static void poll_one_slave(uint8_t s)
         return;   /* skip the normal exchange this cycle */
     }
 #endif
-    /* Snapshot the host command for this slave under a brief mask (the USB ISR
-       writes host_chain/host_cmd_seq). A ROBOT_CMD chain if one has arrived, else
-       a NOP keepalive (still refreshes the slave watchdog and clocks telemetry). */
+    /* Read this slave's ACTIVE command (set only by mailbox_swap at cycle start, same
+       main-loop context as this poll — no masking needed). A ROBOT_CMD chain if one has
+       been applied, else a NOP keepalive (still refreshes the watchdog + clocks tele). */
     uint8_t     opcode;
     cmd_chain_t chain_local;
-    uint16_t    cmd_seq_local;
-    __disable_irq();
     if (host_chain_valid[s]) {
         opcode      = SPI_OP_ROBOT_CMD;
         chain_local = host_chain[s];
@@ -393,13 +447,11 @@ static void poll_one_slave(uint8_t s)
         chain_local.chain_id = s;
         chain_local.n_motors = slave_motor_counts[s];
     }
-    cmd_seq_local = host_cmd_seq;
-    __enable_irq();
 
     uint8_t seq_to_send = spi_seq[s]++;
     tele_chain_t tele;
     HAL_StatusTypeDef st = spi_exchange((SpiDevId)s, opcode, seq_to_send,
-                                        master_cycle_id, cmd_seq_local,
+                                        master_cycle_id, g_cmd_seq_active,
                                         &chain_local, &tele);
 
     if (st == HAL_OK) {   /* CRC verified inside spi_exchange = valid + present */
@@ -474,6 +526,7 @@ void MotorMaster_ProcessLoop(void)
     if (master_cycle_take(NULL)) {
         uint32_t t0 = cycle_us_now();           /* cycle service start (µs) */
         master_cycle_id++;
+        mailbox_swap();                         /* apply-at-n+1: take the newest complete set */
         for (uint8_t s = 0; s < NUM_SLAVES; s++) {
             poll_one_slave(s);
         }

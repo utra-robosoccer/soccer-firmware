@@ -72,5 +72,10 @@ ModeDecision mode_sm_step(uint8_t state, uint8_t req, uint8_t valid,
             d.rejected = 1u;
             break;
     }
+
+    /* Any transition that (re)establishes CAN output or drops it re-baselines cmd_seq
+       tracking, so last_applied_seq starts at 0 for the new command stream instead of
+       carrying a stale value across an arm / re-hold / goto-zero / disable. */
+    d.reset_cmd_seq = (uint8_t)(d.do_arm || d.capture_hold || d.do_disable || d.enter_to_zero);
     return d;
 }

@@ -76,6 +76,9 @@ def analyze(path):
     cmd_by_motor = {}    # (slave, local) -> [(ts_ns, cmd_seq), ...]
     tick_cmds = {}       # cmd_seq -> {"ts": first_ts_ns, "motors": set((slave, local))}
     tele_cmd_rx = []     # (ts_ns, last_cmd_seq_rx) — for master command-bunching analysis
+    tele_frames = []     # (ts_ns, cycle_id, cmd_seq_active, {key: last_applied}) — master-clock
+    tx_cmd_echo = {}     # cmd_seq -> echoed cycle_id (the master cycle the host answered)
+    tele_ctr = []        # (ts_ns, (on_time,late,missing,duplicate)) — bracketed to the cmd window
 
     for rec in r:
         if rec.kind == LOG.RX_FRAME:
@@ -87,6 +90,7 @@ def analyze(path):
                 d = P.parse_robot_tele(pl)
                 if d:
                     tele_cmd_rx.append((rec.ts_ns, d["last_cmd_seq_rx"]))
+                    applied_map = {}
                     for ch in d["chains"]:
                         sid = ch["chain_id"]
                         for local, mo in enumerate(ch["motors"]):
@@ -94,6 +98,11 @@ def analyze(path):
                             ms.append((rec.ts_ns, mo.tau))
                             tele_by_motor.setdefault(key, []).append(
                                 (rec.ts_ns, mo.last_applied_seq))
+                            applied_map[key] = mo.last_applied_seq
+                    tele_frames.append((rec.ts_ns, d["cycle_id"],
+                                        d["cmd_seq_active"], applied_map))
+                    tele_ctr.append((rec.ts_ns, (d["cmd_on_time"], d["cmd_late"],
+                                                 d["cmd_missing"], d["cmd_duplicate"])))
             elif mt == P.MSG_PING:
                 rx_ping.setdefault(seq, rec.ts_ns)
         elif rec.kind == LOG.TX_FRAME:
@@ -105,6 +114,7 @@ def analyze(path):
                 if not d:
                     continue
                 cmd_seq = d["cmd_seq"]
+                tx_cmd_echo.setdefault(cmd_seq, d["cycle_id"])
                 for ch in d["chains"]:
                     sid = ch["chain_id"]
                     for local, m in enumerate(ch["motors"]):
@@ -238,6 +248,69 @@ def analyze(path):
     print(f"      cycles advancing ≥2 (bunched): {bunched}/{total_cyc} "
           f"= {100.0*bunched/total_cyc:.1f}%")
 
+    # ── master-clock command counters (tele_robot_t, run delta) ─────────────────
+    # Free-running u16 counters classified by the master at its cycle-start mailbox swap:
+    # on_time/late (host answered the latest/an older telemetry cycle), missing (no fresh
+    # command that cycle → held), duplicate (host sent >1 command for one cycle).
+    def _u16d(a, b):
+        return (a - b) & 0xFFFF
+    # Bracket the counters to the command-streaming window [first MIT TX, last MIT TX] so
+    # idle cycles before/after (settle, HOLD arm, between runs) don't swamp the delta.
+    if tele_ctr and tick_cmds:
+        tele_ctr.sort()
+        win_lo = min(info["ts"] for info in tick_cmds.values())
+        win_hi = max(info["ts"] for info in tick_cmds.values())
+        ct_ts = [t for t, _ in tele_ctr]
+        i0 = min(bisect.bisect_left(ct_ts, win_lo), len(tele_ctr) - 1)
+        i1 = min(bisect.bisect_right(ct_ts, win_hi) - 1, len(tele_ctr) - 1)
+        c0, c1 = tele_ctr[i0][1], tele_ctr[max(i1, i0)][1]
+        on, la, mi, du = (_u16d(c1[i], c0[i]) for i in range(4))
+        tot = on + la + mi
+        pct = (lambda x: f"{100.0*x/tot:.1f}%" if tot else "–")
+        print("\nmaster command counters (over the command-streaming window):")
+        print(f"    on_time {on} ({pct(on)})   late {la} ({pct(la)})   "
+              f"missing {mi} ({pct(mi)})   duplicate {du}")
+        print(f"    (on_time+late+missing = {tot} master cycles classified)")
+
+    # ── master-clock latency in CYCLES (answered E → applied A → confirmed C) ───
+    # E = the master cycle the host echoed when it sent cmd_seq K (from the TX frame);
+    # A = first telemetry whose cmd_seq_active ≥ K (the master applied K this cycle);
+    # C = first telemetry whose last_applied_seq ≥ K (the slave confirmed it). cycle_id is
+    # u16; a measurement run stays well under one wrap, so a signed-16 diff is exact.
+    def _cyc(a, b):
+        return ((a - b + 0x8000) & 0xFFFF) - 0x8000
+    cyc_total, cyc_ans_apply, cyc_apply_conf = [], [], []
+    cyc_never = 0
+    frame_ts = [f[0] for f in tele_frames]
+    for cmd_seq, info in tick_cmds.items():
+        if cmd_seq not in tx_cmd_echo:
+            continue
+        E = tx_cmd_echo[cmd_seq]
+        motors = info["motors"]
+        A = C = None
+        j = bisect.bisect_left(frame_ts, info["ts"])
+        for k in range(j, len(tele_frames)):
+            _ts, cyc, active, amap = tele_frames[k]
+            if A is None and P.seq_ge(active, cmd_seq):
+                A = cyc
+            if C is None and all(P.seq_ge(amap.get(key, 0), cmd_seq) for key in motors):
+                C = cyc
+            if A is not None and C is not None:
+                break
+        if A is None or C is None:
+            cyc_never += 1
+            continue
+        cyc_total.append(_cyc(C, E))
+        cyc_ans_apply.append(_cyc(A, E))
+        cyc_apply_conf.append(_cyc(C, A))
+    if cyc_total:
+        print("\nmaster-clock latency (cycles):")
+        _dist("    total     answered → confirmed ", cyc_total, unit="cyc")
+        _dist("    phase 1   answered → applied   ", cyc_ans_apply, unit="cyc")
+        _dist("    phase 2   applied  → confirmed ", cyc_apply_conf, unit="cyc")
+        print(f"    unresolved (no apply/confirm seen): {cyc_never}")
+
+    print()
     _dist("step latency  (cmd → torque response)              ", step_lat)
     _dist("ping RTT      (host ↔ master)                      ", ping_rtt)
 

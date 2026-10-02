@@ -71,10 +71,13 @@ class TeleRoundTrip(unittest.TestCase):
                      fault_word=0xDEADBEEF, last_applied_seq=0x1234)
         chains = [dict(chain_id=0, spi_seq_echo=0x2A, slave_time_us=7777,
                        cmd_crc_errors=3, can_tx_errors=1, motors=[motor])]
-        b = P.pack_robot_tele(9, 123456, 42, 0, P.ROBOT_STATE_NAMES and 1, chains)
+        b = P.pack_robot_tele(9, 123456, 42, 41, P.ROBOT_STATE_NAMES and 1, chains,
+                              cmd_on_time=1000, cmd_late=7, cmd_missing=3, cmd_duplicate=2)
         self.assertEqual(len(b), P.SZ_TELE_ROBOT)
         d = P.parse_robot_tele(b)
         self.assertEqual((d["cycle_id"], d["last_cmd_seq_rx"], d["n_chains"]), (9, 42, 1))
+        self.assertEqual((d["cmd_seq_active"], d["cmd_on_time"], d["cmd_late"],
+                          d["cmd_missing"], d["cmd_duplicate"]), (41, 1000, 7, 3, 2))
         ch = d["chains"][0]
         self.assertEqual((ch["spi_seq_echo"], ch["cmd_crc_errors"], ch["can_tx_errors"]),
                          (0x2A, 3, 1))
@@ -167,7 +170,8 @@ class CrossLanguageFixture(unittest.TestCase):
                      fault_word=0xDEADBEEF, last_applied_seq=0x1234)
         tchains = [dict(chain_id=0, spi_seq_echo=0x2A, slave_time_us=7777,
                         cmd_crc_errors=3, can_tx_errors=1, motors=[motor])]
-        py_tele = P.pack_robot_tele(9, 123456, 42, 0, 1, tchains)
+        py_tele = P.pack_robot_tele(9, 123456, 42, 41, 1, tchains,
+                                    cmd_on_time=1000, cmd_late=7, cmd_missing=3, cmd_duplicate=2)
         self.assertEqual(py_tele, got["ROBOTTELE"], "tele_robot_t layout drift C↔Python")
 
 

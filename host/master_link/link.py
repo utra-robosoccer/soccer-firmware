@@ -130,7 +130,8 @@ class LinkState:
     motors: dict            # (slave, local) -> MotorSnap
     master: dict | None     # robot_state, slave_alive, uptime_ms, link_errors, rx_frames, rates
     slaves: dict            # slave_id -> dict(motors_alive, crc_errors, cmd_crc_errors, seq_gaps)
-    robot: dict | None      # tele_robot_t meta: cycle_id, last_cmd_seq_rx, missed_deadlines, ...
+    robot: dict | None      # tele_robot_t meta: cycle_id, last_cmd_seq_rx, cmd_seq_active,
+                            #   cmd_on_time/late/missing/duplicate, ...
     stamp_ns: int
 
     def armed_motors(self):
@@ -244,7 +245,9 @@ class MasterLink:
                 self._robot = dict(cycle_id=d["cycle_id"], master_time_us=d["master_time_us"],
                                    master_time_us_mono=self._mtu.update(d["master_time_us"]),
                                    last_cmd_seq_rx=d["last_cmd_seq_rx"],
-                                   missed_deadlines=d["missed_deadlines"],
+                                   cmd_seq_active=d["cmd_seq_active"],
+                                   cmd_on_time=d["cmd_on_time"], cmd_late=d["cmd_late"],
+                                   cmd_missing=d["cmd_missing"], cmd_duplicate=d["cmd_duplicate"],
                                    n_chains=d["n_chains"], robot_state=d["robot_state"],
                                    recv_ns=recv_ns)
                 self._cycle_id = d["cycle_id"]
