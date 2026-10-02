@@ -149,7 +149,9 @@ class MasterLink:
                 f"{MASTER_VID:04x}:{MASTER_PID:04x}); pass --port explicitly")
         # exclusive=True takes a POSIX advisory lock (TIOCEXCL) so nothing else
         # (ModemManager, a second script) can open the port and inject bytes.
-        self._ser = serial.Serial(self.port, baud, timeout=0, exclusive=True)
+        # Blocking read: a small serial timeout lets _rx_loop park on read() and wake the
+        # instant a frame lands (no busy-poll), so each tele_robot_t is decoded ASAP.
+        self._ser = serial.Serial(self.port, baud, timeout=0.1, exclusive=True)
         try:
             self._ser.reset_input_buffer()   # flush kernel buffer; live-detect handles the rest
         except (OSError, serial.SerialException):
@@ -169,6 +171,13 @@ class MasterLink:
         self._slaves: dict = {}
         self._robot: dict | None = None  # latest tele_robot_t meta (cycle_id etc.)
         self._cycle_id = 0               # last master cycle_id seen (echoed in commands)
+        # Telemetry-driven stepping: a monotonic frame counter + a condition the runner
+        # waits on (wait_robot). Coalescing is implicit — a waiter gets the NEWEST frame
+        # and the count of frames it skipped. Decode time of the latest frame is recorded
+        # for the loop-timing budget. Condition shares self._lock.
+        self._robot_cond = threading.Condition(self._lock)
+        self._robot_frame_no = 0
+        self._robot_decode_ns = 0
         self._mtu = U32Unwrapper()       # unwrap the 32-bit master_time_us (wraps ~71 min)
         self._live: dict = {}            # (slave, local) -> _LiveDetector
         self._live_logged = False        # EVENT "live" emitted once, on first live motor
@@ -218,11 +227,14 @@ class MasterLink:
         buf = bytearray()
         while not self._stop.is_set():
             try:
+                # Block on read() (serial timeout) and wake the instant bytes arrive; drain
+                # whatever is buffered. No busy-poll, no standing backlog.
                 n = self._ser.in_waiting
-                if n:
-                    buf.extend(self._ser.read(n))
+                chunk = self._ser.read(n if n else 1)
             except (serial.SerialException, OSError):
                 break
+            if chunk:
+                buf.extend(chunk)
             while True:
                 r = P.decode_frame(buf, on_reject=self._on_reject, on_frame=self._on_frame)
                 if r is None:
@@ -230,13 +242,10 @@ class MasterLink:
                 mt, _seq, ts_ms, pl, consumed = r
                 del buf[:consumed]      # decode_frame does not remove accepted frames
                 self._ingest(mt, ts_ms, pl, time.monotonic_ns())
-            # Poll faster than the telemetry period so the host out-drains the
-            # master's ~200 Hz full-robot stream and no standing backlog builds
-            # (a 1 ms sleep sat just under the emit rate → ~120 ms of buffering).
-            time.sleep(0.0002)
 
     def _ingest(self, mt: int, ts_ms: int, pl: bytes, recv_ns: int) -> None:
         if mt == P.MSG_ROBOT_TELE:
+            t_dec0 = time.monotonic_ns()
             d = P.parse_robot_tele(pl)
             if not d:
                 return
@@ -270,6 +279,9 @@ class MasterLink:
                         if det.update(ts_ms, recv_ns) and not self._live_logged:
                             self._live_logged = True
                             log_live = True
+                self._robot_frame_no += 1
+                self._robot_decode_ns = time.monotonic_ns() - t_dec0
+                self._robot_cond.notify_all()
             if log_live:
                 self._log.write(LOG.EVENT, b"live")
         elif mt == P.MSG_MASTER_STATUS:
@@ -285,14 +297,50 @@ class MasterLink:
                     self._slaves[d["slave_id"]] = d
 
     # ── snapshot ──────────────────────────────────────────────────────────────
+    def _snapshot_locked(self) -> LinkState:
+        """Build a LinkState. Caller MUST hold self._lock."""
+        return LinkState(
+            motors=dict(self._motors),
+            master=dict(self._master) if self._master else None,
+            slaves={k: dict(v) for k, v in self._slaves.items()},
+            robot=dict(self._robot) if self._robot else None,
+            stamp_ns=time.monotonic_ns())
+
     def latest_state(self) -> LinkState:
         with self._lock:
-            return LinkState(
-                motors=dict(self._motors),
-                master=dict(self._master) if self._master else None,
-                slaves={k: dict(v) for k, v in self._slaves.items()},
-                robot=dict(self._robot) if self._robot else None,
-                stamp_ns=time.monotonic_ns())
+            return self._snapshot_locked()
+
+    def robot_frame_no(self) -> int:
+        """Current telemetry frame counter (monotonic; bumped per tele_robot_t)."""
+        with self._lock:
+            return self._robot_frame_no
+
+    def wait_robot(self, after_frame: int, timeout: float):
+        """Block until a tele_robot_t newer than `after_frame` arrives, then return
+        (state, frame_no, skipped, decode_ns) for the NEWEST frame — coalescing, so a
+        caller that was busy gets the latest and `skipped` counts the frames it missed.
+        Returns None on timeout (treat as a telemetry stall)."""
+        deadline = time.monotonic() + timeout
+        with self._robot_cond:
+            while self._robot_frame_no <= after_frame:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0.0:
+                    return None
+                self._robot_cond.wait(remaining)
+            fno = self._robot_frame_no
+            skipped = fno - after_frame - 1 if after_frame >= 0 else 0
+            return (self._snapshot_locked(), fno, skipped, self._robot_decode_ns)
+
+    def wait_master_status(self, timeout: float = 1.0):
+        """Block until at least one MasterStatus has been received; return its dict
+        (which includes master_poll_hz) or None on timeout."""
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            with self._lock:
+                if self._master is not None:
+                    return dict(self._master)
+            time.sleep(0.005)
+        return None
 
     # ── startup liveness ────────────────────────────────────────────────────────
     def configured_motors(self) -> set:
@@ -338,15 +386,18 @@ class MasterLink:
         self._log.write(LOG.TX_FRAME, frame, ts_ns=ts)
         return True
 
-    def send_robot_cmd(self, cmds) -> None:
+    def send_robot_cmd(self, cmds, echo_cycle: int | None = None) -> None:
         """Send one MSG_ROBOT_CMD (cmd_robot_t) for this tick from a list of
         MotorCommand. Commands are grouped into per-slave chains (chain_id = slave).
 
         All motors in one call share a single cmd_seq (one per tick): latency.py
         treats a tick as applied once every commanded motor reports
         last_applied_seq >= it. The counter advances once per call, starting at 1
-        and skipping 0 on wrap (0 = CMD_SEQ_NONE). cycle_id echoes the last master
-        cycle seen (deadline/apply semantics come with the master-clock task)."""
+        and skipping 0 on wrap (0 = CMD_SEQ_NONE).
+
+        cycle_id echoes `echo_cycle` — the master cycle the command was COMPUTED FROM
+        (the telemetry-driven runner passes the stepped frame's cycle_id) — or the last
+        cycle seen if unset. The master classifies on_time/late against this echo."""
         cmds = list(cmds)
         if not cmds:
             return
@@ -354,8 +405,11 @@ class MasterLink:
         if seq > 0xFFFF:
             seq = 1
         self._cmd_seq = seq
-        with self._lock:
-            cycle_id = self._cycle_id
+        if echo_cycle is not None:
+            cycle_id = echo_cycle & 0xFFFF
+        else:
+            with self._lock:
+                cycle_id = self._cycle_id
 
         # Group by slave → chains, motors ordered by local index.
         by_slave: dict = {}

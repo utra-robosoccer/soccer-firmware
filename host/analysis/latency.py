@@ -65,7 +65,7 @@ def _dist(name, xs, unit="ms"):
           f"p95 {_pct(s,95):.2f}  max {s[-1]:.2f}  {unit}")
 
 
-def analyze(path):
+def analyze(path, host_rate=None, cycle_rate=None):
     r = BinaryLogReader(path)
     ms = []          # (ts_ns, tau) measured telemetry, host monotonic
     tx_step = []     # (ts_ns, pos) commanded position steps
@@ -266,11 +266,24 @@ def analyze(path):
         c0, c1 = tele_ctr[i0][1], tele_ctr[max(i1, i0)][1]
         on, la, mi, du = (_u16d(c1[i], c0[i]) for i in range(4))
         tot = on + la + mi
+        fresh = on + la                      # cycles that applied a new command
         pct = (lambda x: f"{100.0*x/tot:.1f}%" if tot else "–")
+        # Split "missing" into holds EXPECTED because the host runs slower than the master
+        # cycle (decimation N = cycles-per-command) vs EXCESS misses (holds beyond that — the
+        # host dropped/skipped a command it was due to send). N is cycle_rate/host_rate; use
+        # --host-rate if given, else infer from the applied cadence.
+        if host_rate and cycle_rate:
+            N = max(1, round(cycle_rate / host_rate))
+        else:
+            N = max(1, round(tot / fresh)) if fresh else 1
+        expected_holds = fresh * (N - 1)
+        excess = mi - expected_holds         # may be <0 if the host briefly outran its rate
         print("\nmaster command counters (over the command-streaming window):")
         print(f"    on_time {on} ({pct(on)})   late {la} ({pct(la)})   "
               f"missing {mi} ({pct(mi)})   duplicate {du}")
         print(f"    (on_time+late+missing = {tot} master cycles classified)")
+        print(f"    holds: N≈{N} cycles/command → expected {expected_holds}, "
+              f"excess misses {excess:+d}   (fresh commands {fresh})")
 
     # ── master-clock latency in CYCLES (answered E → applied A → confirmed C) ───
     # E = the master cycle the host echoed when it sent cmd_seq K (from the TX frame);
@@ -318,8 +331,13 @@ def analyze(path):
 def main(argv=None):
     ap = argparse.ArgumentParser(description="End-to-end latency analysis of a .bin")
     ap.add_argument("logfile")
+    ap.add_argument("--host-rate", type=float, default=None,
+                    help="configured host command rate (Hz); splits 'missing' into expected "
+                         "holds vs excess misses. Default: infer from the applied cadence.")
+    ap.add_argument("--cycle-rate", type=float, default=200.0,
+                    help="master cycle rate (Hz), for N = cycle/host (default 200).")
     args = ap.parse_args(argv)
-    analyze(args.logfile)
+    analyze(args.logfile, host_rate=args.host_rate, cycle_rate=args.cycle_rate)
 
 
 if __name__ == "__main__":

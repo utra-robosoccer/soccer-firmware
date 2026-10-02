@@ -15,6 +15,7 @@ import sys
 import time
 
 from master_link import config_meta
+from master_link import motor_config_gen as mc
 from master_link.link import MasterLink, MotorCommand, MODE_IDLE
 from policies.listen_policy import ListenPolicy
 from policies.man_1s_1m_policy import Man1s1mPolicy
@@ -67,47 +68,87 @@ def main(argv=None):
                  "— is the master up, the slave powered, and the motors on the CAN bus?")
     print("telemetry live")
 
-    period_ns = int(1e9 / args.rate)
-    link.log_event("start")
-    policy.setup(link.latest_state(), time.monotonic_ns())
+    # Verify the master's actual cycle rate matches the generated config BEFORE stepping:
+    # N is derived from MASTER_POLL_HZ, and a wrong N would drive the policy at a rate it
+    # wasn't tuned for. MasterStatus arrives at ~20 Hz, so it's here within ~50 ms.
+    mstat = link.wait_master_status(timeout=0.5)
+    if mstat is None:
+        link.log_event("error:no_master_status"); link.close()
+        sys.exit("no MasterStatus within 0.5 s — cannot verify the master cycle rate "
+                 "(is the master firmware up to date?).")
+    live_hz = mstat.get("master_poll_hz", 0)
+    if live_hz != mc.MASTER_POLL_HZ:
+        link.log_event("error:rate_mismatch"); link.close()
+        sys.exit(f"master cycle-rate mismatch: generated config MASTER_POLL_HZ="
+                 f"{mc.MASTER_POLL_HZ} Hz, but the master reports {live_hz} Hz. Regenerate "
+                 f"the host config or reflash the master; refusing to run so the policy is "
+                 f"not driven at the wrong rate.")
 
-    periods = []
-    latenesses = []
-    overruns = 0
-    seq = 0
-    prev_start = None
-    next_deadline = time.monotonic_ns()
+    N = max(1, round(mc.MASTER_POLL_HZ / args.rate))
+    cycle_us = 1e6 / mc.MASTER_POLL_HZ
+    stall_timeout = 5 * cycle_us / 1e6          # a few missed cycles → stall
+    print(f"stepping on cycle_id %% {N} == 0  →  {mc.MASTER_POLL_HZ / N:g} Hz policy "
+          f"(master {mc.MASTER_POLL_HZ} Hz); stall after {stall_timeout*1e3:.0f} ms")
+
+    link.log_event("start")
+
+    # Master time (ns) drives policy.step(): perfectly regular and identical on replay.
+    # Host arrival time only feeds the loop-timing budget.
+    def master_ns(state):
+        return int(state.robot["master_time_us_mono"]) * 1000
+
+    first = link.latest_state()
+    policy.setup(first, master_ns(first) if first.robot else 0)
+
+    budgets = []; decodes = []; steps = []; writes = []
+    skips_total = late_steps = dropped_steps = seq = 0
+    last_fno = link.robot_frame_no()
+    last_period = None
     stop_reason = "stop"
 
     try:
         while True:
-            t0 = time.monotonic_ns()
-            lateness = t0 - next_deadline
+            res = link.wait_robot(after_frame=last_fno, timeout=stall_timeout)
+            if res is None:
+                stop_reason = "error:telemetry_stall"
+                sys.stderr.write(f"\ntelemetry stall: no frame for >{stall_timeout*1e3:.0f} ms "
+                                 "— stopping.\n")
+                break
+            state, fno, skipped, decode_ns = res
+            skips_total += skipped
+            last_fno = fno
+            cid = state.robot["cycle_id"]
+            period = cid // N
 
-            state = link.latest_state()
+            # Step on cycle_id % N == 0 (deterministic). If an aligned frame was coalesced,
+            # step on the next frame (late) but keep the schedule aligned; only count a
+            # DROPPED step when a whole N-cycle period elapsed with no step.
+            if last_period is None:
+                if cid % N != 0:
+                    continue                         # align the first step
+            elif period <= last_period:
+                continue                             # extra frame within a stepped period
+            elif period > last_period + 1:
+                dropped_steps += (period - last_period - 1)
+
+            on_time = (cid % N == 0)
+            if not on_time:
+                late_steps += 1
+
+            arrival_ns = state.robot["recv_ns"]
             t1 = time.monotonic_ns()
-            action = policy.step(state, t0)
+            action = policy.step(state, master_ns(state))
             t2 = time.monotonic_ns()
             if action.motors:
-                link.send_robot_cmd(action.motors)
+                link.send_robot_cmd(action.motors, echo_cycle=cid)
             t3 = time.monotonic_ns()
 
-            period = (t0 - prev_start) if prev_start is not None else period_ns
-            link.log_loop_timing(seq, period, t2 - t1, t3 - t2, lateness)
-            if prev_start is not None:
-                periods.append(period)
-            latenesses.append(lateness)
-            if lateness > period_ns:
-                overruns += 1
-            prev_start = t0
+            last_period = period
             seq += 1
-
-            next_deadline += period_ns
-            now = time.monotonic_ns()
-            if next_deadline <= now:
-                next_deadline = now      # fell behind → resync the grid (don't burst)
-            else:
-                time.sleep((next_deadline - now) / 1e9)
+            decodes.append(decode_ns); steps.append(t2 - t1); writes.append(t3 - t2)
+            budgets.append(t3 - arrival_ns)
+            # LOOP_TIMING: period=decode, step, send=write, lateness=budget(arrival→written)
+            link.log_loop_timing(seq, decode_ns, t2 - t1, t3 - t2, t3 - arrival_ns)
     except KeyboardInterrupt:
         stop_reason = "stop"
         print("\nCtrl-C — shutting down")
@@ -115,10 +156,22 @@ def main(argv=None):
         stop_reason = f"error:{type(e).__name__}:{e}"
         sys.stderr.write(f"\npolicy/loop error: {e}\n")
     finally:
-        _shutdown(link, policy, stop_reason, args.rate, seq, periods, latenesses, overruns)
+        _shutdown(link, policy, stop_reason, args.rate, N, cycle_us, seq,
+                  skips_total, late_steps, dropped_steps, budgets, decodes, steps, writes)
+    if stop_reason.startswith("error:"):
+        sys.exit(1)
 
 
-def _shutdown(link, policy, stop_reason, rate, seq, periods, latenesses, overruns):
+def _stat_ms(label, ns_vals):
+    if not ns_vals:
+        print(f"{label} no samples"); return
+    xs = sorted(v / 1e6 for v in ns_vals)
+    mean = sum(xs) / len(xs)
+    print(f"{label} mean {mean:.3f}  p99 {_pct(xs,99):.3f}  max {max(xs):.3f}  ms")
+
+
+def _shutdown(link, policy, stop_reason, rate, N, cycle_us, seq,
+              skips, late_steps, dropped_steps, budgets, decodes, steps, writes):
     # Disable any motor still armed (best-effort; safe even on listen). One
     # cmd_robot_t with an IDLE request for each armed motor.
     try:
@@ -137,23 +190,26 @@ def _shutdown(link, policy, stop_reason, rate, seq, periods, latenesses, overrun
     st = link.stats
     link.close()
 
-    per_ms = sorted(p / 1e6 for p in periods)
-    late_ms = sorted(l / 1e6 for l in latenesses)
-    mean = (sum(per_ms) / len(per_ms)) if per_ms else 0.0
+    cycle_ms = cycle_us / 1e3
+    budget_pct = (100.0 * (sum(budgets) / len(budgets) / 1e6) / cycle_ms) if budgets else 0.0
 
     print("\n── summary ──────────────────────────────────────────")
     print(f"log:            {log_path}")
-    print(f"ticks:          {seq}   target {rate:g} Hz ({1000.0/rate:.2f} ms)")
+    print(f"stepped:        {seq}   N={N} → {rate:g} Hz policy on a {1000.0/cycle_ms:g} Hz "
+          f"master cycle ({cycle_ms:.2f} ms)")
+    print(f"skips/late/drop:{skips} coalesced frames   {late_steps} late steps   "
+          f"{dropped_steps} dropped steps")
     print(f"frames RX/TX:   {st['rx_frames']} / {st['tx_frames']}"
           f"   (tx_errors {st['tx_errors']})")
     print(f"discards:       {st['discard_records']} records / {st['discard_bytes']} bytes"
           f"   | wrong-version frames: {st['version_frames']}")
     if st["log_dropped"]:
         print(f"LOG DROPPED:    {st['log_dropped']} records (disk too slow)")
-    if per_ms:
-        print(f"loop period ms: mean {mean:.3f}  p99 {_pct(per_ms,99):.3f}  max {max(per_ms):.3f}")
-        print(f"lateness ms:    p99 {_pct(late_ms,99):.3f}  max {max(late_ms):.3f}"
-              f"   overruns {overruns}")
+    _stat_ms("decode:        ", decodes)
+    _stat_ms("policy step:   ", steps)
+    _stat_ms("write:         ", writes)
+    _stat_ms("budget (arrival→written):", budgets)
+    print(f"budget uses     {budget_pct:.1f}% of one {cycle_ms:.2f} ms master cycle (mean)")
     print("─────────────────────────────────────────────────────")
 
 

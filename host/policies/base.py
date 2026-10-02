@@ -31,15 +31,16 @@ class Policy(ABC):
 
     def setup(self, state: LinkState, t_ns: int) -> None:
         """Optional one-time init once the link is up (state may be sparse).
-        t_ns is the runner's monotonic clock in nanoseconds."""
+        t_ns is the MASTER clock in nanoseconds (the telemetry frame's time)."""
 
     @abstractmethod
     def step(self, state: LinkState, t_ns: int) -> Action:
         """Given the latest link state, return the Action for this tick.
 
-        t_ns is the runner's monotonic time in nanoseconds. Policies MUST derive all
-        timing from t_ns and never read a clock themselves — this keeps step() a pure
-        function of (state, t_ns) so it is deterministic and unit-testable."""
+        t_ns is MASTER time in nanoseconds (the stepped telemetry frame's master clock),
+        not the host clock — so step cadence is perfectly regular and a logged run replays
+        identically. Policies MUST derive all timing from t_ns and never read a clock
+        themselves — this keeps step() a pure function of (state, t_ns)."""
 
     def teardown(self) -> None:
         """Optional cleanup on shutdown (before motors are disabled)."""
