@@ -57,7 +57,7 @@ class ConvertLog(unittest.TestCase):
         w.write(LOG.RX_FRAME, _tele_frame(state=3))
         w.write(LOG.RX_FRAME, P.encode_frame(P.MSG_MASTER_STATUS, P.NODE_MASTER, P.NODE_JETSON,
                                              struct.pack(P.FMT_MASTER_STATUS, 1, 1, 1234, 0, 99,
-                                                         200, 200, 200, 50)))
+                                                         200, 200, 200, 50, 0, 0)))
         w.write(LOG.RX_FRAME, P.encode_frame(P.MSG_SLAVE_STATUS, P.NODE_MASTER, P.NODE_JETSON,
                                              struct.pack(P.FMT_SLAVE_STATUS, 0, 1, 1234, 0, 0, 0)))
         w.write(LOG.RX_FRAME, bytes(vf))

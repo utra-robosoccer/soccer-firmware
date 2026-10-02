@@ -37,7 +37,7 @@ MSG_NAMES = {
 
 # ── hierarchy caps (mirror protocol.h) ────────────────────────────────────────
 MAX_MOTORS_PER_CHAIN = 5
-MAX_CHAINS           = 6
+MAX_CHAINS           = 4
 
 # ── per-motor lifecycle (tele_motor_t.state) ──────────────────────────────────
 (LIFE_BOOT, LIFE_DISCOVERING, LIFE_IDLE, LIFE_HOLD, LIFE_MIT, LIFE_DAMPED,
@@ -85,13 +85,14 @@ KP_SCALE  = 10.0      # Kp    → u16
 KD_SCALE  = 100.0     # Kd    → u16
 
 # ── wire-contract version ─────────────────────────────────────────────────────
-PROTO_VERSION = 3
+PROTO_VERSION = 5   # v5: +rx_resyncs/rx_discarded_bytes in MasterStatus (resync RX)
+                    # v4: MAX_CHAINS 6→4 (4 slave chains) shrank the robot frames
 
 # ── wire layouts (little-endian, packed) ──────────────────────────────────────
 HDR_FMT  = "<HHBBIHHH"          # type,seq,src,dst,ts_ms,len,ver_flags,crc  → 16 B
 HDR_SIZE = struct.calcsize(HDR_FMT)
 
-FMT_MASTER_STATUS = "<BBIIIHHHH"  # +4 u16 configured rates → 22 B
+FMT_MASTER_STATUS = "<BBIIIHHHHII" # +4 u16 rates +rx_resyncs,rx_discarded_bytes → 30 B
 FMT_SLAVE_STATUS  = "<BBIIII"     # slave_id,motors_alive,uptime,crc,cmd_crc,seq_gaps (18)
 
 FMT_CMD_MOTOR     = "<BhhHHhB"    # mode_req,pos,vel,kp,kd,tau_ff,flags → 12 B
@@ -99,23 +100,23 @@ SZ_CMD_MOTOR      = struct.calcsize(FMT_CMD_MOTOR)
 FMT_CMD_CHAIN_HDR = "<BB"         # chain_id,n_motors
 SZ_CMD_CHAIN      = 2 + SZ_CMD_MOTOR * MAX_MOTORS_PER_CHAIN          # 62
 FMT_CMD_ROBOT_HDR = "<HHBB"       # cycle_id,cmd_seq,n_chains,reserved
-SZ_CMD_ROBOT      = 6 + SZ_CMD_CHAIN * MAX_CHAINS                    # 378
+SZ_CMD_ROBOT      = 6 + SZ_CMD_CHAIN * MAX_CHAINS                    # 254 (6 + 62*4)
 
 FMT_TELE_MOTOR    = "<hhhBBBBBBBIHH"  # pos,vel,tau,temp,state,cause,mode,fault,flags,fb_age,fault_word,last_applied_seq,reserved → 21
 SZ_TELE_MOTOR     = struct.calcsize(FMT_TELE_MOTOR)
 FMT_TELE_CHAIN_HDR = "<BBBBIHH"   # chain_id,n_motors,spi_seq_echo,reserved,slave_time_us,cmd_crc_errors,can_tx_errors
 SZ_TELE_CHAIN     = 12 + SZ_TELE_MOTOR * MAX_MOTORS_PER_CHAIN        # 117
 FMT_TELE_ROBOT_HDR = "<HIHHBB"    # cycle_id,master_time_us,last_cmd_seq_rx,missed_deadlines,n_chains,robot_state
-SZ_TELE_ROBOT     = 12 + SZ_TELE_CHAIN * MAX_CHAINS                  # 714
+SZ_TELE_ROBOT     = 12 + SZ_TELE_CHAIN * MAX_CHAINS                  # 480 (12 + 117*4)
 
 assert HDR_SIZE == 16, HDR_SIZE
 assert SZ_CMD_MOTOR == 12, SZ_CMD_MOTOR
 assert SZ_CMD_CHAIN == 62, SZ_CMD_CHAIN
-assert SZ_CMD_ROBOT == 378, SZ_CMD_ROBOT
+assert SZ_CMD_ROBOT == 254, SZ_CMD_ROBOT
 assert SZ_TELE_MOTOR == 21, SZ_TELE_MOTOR
 assert SZ_TELE_CHAIN == 117, SZ_TELE_CHAIN
-assert SZ_TELE_ROBOT == 714, SZ_TELE_ROBOT
-assert struct.calcsize(FMT_MASTER_STATUS) == 22
+assert SZ_TELE_ROBOT == 480, SZ_TELE_ROBOT
+assert struct.calcsize(FMT_MASTER_STATUS) == 30
 assert struct.calcsize(FMT_SLAVE_STATUS) == 18
 
 
@@ -219,7 +220,7 @@ def pack_cmd_motor(mode_req: int, pos: float = 0.0, vel: float = 0.0,
 
 
 def pack_robot_cmd(cycle_id: int, cmd_seq: int, chains: list) -> bytes:
-    """Build a full cmd_robot_t (378 B).
+    """Build a full cmd_robot_t (248 B).
 
     ``chains`` is a list (≤ MAX_CHAINS) of dicts:
         {"chain_id": int, "motors": [ {mode_req, pos, vel, kp, kd, tau_ff, flags}, ... ]}
@@ -287,7 +288,7 @@ def pack_tele_motor(pos_raw: int, vel_raw: int, tau_raw: int, temp_c: int,
 
 def pack_robot_tele(cycle_id: int, master_time_us: int, last_cmd_seq_rx: int,
                     missed_deadlines: int, robot_state: int, chains: list) -> bytes:
-    """Build a full tele_robot_t (714 B). ``chains`` (≤ MAX_CHAINS) is a list of
+    """Build a full tele_robot_t (480 B). ``chains`` (≤ MAX_CHAINS) is a list of
     dicts {chain_id, spi_seq_echo, slave_time_us, cmd_crc_errors, can_tx_errors,
     motors:[raw-field dict ...]}; unused slots zero-filled."""
     out = bytearray()
@@ -348,7 +349,7 @@ def parse_robot_tele(p: bytes) -> dict:
 
 # ── CRC16-CCITT (must match firmware proto_crc16) ─────────────────────────────
 # Table-driven (byte-wise), byte-identical to the firmware's bit-by-bit loop
-# (poly 0x1021, init 0xFFFF, non-reflected). The big tele_robot_t frame (714 B) is
+# (poly 0x1021, init 0xFFFF, non-reflected). The big tele_robot_t frame (248 B) is
 # CRC'd on every RX; a bit-by-bit loop costs ~1.8 ms/frame and backs up the 200 Hz
 # pipeline, so this precomputed table keeps host decode cheap.
 def _make_crc_table():
@@ -382,7 +383,7 @@ def crc16(data: bytes) -> int:
 
 # ── frame encode / decode ─────────────────────────────────────────────────────
 _seq = 0
-_MAX_PAYLOAD = 1024   # tele_robot_t is 714 B; must exceed the largest payload
+_MAX_PAYLOAD = 1024   # tele_robot_t is 248 B; must exceed the largest payload
 
 version_errors = 0    # CRC-valid frames dropped for a wrong protocol version
 
@@ -456,11 +457,12 @@ def decode_frame(buf: bytearray, on_reject=None, on_frame=None):
 def parse_master_status(p: bytes) -> dict:
     if len(p) < struct.calcsize(FMT_MASTER_STATUS):
         return {}
-    rs, sa, up, le, rf, poll_hz, tele_hz, tick_hz, host_hz = \
+    rs, sa, up, le, rf, poll_hz, tele_hz, tick_hz, host_hz, resyncs, discarded = \
         struct.unpack_from(FMT_MASTER_STATUS, p)
     return dict(robot_state=rs, slave_alive=sa, uptime_ms=up, link_errors=le,
                 rx_frames=rf, master_poll_hz=poll_hz, telemetry_hz=tele_hz,
-                slave_tick_hz=tick_hz, host_cmd_hz=host_hz)
+                slave_tick_hz=tick_hz, host_cmd_hz=host_hz,
+                rx_resyncs=resyncs, rx_discarded_bytes=discarded)
 
 
 def parse_slave_status(p: bytes) -> dict:

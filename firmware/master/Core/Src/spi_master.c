@@ -1,4 +1,5 @@
 #include "spi_master.h"
+#include "master_cycle.h"
 #include <stdio.h>
 #include <stdarg.h>
 #include <string.h>
@@ -23,13 +24,34 @@ uint8_t buf_rx_jet2master[NUM_SLV * MAX_MOTORS_PER_SLAVE * USB_BYTES_PER_MOTOR];
 static cmd_chain_t host_chain[NUM_SLAVES];
 static uint8_t     host_chain_valid[NUM_SLAVES];
 static uint16_t    host_cmd_seq      = CMD_SEQ_NONE;  /* last cmd_seq from the host   */
-static uint16_t    master_cycle_id   = 0;             /* master poll counter          */
-static uint16_t    master_missed_deadlines = 0;
+static uint16_t    master_cycle_id   = 0;             /* master cycle counter         */
 
-/* ── master status counters (written by frame decoder in usbd_cdc_if.c) ─── */
+/* ── master status counters ──────────────────────────────────────────────── */
 uint32_t master_link_errors = 0;
 uint32_t master_rx_frames   = 0;
 uint32_t master_proto_ver_mismatch = 0;
+uint32_t master_rx_resyncs  = 0;   /* USB RX resync events (contiguous discard runs) */
+uint32_t master_rx_discarded = 0;  /* bytes dropped while resyncing                  */
+uint32_t master_rx_overflows = 0;  /* RX ring overruns (producer outran consumer)    */
+
+/* ── USB RX ring: CDC ISR produces, main loop consumes (SPSC, lock-free) ───── */
+#define USB_RX_RING_SIZE 1024u                       /* power of two               */
+#define USB_RX_RING_MASK (USB_RX_RING_SIZE - 1u)
+static volatile uint8_t  usb_rx_ring[USB_RX_RING_SIZE];
+static volatile uint16_t usb_rx_head = 0;            /* written by ISR only        */
+static volatile uint16_t usb_rx_tail = 0;            /* written by main only       */
+
+void MotorMaster_UsbRxFromISR(const uint8_t *buf, uint16_t len)
+{
+    uint16_t head = usb_rx_head;
+    for (uint16_t i = 0; i < len; i++) {
+        uint16_t next = (uint16_t)((head + 1u) & USB_RX_RING_MASK);
+        if (next == usb_rx_tail) { master_rx_overflows++; break; }  /* full → drop rest */
+        usb_rx_ring[head] = buf[i];
+        head = next;
+    }
+    usb_rx_head = head;
+}
 
 /* ── per-slave runtime state ─────────────────────────────────────────────── */
 static uint8_t      slave_alive[NUM_SLAVES];
@@ -151,6 +173,8 @@ static void emit_master_status(uint32_t now_ms)
     pay.telemetry_hz   = TELEMETRY_HZ;
     pay.slave_tick_hz  = SLAVE_TICK_HZ;
     pay.host_cmd_hz    = HOST_CMD_HZ;
+    pay.rx_resyncs        = master_rx_resyncs;
+    pay.rx_discarded_bytes = master_rx_discarded;
 
     uint8_t frame[MSG_HEADER_SIZE + sizeof(MasterStatus)];
     uint16_t n = proto_build(frame, sizeof(frame),
@@ -180,18 +204,20 @@ static void emit_slave_status(uint8_t s, uint32_t now_ms)
     if (n > 0u) usb_tx_write(frame, n);
 }
 
-static void emit_robot_tele(uint32_t now_ms)
+static void emit_robot_tele(uint32_t master_time_us)
 {
     /* Pass-through: assemble one tele_robot_t from every CURRENTLY-ALIVE slave's
        last CRC-valid tele_chain_t (emission-gated at chain granularity — a dead
        slave's chain is omitted, so the host sees it go silent). The master never
-       touches motor data; the host decodes fixed-point raw→units. */
+       touches motor data; the host decodes fixed-point raw→units.
+       master_time_us is this cycle's real TIM2 µs timestamp (stamped by the caller);
+       missed_deadlines now carries the hardware-cycle overrun count. */
     tele_robot_t pay;
     memset(&pay, 0, sizeof(pay));
     pay.cycle_id         = master_cycle_id;
-    pay.master_time_us   = (uint32_t)(now_ms * 1000u);
+    pay.master_time_us   = master_time_us;
     pay.last_cmd_seq_rx  = host_cmd_seq;
-    pay.missed_deadlines = master_missed_deadlines;
+    pay.missed_deadlines = (uint16_t)master_cycle_overruns();
     pay.robot_state      = (uint8_t)compute_robot_state(NULL);
 
     uint8_t nc = 0u;
@@ -214,7 +240,7 @@ static void emit_robot_tele(uint32_t now_ms)
     uint16_t n = proto_build(frame, sizeof(frame),
                               MSG_ROBOT_TELE, tx_seq++,
                               NODE_MASTER, NODE_JETSON,
-                              now_ms,
+                              HAL_GetTick(),   /* header ts_ms (ms) — host live-detect uses this */
                               (const uint8_t *)&pay, pay_len);
     if (n > 0u) usb_tx_write(frame, n);
 }
@@ -233,6 +259,68 @@ void MotorMaster_HandleRobotCmd(const cmd_robot_t *cmd)
         if (s >= NUM_SLAVES) { master_link_errors++; continue; }
         host_chain[s]       = cmd->chains[c];   /* struct copy (62 B) */
         host_chain_valid[s] = 1u;
+    }
+}
+
+/* Drain the USB RX ring and dispatch every complete frame (main-loop context).
+   Uses the resynchronizing proto_frame_scan: junk/misaligned bytes are dropped one
+   at a time (counted), so a stray byte or lost packet can't desync us permanently. */
+void MotorMaster_ProcessUsbRx(void)
+{
+    static uint8_t  scan[768];     /* ≥ 2 × max frame (16 + 480) for headroom */
+    static uint16_t scan_len = 0;
+    static uint8_t  in_resync = 0;
+
+    /* Drain ring → scan buffer (consumer side; tail is ours). */
+    while (scan_len < sizeof(scan) && usb_rx_tail != usb_rx_head) {
+        scan[scan_len++] = usb_rx_ring[usb_rx_tail];
+        usb_rx_tail = (uint16_t)((usb_rx_tail + 1u) & USB_RX_RING_MASK);
+    }
+
+    uint16_t off = 0;
+    while ((uint16_t)(scan_len - off) >= MSG_HEADER_SIZE) {
+        ProtoScanResult r;
+        ProtoScanStatus st = proto_frame_scan(scan + off, (uint16_t)(scan_len - off), &r);
+
+        if (st == PROTO_SCAN_NEED_MORE) break;         /* plausible header; await body */
+
+        if (st == PROTO_SCAN_RESYNC) {                 /* junk → drop byte(s), count run */
+            if (!in_resync) { master_rx_resyncs++; in_resync = 1u; }
+            master_rx_discarded += r.consumed;
+            master_link_errors++;
+            off += r.consumed;
+            continue;
+        }
+
+        in_resync = 0u;                                /* PROTO_SCAN_FRAME */
+        master_rx_frames++;
+        if (r.type == MSG_ROBOT_CMD) {
+            if (r.pay_len >= sizeof(cmd_robot_t)) {
+                cmd_robot_t cmd;
+                memcpy(&cmd, r.payload, sizeof(cmd));
+                MotorMaster_HandleRobotCmd(&cmd);
+            } else {
+                master_link_errors++;
+            }
+        } else if (r.type == MSG_PING) {
+            MsgHeader h;                               /* echo the request's seq/src */
+            memcpy(&h, r.payload - MSG_HEADER_SIZE, MSG_HEADER_SIZE);
+            uint8_t frame[MSG_HEADER_SIZE];
+            uint16_t n = proto_build(frame, sizeof(frame), MSG_PING, h.seq,
+                                     NODE_MASTER, (uint8_t)h.src, HAL_GetTick(), NULL, 0u);
+            if (n > 0u) usb_tx_write(frame, n);
+        }
+        off += r.consumed;
+    }
+
+    if (off > 0u) {                                    /* slide unconsumed tail down */
+        scan_len = (uint16_t)(scan_len - off);
+        if (scan_len > 0u) memmove(scan, scan + off, scan_len);
+    } else if (scan_len == sizeof(scan)) {             /* defensive: never wedge full */
+        if (!in_resync) { master_rx_resyncs++; in_resync = 1u; }
+        master_rx_discarded++;
+        scan_len--;
+        memmove(scan, scan + 1, scan_len);
     }
 }
 

@@ -62,6 +62,11 @@ void MotorMaster_FormatTxBuffer(void);
 /* Split the host's cmd_robot_t into per-slave command mailboxes (ISR context). */
 void MotorMaster_HandleRobotCmd(const cmd_robot_t *cmd);
 
+/* USB RX split: the CDC ISR copies each packet into the RX ring (ISR-safe,
+   producer); the main loop drains + resync-scans + dispatches (consumer). */
+void MotorMaster_UsbRxFromISR(const uint8_t *buf, uint16_t len);
+void MotorMaster_ProcessUsbRx(void);
+
 extern uint32_t master_link_errors;
 extern uint32_t master_rx_frames;
 extern uint32_t master_proto_ver_mismatch;  /* host frames rejected on PROTO_VERSION */

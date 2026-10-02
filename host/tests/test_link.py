@@ -71,7 +71,7 @@ def _robot_tele(state=3, last_applied_seq=0, pos_raw=5000):
 
 
 def _master_status():
-    payload = struct.pack(P.FMT_MASTER_STATUS, 1, 0b1, 1234, 0, 99, 200, 200, 200, 50)
+    payload = struct.pack(P.FMT_MASTER_STATUS, 1, 0b1, 1234, 0, 99, 200, 200, 200, 50, 0, 0)
     return P.encode_frame(P.MSG_MASTER_STATUS, P.NODE_MASTER, P.NODE_JETSON, payload)
 
 

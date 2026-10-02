@@ -263,89 +263,10 @@ static int8_t CDC_Control_FS(uint8_t cmd, uint8_t* pbuf, uint16_t length)
 static int8_t CDC_Receive_FS(uint8_t* Buf, uint32_t *Len)
 {
   /* USER CODE BEGIN 6 */
-  /* ── framed protocol decoder ──────────────────────────────────────────────
-     Sized to hold MSG_HEADER_SIZE + the largest host payload (cmd_robot_t = 378 B)
-     with slack; a ROBOT_CMD frame is 16 + 378 = 394 B. */
-  static uint8_t  accum[512];
-  static uint16_t accum_len = 0;
-
-  uint32_t rx_len = *Len;
-  if (accum_len + rx_len > sizeof(accum)) {
-      accum_len = 0;   /* overflow → reset, resync */
-  } else {
-      memcpy(accum + accum_len, Buf, rx_len);
-      accum_len += (uint16_t)rx_len;
-  }
-
-  /* Try to consume one or more complete messages from accum[] */
-  while (accum_len >= MSG_HEADER_SIZE) {
-      MsgHeader hdr;
-      memcpy(&hdr, accum, MSG_HEADER_SIZE);
-
-      uint16_t total = (uint16_t)(MSG_HEADER_SIZE + hdr.len);
-      if (accum_len < total) break;   /* wait for rest of payload */
-
-      /* Verify CRC */
-      uint16_t calc = proto_frame_crc(&hdr, accum + MSG_HEADER_SIZE, hdr.len);
-      if (calc != hdr.crc16) {
-          master_link_errors++;
-          accum_len = 0;              /* discard, resync */
-          break;
-      }
-      master_rx_frames++;
-
-      /* Reject frames from a host speaking a different wire version. The low byte
-         of ver_flags carries PROTO_VERSION; a mismatch means the struct layouts
-         (incl. cmd_seq fields) differ, so parsing the payload would be unsafe.
-         Count it, skip dispatch, but still consume the framed bytes below. */
-      if ((uint8_t)(hdr.ver_flags & 0xFFu) != PROTO_VERSION) {
-          master_proto_ver_mismatch++;
-          accum_len -= total;
-          if (accum_len > 0u) memmove(accum, accum + total, accum_len);
-          continue;
-      }
-
-      /* Dispatch */
-      const uint8_t *payload = accum + MSG_HEADER_SIZE;
-      switch ((MsgType)hdr.type) {
-          case MSG_ROBOT_CMD:
-              if (hdr.len >= sizeof(cmd_robot_t)) {
-                  cmd_robot_t cmd;
-                  memcpy(&cmd, payload, sizeof(cmd));
-                  MotorMaster_HandleRobotCmd(&cmd);
-              } else {
-                  master_link_errors++;
-              }
-              break;
-
-          case MSG_PING: {
-              /* Echo PONG. This runs in USB-ISR context → post to the response
-                 queue; main drains it (keeps usb_tx_write single-producer). */
-              uint8_t frame[MSG_HEADER_SIZE];
-              uint16_t n = proto_build(frame, sizeof(frame),
-                                       MSG_PING, hdr.seq,
-                                       NODE_MASTER, (uint8_t)hdr.src,
-                                       HAL_GetTick(), NULL, 0u);
-              if (n > 0u) usb_tx_post_from_isr(frame, n);
-              break;
-          }
-
-          default:
-              master_link_errors++;
-              break;
-      }
-
-      /* Consume processed bytes */
-      accum_len -= total;
-      if (accum_len > 0u) {
-          memmove(accum, accum + total, accum_len);
-      }
-  }
-
-  /* Legacy raw motor-cmd path – left in place, not actively used */
-  if (rx_len <= (NUM_SLV * MAX_MOTORS_PER_SLAVE * USB_BYTES_PER_MOTOR)) {
-      (void)buf_rx_jet2master;   /* suppress unused-variable warning */
-  }
+  /* Keep the USB ISR minimal: copy this packet into the RX ring and re-arm the
+     endpoint. The main loop (MotorMaster_ProcessUsbRx) runs the resynchronizing
+     proto_frame_scan and dispatches frames — no parsing/CRC/dispatch in ISR. */
+  MotorMaster_UsbRxFromISR(Buf, (uint16_t)(*Len));
 
   USBD_CDC_SetRxBuffer(&hUsbDeviceFS, &Buf[0]);
   USBD_CDC_ReceivePacket(&hUsbDeviceFS);

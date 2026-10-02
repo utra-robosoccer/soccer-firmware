@@ -92,7 +92,7 @@ typedef enum {
 
 /* Wire-contract version. Carried in MsgHeader.ver_flags low byte; both ends drop
  * and count any frame whose version != this. High byte reserved (0). */
-#define PROTO_VERSION 3u
+#define PROTO_VERSION 5u
 
 /* cmd_seq sentinel: 0 = "no host command applied yet" (tele_motor_t.last_applied_seq
  * for pre-arm / idle). The host starts cmd_seq at 1 and skips 0 on wrap. */
@@ -202,7 +202,9 @@ typedef struct PROTO_PACKED {
     uint16_t telemetry_hz;      /* configured MSG_ROBOT_TELE rate */
     uint16_t slave_tick_hz;     /* configured slave control-tick rate */
     uint16_t host_cmd_hz;       /* configured expected host cmd rate   */
-} MasterStatus;                 /* 22 bytes */
+    uint32_t rx_resyncs;        /* USB RX resync events (v5)           */
+    uint32_t rx_discarded_bytes;/* bytes dropped during resync (v5)    */
+} MasterStatus;                 /* 30 bytes */
 
 typedef struct PROTO_PACKED {
     uint8_t  slave_id;        /* which slave this status is for              */
@@ -257,12 +259,12 @@ static inline float proto_u16_to_f(uint16_t r, float scale) { return (float)r / 
 #if defined(__STDC_VERSION__) && (__STDC_VERSION__ >= 201112L)
 _Static_assert(sizeof(MsgHeader)   == MSG_HEADER_SIZE,          "MsgHeader must be 16 bytes");
 _Static_assert(sizeof(cmd_motor_t) == 12u,                      "cmd_motor_t must be 12 bytes");
-_Static_assert(sizeof(cmd_chain_t) == 74u,                      "cmd_chain_t must be 74 bytes");
-_Static_assert(sizeof(cmd_robot_t) == 6u + 74u * MAX_CHAINS,    "cmd_robot_t size");
+_Static_assert(sizeof(cmd_chain_t) == 62u,                      "cmd_chain_t must be 62 bytes");
+_Static_assert(sizeof(cmd_robot_t) == 6u + 62u * MAX_CHAINS,    "cmd_robot_t size");
 _Static_assert(sizeof(tele_motor_t) == 21u,                     "tele_motor_t must be 21 bytes");
-_Static_assert(sizeof(tele_chain_t) == 138u,                    "tele_chain_t must be 138 bytes");
-_Static_assert(sizeof(tele_robot_t) == 12u + 138u * MAX_CHAINS, "tele_robot_t size");
-_Static_assert(sizeof(MasterStatus) == 22u,                     "MasterStatus must be 22 bytes");
+_Static_assert(sizeof(tele_chain_t) == 117u,                    "tele_chain_t must be 117 bytes");
+_Static_assert(sizeof(tele_robot_t) == 12u + 117u * MAX_CHAINS, "tele_robot_t size");
+_Static_assert(sizeof(MasterStatus) == 30u,                     "MasterStatus must be 30 bytes");
 _Static_assert(sizeof(SlaveStatus)  == 18u,                     "SlaveStatus must be 18 bytes");
 _Static_assert(LIFE_FAULT  <= 255u,                             "MotorLifecycle fits u8");
 _Static_assert(CAUSE_WOUND <= 255u,                             "MotorFaultCause fits u8");
@@ -341,6 +343,71 @@ static inline uint16_t proto_frame_crc(const void *hdr_raw,
         crc = proto_crc16_update(crc, payload, pay_len);
     }
     return crc;
+}
+
+/* Largest framed payload (tele_robot_t); a header claiming more than this is junk. */
+#define PROTO_MAX_PAYLOAD ((uint16_t)sizeof(tele_robot_t))
+
+/* True for any defined MsgType — a cheap header-plausibility gate for resync. */
+static inline uint8_t proto_msg_type_known(uint8_t t)
+{
+    switch (t) {
+        case MSG_PING: case MSG_MASTER_STATUS: case MSG_SLAVE_STATUS:
+        case MSG_ROBOT_CMD: case MSG_ROBOT_TELE: return 1u;
+        default: return 0u;
+    }
+}
+
+/* ── Resynchronizing frame scanner ───────────────────────────────────────────
+   Finds the next complete, valid frame at buf[0]. Pure (no HAL), so the host
+   tests (test_proto_frame) pin its recovery behavior. Header fields (type,
+   version, length bound) are checked FIRST and the CRC only when the header is
+   plausible, so scanning over garbage is cheap. On any header/CRC failure it
+   reports RESYNC with consumed=1 (drop one byte and retry) — it never clears the
+   whole buffer, so a single stray/lost byte can't desync it permanently. */
+typedef enum {
+    PROTO_SCAN_FRAME = 0,   /* a full valid frame is at buf[0]; see *out        */
+    PROTO_SCAN_NEED_MORE,   /* plausible header, waiting for the rest of the frame */
+    PROTO_SCAN_RESYNC       /* not a frame start; drop out->consumed bytes, retry  */
+} ProtoScanStatus;
+
+typedef struct {
+    uint8_t        type;        /* FRAME: message type                 */
+    uint16_t       pay_len;     /* FRAME: payload length               */
+    const uint8_t *payload;     /* FRAME: -> payload within buf         */
+    uint16_t       consumed;    /* FRAME: whole frame; RESYNC: bytes to drop */
+} ProtoScanResult;
+
+static inline ProtoScanStatus proto_frame_scan(const uint8_t *buf, uint16_t len,
+                                               ProtoScanResult *out)
+{
+    if (len < MSG_HEADER_SIZE) return PROTO_SCAN_NEED_MORE;
+
+    MsgHeader hdr;
+    memcpy(&hdr, buf, MSG_HEADER_SIZE);
+
+    /* Header-first plausibility (cheap) — reject garbage without hashing it. */
+    if (!proto_msg_type_known((uint8_t)hdr.type) ||
+        (uint8_t)(hdr.ver_flags & 0xFFu) != PROTO_VERSION ||
+        hdr.len > PROTO_MAX_PAYLOAD) {
+        out->consumed = 1u;
+        return PROTO_SCAN_RESYNC;
+    }
+
+    uint16_t total = (uint16_t)(MSG_HEADER_SIZE + hdr.len);
+    if (len < total) return PROTO_SCAN_NEED_MORE;    /* header ok; await the body */
+
+    /* Header plausible and complete → now verify the CRC. */
+    if (proto_frame_crc(&hdr, buf + MSG_HEADER_SIZE, hdr.len) != hdr.crc16) {
+        out->consumed = 1u;
+        return PROTO_SCAN_RESYNC;
+    }
+
+    out->type     = (uint8_t)hdr.type;
+    out->pay_len  = hdr.len;
+    out->payload  = buf + MSG_HEADER_SIZE;
+    out->consumed = total;
+    return PROTO_SCAN_FRAME;
 }
 
 /* Build a framed message into out[].  Returns total bytes written, 0 = error. */
