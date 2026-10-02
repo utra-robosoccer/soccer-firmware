@@ -193,7 +193,8 @@ static void stage_telemetry(void)
     chain.chain_id       = 0u;
     chain.n_motors       = N_MOTORS;
     chain.spi_seq_echo   = spi_echo_seq;
-    chain.spi_resyncs    = spi_resyncs;                        /* DMA realigns (wraps) */
+    chain.spi_resyncs      = spi_resyncs;                      /* DMA realigns (wraps) */
+    chain.spi_tx_arm_fails = (uint8_t)spi_tx_arm_fails;        /* TX-arm DMA failures (wraps) */
     chain.slave_time_us  = (uint32_t)(HAL_GetTick() * 1000u);  /* ms→µs (no µs timer) */
     chain.cmd_crc_errors = (uint16_t)cmd_crc_errors;
     chain.can_tx_errors  = (uint16_t)can_tx_error_count;

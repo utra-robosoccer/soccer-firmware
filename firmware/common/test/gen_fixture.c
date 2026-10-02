@@ -57,6 +57,7 @@ int main(void)
     t.chains[0].slave_time_us  = 7777u;
     t.chains[0].cmd_crc_errors = 3u;
     t.chains[0].can_tx_errors  = 1u;
+    t.chains[0].spi_tx_arm_fails = 4u;
     tele_motor_t *tm = &t.chains[0].motors[0];
     tm->pos         = proto_f_to_i16(0.5f,   PROTO_POS_SCALE, NULL);  /* 5000 */
     tm->vel         = proto_f_to_i16(-1.25f, PROTO_VEL_SCALE, NULL);  /* -125 */

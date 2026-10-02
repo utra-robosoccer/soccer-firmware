@@ -1,12 +1,12 @@
 # AUTO-GENERATED — DO NOT EDIT.
-# Sources: 1s_1m/slave0.yaml
-# Regenerate: python3 scripts/gen_motor_config.py --system configs/1s_1m/slave0.yaml
+# Sources: 1s_5m/slave0.yaml
+# Regenerate: python3 scripts/gen_motor_config.py --system configs/1s_5m/slave0.yaml
 """Motor configuration constants for host tools (generated, multi-slave)."""
 
 # Active setup name + sha256 over its slave YAMLs (sorted by filename). The runner
 # recomputes the hash from configs/<CONFIG_NAME>/ and warns if this file is stale.
-CONFIG_NAME = '1s_1m'
-CONFIG_HASH = '78de83a87145b25d5a63c6cb26d6cee6745773900994607486efe4e599890520'
+CONFIG_NAME = '1s_5m'
+CONFIG_HASH = '2e094227e8060d0fc8cc2d98a5bb3da864bfe1b8cb49ff7330daf6ec98879bf2'
 
 N_SLAVES = 1
 
@@ -15,6 +15,10 @@ N_SLAVES = 1
 SLAVES = [
     dict(slave=0, name='slave0', motors=[
         dict(idx=0, can_id=1, model='RS02', joint_name='motor0', soft_min=-0.79, soft_max=0.79, max_vel=10.0, max_tau=0.8, default_kp=15.0, default_kd=1.0),
+        dict(idx=1, can_id=2, model='RS02', joint_name='motor1', soft_min=-1.05, soft_max=1.05, max_vel=10.0, max_tau=0.8, default_kp=15.0, default_kd=1.0),
+        dict(idx=2, can_id=3, model='RS00', joint_name='motor2', soft_min=-1.31, soft_max=1.31, max_vel=10.0, max_tau=0.8, default_kp=15.0, default_kd=1.0),
+        dict(idx=3, can_id=4, model='RS00', joint_name='motor3', soft_min=-1.31, soft_max=1.31, max_vel=10.0, max_tau=0.8, default_kp=15.0, default_kd=1.0),
+        dict(idx=4, can_id=5, model='RS00', joint_name='motor4', soft_min=-1.31, soft_max=1.31, max_vel=10.0, max_tau=0.8, default_kp=15.0, default_kd=1.0),
     ]),
 ]
 

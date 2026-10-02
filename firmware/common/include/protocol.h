@@ -95,7 +95,7 @@ typedef enum {
 
 /* Wire-contract version. Carried in MsgHeader.ver_flags low byte; both ends drop
  * and count any frame whose version != this. High byte reserved (0). */
-#define PROTO_VERSION 7u
+#define PROTO_VERSION 8u
 
 /* cmd_seq sentinel: 0 = "no host command applied yet" (tele_motor_t.last_applied_seq
  * for pre-arm / idle). The host starts cmd_seq at 1 and skips 0 on wrap. */
@@ -181,6 +181,7 @@ typedef struct PROTO_PACKED {
     uint32_t     slave_time_us;   /* slave uptime (µs)                          */
     uint16_t     cmd_crc_errors;  /* SPI command frames rejected on CRC (slave) */
     uint16_t     can_tx_errors;   /* CAN TX errors seen by the slave            */
+    uint8_t      spi_tx_arm_fails;/* slave TX-arm (HAL DMA) failures, then retried (wraps) */
     tele_motor_t motors[MAX_MOTORS_PER_CHAIN];
 } tele_chain_t;                   /* 12 + 21·5 = 117 bytes */
 
@@ -272,8 +273,8 @@ _Static_assert(sizeof(cmd_motor_t) == 12u,                      "cmd_motor_t mus
 _Static_assert(sizeof(cmd_chain_t) == 62u,                      "cmd_chain_t must be 62 bytes");
 _Static_assert(sizeof(cmd_robot_t) == 6u + 62u * MAX_CHAINS,    "cmd_robot_t size");
 _Static_assert(sizeof(tele_motor_t) == 21u,                     "tele_motor_t must be 21 bytes");
-_Static_assert(sizeof(tele_chain_t) == 117u,                    "tele_chain_t must be 117 bytes");
-_Static_assert(sizeof(tele_robot_t) == 20u + 117u * MAX_CHAINS, "tele_robot_t size");
+_Static_assert(sizeof(tele_chain_t) == 118u,                    "tele_chain_t must be 118 bytes");
+_Static_assert(sizeof(tele_robot_t) == 20u + 118u * MAX_CHAINS, "tele_robot_t size");
 _Static_assert(sizeof(MasterStatus) == 30u,                     "MasterStatus must be 30 bytes");
 _Static_assert(sizeof(SlaveStatus)  == 18u,                     "SlaveStatus must be 18 bytes");
 _Static_assert(LIFE_FAULT  <= 255u,                             "MotorLifecycle fits u8");

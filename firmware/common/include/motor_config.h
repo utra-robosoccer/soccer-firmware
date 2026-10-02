@@ -1,6 +1,6 @@
 /* AUTO-GENERATED — DO NOT EDIT.
- * Source: configs/1s_1m/slave0.yaml
- * Regenerate: python3 scripts/gen_motor_config.py --slave configs/1s_1m/slave0.yaml
+ * Source: configs/1s_5m/slave0.yaml
+ * Regenerate: python3 scripts/gen_motor_config.py --slave configs/1s_5m/slave0.yaml
  */
 #ifndef MOTOR_CONFIG_H
 #define MOTOR_CONFIG_H
@@ -11,7 +11,7 @@
 extern "C" {
 #endif
 
-#define N_MOTORS 1u
+#define N_MOTORS 5u
 
 /* SPI transport encoding bounds shared by slave (pack) and master (unpack).
  * Set to the widest model so every motor's value fits losslessly. */
@@ -111,6 +111,50 @@ static const MotorConfig motor_configs[N_MOTORS] = {
         .joint_name = "motor0",
         .soft_min   = -0.79f,
         .soft_max   = 0.79f,
+        .max_vel    = 10.0f,
+        .max_tau    = 0.8f,
+        .default_kp = 15.0f,
+        .default_kd = 1.0f,
+    },
+    {
+        .can_id     = 2u,
+        .model      = MOTOR_MODEL_RS02,
+        .joint_name = "motor1",
+        .soft_min   = -1.05f,
+        .soft_max   = 1.05f,
+        .max_vel    = 10.0f,
+        .max_tau    = 0.8f,
+        .default_kp = 15.0f,
+        .default_kd = 1.0f,
+    },
+    {
+        .can_id     = 3u,
+        .model      = MOTOR_MODEL_RS00,
+        .joint_name = "motor2",
+        .soft_min   = -1.31f,
+        .soft_max   = 1.31f,
+        .max_vel    = 10.0f,
+        .max_tau    = 0.8f,
+        .default_kp = 15.0f,
+        .default_kd = 1.0f,
+    },
+    {
+        .can_id     = 4u,
+        .model      = MOTOR_MODEL_RS00,
+        .joint_name = "motor3",
+        .soft_min   = -1.31f,
+        .soft_max   = 1.31f,
+        .max_vel    = 10.0f,
+        .max_tau    = 0.8f,
+        .default_kp = 15.0f,
+        .default_kd = 1.0f,
+    },
+    {
+        .can_id     = 5u,
+        .model      = MOTOR_MODEL_RS00,
+        .joint_name = "motor4",
+        .soft_min   = -1.31f,
+        .soft_max   = 1.31f,
         .max_vel    = 10.0f,
         .max_tau    = 0.8f,
         .default_kp = 15.0f,

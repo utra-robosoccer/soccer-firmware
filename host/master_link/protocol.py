@@ -87,7 +87,8 @@ KP_SCALE  = 10.0      # Kp    → u16
 KD_SCALE  = 100.0     # Kd    → u16
 
 # ── wire-contract version ─────────────────────────────────────────────────────
-PROTO_VERSION = 7   # v7: dead-man watchdogs — ROBOT_HOST_LOST + CAUSE_MASTER_LOST, slave
+PROTO_VERSION = 8   # v8: tele_chain_t += spi_tx_arm_fails (slave TX-arm DMA failures).
+                    # v7: dead-man watchdogs — ROBOT_HOST_LOST + CAUSE_MASTER_LOST, slave
                     #     watchdog no longer refreshed by NOP keepalives (behavior change).
                     # v6: tele_robot_t cmd_seq_active + cmd_on_time/late/missing/duplicate.
                     # v4: MAX_CHAINS 6→4 (4 slave chains) shrank the robot frames
@@ -108,8 +109,9 @@ SZ_CMD_ROBOT      = 6 + SZ_CMD_CHAIN * MAX_CHAINS                    # 254 (6 + 
 
 FMT_TELE_MOTOR    = "<hhhBBBBBBBIHH"  # pos,vel,tau,temp,state,cause,mode,fault,flags,fb_age,fault_word,last_applied_seq,reserved → 21
 SZ_TELE_MOTOR     = struct.calcsize(FMT_TELE_MOTOR)
-FMT_TELE_CHAIN_HDR = "<BBBBIHH"   # chain_id,n_motors,spi_seq_echo,spi_resyncs,slave_time_us,cmd_crc_errors,can_tx_errors
-SZ_TELE_CHAIN     = 12 + SZ_TELE_MOTOR * MAX_MOTORS_PER_CHAIN        # 117
+FMT_TELE_CHAIN_HDR = "<BBBBIHHB"  # chain_id,n_motors,spi_seq_echo,spi_resyncs,slave_time_us,
+                                  # cmd_crc_errors,can_tx_errors,spi_tx_arm_fails
+SZ_TELE_CHAIN     = struct.calcsize(FMT_TELE_CHAIN_HDR) + SZ_TELE_MOTOR * MAX_MOTORS_PER_CHAIN  # 118
 FMT_TELE_ROBOT_HDR = "<HIHHHHHHBB"  # cycle_id,master_time_us,last_cmd_seq_rx,cmd_seq_active,
                                     # cmd_on_time,cmd_late,cmd_missing,cmd_duplicate,n_chains,robot_state
 SZ_TELE_ROBOT     = struct.calcsize(FMT_TELE_ROBOT_HDR) + SZ_TELE_CHAIN * MAX_CHAINS  # 488 (20 + 117*4)
@@ -119,8 +121,8 @@ assert SZ_CMD_MOTOR == 12, SZ_CMD_MOTOR
 assert SZ_CMD_CHAIN == 62, SZ_CMD_CHAIN
 assert SZ_CMD_ROBOT == 254, SZ_CMD_ROBOT
 assert SZ_TELE_MOTOR == 21, SZ_TELE_MOTOR
-assert SZ_TELE_CHAIN == 117, SZ_TELE_CHAIN
-assert SZ_TELE_ROBOT == 488, SZ_TELE_ROBOT
+assert SZ_TELE_CHAIN == 118, SZ_TELE_CHAIN
+assert SZ_TELE_ROBOT == 492, SZ_TELE_ROBOT
 assert struct.calcsize(FMT_MASTER_STATUS) == 30
 assert struct.calcsize(FMT_SLAVE_STATUS) == 18
 
@@ -316,7 +318,8 @@ def pack_robot_tele(cycle_id: int, master_time_us: int, last_cmd_seq_rx: int,
                                ch.get("spi_resyncs", 0) & 0xFF,
                                ch.get("slave_time_us", 0) & 0xFFFFFFFF,
                                ch.get("cmd_crc_errors", 0) & 0xFFFF,
-                               ch.get("can_tx_errors", 0) & 0xFFFF)
+                               ch.get("can_tx_errors", 0) & 0xFFFF,
+                               ch.get("spi_tx_arm_fails", 0) & 0xFF)
             for mi in range(MAX_MOTORS_PER_CHAIN):
                 if mi < len(motors):
                     out += pack_tele_motor(**motors[mi])
@@ -347,15 +350,16 @@ def parse_robot_tele(p: bytes) -> dict:
         if ci >= n_chains:
             break
         base = base0 + ci * SZ_TELE_CHAIN
-        chain_id, n_motors, spi_seq_echo, spi_resyncs, slave_us, cmd_crc, can_tx = \
-            struct.unpack_from(FMT_TELE_CHAIN_HDR, p, base)
-        mbase = base + 12
+        chain_id, n_motors, spi_seq_echo, spi_resyncs, slave_us, cmd_crc, can_tx, \
+            spi_tx_arm_fails = struct.unpack_from(FMT_TELE_CHAIN_HDR, p, base)
+        mbase = base + struct.calcsize(FMT_TELE_CHAIN_HDR)
         motors = [TeleMotor.unpack(p, mbase + mi * SZ_TELE_MOTOR)
                   for mi in range(min(n_motors, MAX_MOTORS_PER_CHAIN))]
         chains.append(dict(chain_id=chain_id, n_motors=n_motors,
                            spi_seq_echo=spi_seq_echo, spi_resyncs=spi_resyncs,
                            slave_time_us=slave_us,
-                           cmd_crc_errors=cmd_crc, can_tx_errors=can_tx, motors=motors))
+                           cmd_crc_errors=cmd_crc, can_tx_errors=can_tx,
+                           spi_tx_arm_fails=spi_tx_arm_fails, motors=motors))
     return dict(cycle_id=cycle_id, master_time_us=master_us,
                 last_cmd_seq_rx=last_cmd_seq_rx, cmd_seq_active=cmd_seq_active,
                 cmd_on_time=cmd_on_time, cmd_late=cmd_late,

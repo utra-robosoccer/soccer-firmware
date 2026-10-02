@@ -70,7 +70,7 @@ class TeleRoundTrip(unittest.TestCase):
                      flags=P.TELE_FLAG_TO_ZERO_ARRIVED, fb_age_ms=250,
                      fault_word=0xDEADBEEF, last_applied_seq=0x1234)
         chains = [dict(chain_id=0, spi_seq_echo=0x2A, slave_time_us=7777,
-                       cmd_crc_errors=3, can_tx_errors=1, motors=[motor])]
+                       cmd_crc_errors=3, can_tx_errors=1, spi_tx_arm_fails=4, motors=[motor])]
         b = P.pack_robot_tele(9, 123456, 42, 41, P.ROBOT_STATE_NAMES and 1, chains,
                               cmd_on_time=1000, cmd_late=7, cmd_missing=3, cmd_duplicate=2)
         self.assertEqual(len(b), P.SZ_TELE_ROBOT)
@@ -169,7 +169,7 @@ class CrossLanguageFixture(unittest.TestCase):
                      flags=P.TELE_FLAG_TO_ZERO_ARRIVED, fb_age_ms=250,
                      fault_word=0xDEADBEEF, last_applied_seq=0x1234)
         tchains = [dict(chain_id=0, spi_seq_echo=0x2A, slave_time_us=7777,
-                        cmd_crc_errors=3, can_tx_errors=1, motors=[motor])]
+                        cmd_crc_errors=3, can_tx_errors=1, spi_tx_arm_fails=4, motors=[motor])]
         py_tele = P.pack_robot_tele(9, 123456, 42, 41, 1, tchains,
                                     cmd_on_time=1000, cmd_late=7, cmd_missing=3, cmd_duplicate=2)
         self.assertEqual(py_tele, got["ROBOTTELE"], "tele_robot_t layout drift C↔Python")
