@@ -97,7 +97,7 @@ def check_config_fresh() -> tuple[bool, str]:
     file_name = active_file_name()
     if not file_name:
         return False, ("configs/active is empty or missing — set it, e.g. "
-                       "`echo bench-1-chain > configs/active`")
+                       "`echo 1s_5m > configs/active`")
 
     live_hash = config_hash(file_name)
     if live_hash is None:

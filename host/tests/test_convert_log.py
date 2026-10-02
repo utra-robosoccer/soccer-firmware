@@ -53,7 +53,7 @@ class ConvertLog(unittest.TestCase):
         vf[14] = crc & 0xFF
         vf[15] = crc >> 8
 
-        w = BinaryLogWriter(path, {"config_name": "bench-1-motor"}, proto_version=P.PROTO_VERSION)
+        w = BinaryLogWriter(path, {"config_name": "1s_1m"}, proto_version=P.PROTO_VERSION)
         w.write(LOG.RX_FRAME, _tele_frame(state=3))
         w.write(LOG.RX_FRAME, P.encode_frame(P.MSG_MASTER_STATUS, P.NODE_MASTER, P.NODE_JETSON,
                                              struct.pack(P.FMT_MASTER_STATUS, 1, 1, 1234, 0, 99,

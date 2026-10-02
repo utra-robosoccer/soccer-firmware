@@ -13,7 +13,7 @@ class DatalogRoundTrip(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             path = os.path.join(d, "day", "sess.bin")   # nested → exercises makedirs
             meta = {"git_commit": "abc123", "git_dirty": True,
-                    "config_name": "bench-1-chain", "config_hash": "deadbeef",
+                    "config_name": "1s_5m", "config_hash": "deadbeef",
                     "producer": "listen", "config_yaml": {"slave0.yaml": "slave: slave0\n"}}
             w = BinaryLogWriter(path, meta, proto_version=1)
             recs = [
@@ -32,7 +32,7 @@ class DatalogRoundTrip(unittest.TestCase):
             r = BinaryLogReader(path)
             self.assertEqual(r.header["proto_version"], 1)
             self.assertEqual(r.header["log_fmt_version"], fmt.LOG_FMT_VERSION)
-            self.assertEqual(r.header["meta"]["config_name"], "bench-1-chain")
+            self.assertEqual(r.header["meta"]["config_name"], "1s_5m")
             self.assertEqual(r.header["meta"]["config_yaml"]["slave0.yaml"], "slave: slave0\n")
             self.assertGreater(r.header["wall_start_ns"], 0)
 

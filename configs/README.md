@@ -11,10 +11,10 @@ own motor chains. Which one is live is selected in ONE place:
 
 ```
 configs/
-  active            <- one line: the active setup name (e.g. `bench-1-chain`)
-  bench-1-chain/
+  active            <- one line: the active setup name (e.g. `1s_5m`)
+  1s_5m/
     slave0.yaml
-  bench-2-chain/
+  2s_7m/
     slave0.yaml
     slave1.yaml
   robot/

@@ -1,11 +1,11 @@
 # AUTO-GENERATED — DO NOT EDIT.
-# Sources: bench-1-motor/slave0.yaml
-# Regenerate: python3 scripts/gen_motor_config.py --system configs/bench-1-motor/slave0.yaml
+# Sources: 1s_1m/slave0.yaml
+# Regenerate: python3 scripts/gen_motor_config.py --system configs/1s_1m/slave0.yaml
 """Motor configuration constants for host tools (generated, multi-slave)."""
 
 # Active setup name + sha256 over its slave YAMLs (sorted by filename). The runner
 # recomputes the hash from configs/<CONFIG_NAME>/ and warns if this file is stale.
-CONFIG_NAME = 'bench-1-motor'
+CONFIG_NAME = '1s_1m'
 CONFIG_HASH = '78de83a87145b25d5a63c6cb26d6cee6745773900994607486efe4e599890520'
 
 N_SLAVES = 1

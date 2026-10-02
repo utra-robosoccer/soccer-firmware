@@ -36,7 +36,7 @@ models:
     t_min: -17.0   # Nm
     t_max:  17.0
 
-# Single chain: two RS02 followed by one RS00. motor_idx is the array index
+# Single chain: two RS02 followed by three RS00. motor_idx is the array index
 # (0-based); can_id is the RobStride node id on the bus. The host client displays
 # id = motor_idx + 1.
 motors:
@@ -64,6 +64,26 @@ motors:
     can_id: 3
     model: RS00
     joint_name: motor2
+    soft_min: -1.31   # ~75 deg
+    soft_max:  1.31
+    max_vel:   10.0
+    max_tau:   0.8    # Nm — torque trip: exceed and the motor drops to IDLE
+    default_kp: 15.0
+    default_kd:  1.0
+  - idx: 3
+    can_id: 4
+    model: RS00
+    joint_name: motor3
+    soft_min: -1.31   # ~75 deg
+    soft_max:  1.31
+    max_vel:   10.0
+    max_tau:   0.8    # Nm — torque trip: exceed and the motor drops to IDLE
+    default_kp: 15.0
+    default_kd:  1.0
+  - idx: 4
+    can_id: 5
+    model: RS00
+    joint_name: motor4
     soft_min: -1.31   # ~75 deg
     soft_max:  1.31
     max_vel:   10.0

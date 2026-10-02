@@ -5,7 +5,7 @@ to arm/zero occasionally stayed in reset mode, so the slave's streamed setpoints
 nothing (originally surfaced as a misleading `ZERO_TIMEOUT` ~1.5 s later; now caught
 promptly as `CAUSE_NOT_ENABLED` by the continuous enable monitor).
 
-Bench: single unloaded RS02, `bench-1-motor`, slave `slave_general`, master over
+Bench: single unloaded RS02, `1s_1m`, slave `slave_general`, master over
 USB-CDC. Investigation used temporary slave instrumentation (`TEMP DIAG`) streaming a
 per-enable-attempt record to the host `.bin`; that scaffolding has since been removed,
 leaving the permanent enable monitor.

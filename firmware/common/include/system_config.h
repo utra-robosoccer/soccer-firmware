@@ -1,6 +1,6 @@
 /* AUTO-GENERATED — DO NOT EDIT.
- * Sources: bench-1-motor/slave0.yaml
- * Regenerate: python3 scripts/gen_motor_config.py --system configs/bench-1-motor/slave0.yaml
+ * Sources: 1s_1m/slave0.yaml
+ * Regenerate: python3 scripts/gen_motor_config.py --system configs/1s_1m/slave0.yaml
  */
 #ifndef SYSTEM_CONFIG_H
 #define SYSTEM_CONFIG_H

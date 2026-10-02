@@ -18,7 +18,7 @@ This is the overarching system doc. It replaces `protocol.md`, `telemetry-path.m
 `slave.md`, and `command.md` (removed). The manufacturer CAN reference lives in
 `robostride-motor-reference.md`; a specific study lives in `can-investigation.md`.
 
-Active config for this snapshot: **`bench-1-motor`** — one slave (`slave0`), one RS02,
+Active config for this snapshot: **`1s_1m`** — one slave (`slave0`), one RS02,
 `N_MOTORS = 1`, `can_id = 1`.
 
 ---
@@ -185,7 +185,7 @@ boundaries are found by CRC resync.
   each with a never-applied count.
   - **Measured, v3 (2026-10-01):** **median 24.4 ms** (min 20.1, p95 30.2, max 31.1),
     **0 never-applied of 1000** — `logs/2026-10-01/16-36-18_man_1s_1m.bin`, a 20 s in-range
-    MIT sine at 50 Hz on `bench-1-motor`. Path: host `send_robot_cmd` → USB-CDC → master
+    MIT sine at 50 Hz on `1s_1m`. Path: host `send_robot_cmd` → USB-CDC → master
     per-slave chain mailbox → SPI poll → slave `apply_cmd` → Type-1 MIT → RS02 **(applied)**;
     echo returns Type-2 → slave pairs `last_applied_seq` → SPI → master → USB-CDC → host.
     Comparable to the v2 ~19 ms (slightly higher: larger frames + the DAMPED/TO_ZERO-capable
