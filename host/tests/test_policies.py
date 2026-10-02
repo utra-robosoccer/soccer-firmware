@@ -19,16 +19,23 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.abspath(os.path.join(HERE, "..", ".."))
 sys.path.insert(0, os.path.join(ROOT, "host", "apps"))   # run_policy is a script, not a pkg
 
-from policies.base import Policy, Action, MODE_MIT, MODE_IDLE, MotorCommand  # noqa: E402
+from policies.base import (  # noqa: E402
+    Policy, Action, MODE_MIT, MODE_IDLE, MODE_HOLD, MotorCommand)
 from policies.man_1s_1m_policy import Man1s1mPolicy, SINE_OMEGA, SINE_FREQ_HZ  # noqa: E402
 from master_link import motor_config_gen as mc            # noqa: E402
 
 POLL_HZ = mc.MASTER_POLL_HZ   # 200
 
 
+class _Snap:
+    def __init__(self, pos):
+        self.pos = pos
+
+
 class _FakeState:
-    def __init__(self, robot=None):
+    def __init__(self, robot=None, motors=None):
         self.robot = robot or {}
+        self.motors = motors or {}
 
     def armed_motors(self):
         return []
@@ -224,6 +231,39 @@ class ManMitUsesInjectedTime(unittest.TestCase):
         act = ListenPolicy().step(_FakeState(), 123)
         self.assertTrue(act.motors)
         self.assertTrue(all(c.mode == MODE_IDLE for c in act.motors))
+
+
+class BenchSineBehavior(unittest.TestCase):
+    def test_arms_then_centers_sine_on_held_pos(self):
+        from policies.bench_sine import BenchSinePolicy
+        from master_link.motor_config_gen import MOTORS
+        k = (MOTORS[0]["slave"], MOTORS[0]["idx"])
+        p = BenchSinePolicy(amp=0.1, freq=0.4, motors="all", arm_s=1.5)
+        st = _FakeState(motors={k: _Snap(0.25)})       # held at 0.25 rad
+        p.setup(st, 0)
+
+        a = p.step(st, int(0.1e9))                     # early arm → HOLD + fault_reset
+        self.assertEqual(a.motors[0].mode, MODE_HOLD)
+        self.assertTrue(a.motors[0].fault_reset)
+        a = p.step(st, int(1.0e9))                     # late arm → HOLD, no fault_reset
+        self.assertEqual(a.motors[0].mode, MODE_HOLD)
+        self.assertFalse(a.motors[0].fault_reset)
+
+        a = p.step(st, int(1.5e9))                     # MIT start: sin(0)=0 → pos == center
+        self.assertEqual(a.motors[0].mode, MODE_MIT)
+        self.assertAlmostEqual(a.motors[0].pos, 0.25, places=5)
+
+    def test_clamps_to_soft_limits(self):
+        from policies.bench_sine import BenchSinePolicy
+        from master_link.motor_config_gen import MOTORS, MOTOR_SOFT_MAX
+        k = (MOTORS[0]["slave"], MOTORS[0]["idx"])
+        hi = MOTOR_SOFT_MAX[0]
+        p = BenchSinePolicy(amp=1.0, freq=0.4, motors="all", arm_s=0.0)  # big amp, held at hi
+        st = _FakeState(motors={k: _Snap(hi)})
+        p.setup(st, 0)
+        quarter = 0.25 / 0.4                            # sin peak = +1
+        a = p.step(st, int(quarter * 1e9))
+        self.assertLessEqual(a.motors[0].pos, hi + 1e-9)   # clamped, not hi + amp
 
 
 if __name__ == "__main__":

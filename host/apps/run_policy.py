@@ -19,10 +19,12 @@ from master_link import motor_config_gen as mc
 from master_link.link import MasterLink, MotorCommand, MODE_IDLE
 from policies.listen_policy import ListenPolicy
 from policies.man_1s_1m_policy import Man1s1mPolicy
+from policies.bench_sine import BenchSinePolicy
 
 POLICIES = {
     "listen": ListenPolicy,
     "man_1s_1m": Man1s1mPolicy,
+    "bench_sine": BenchSinePolicy,
 }
 
 
@@ -40,6 +42,10 @@ def main(argv=None):
     ap.add_argument("--port", default=None, help="serial port (default: auto-detect master)")
     ap.add_argument("--rate", type=float, default=50.0, help="control loop rate Hz (default 50)")
     ap.add_argument("--log-dir", default="logs", help="log directory (default: logs/)")
+    # Let policies register their own CLI args (e.g. bench_sine's --amp/--freq/--motors/--dur).
+    for cls in dict.fromkeys(POLICIES.values()):
+        if hasattr(cls, "add_args"):
+            cls.add_args(ap)
     args = ap.parse_args(argv)
 
     # Config staleness: warn loudly, but don't refuse to run.
@@ -49,7 +55,8 @@ def main(argv=None):
     else:
         print(msg)
 
-    policy = POLICIES[args.policy]()
+    pcls = POLICIES[args.policy]
+    policy = pcls.from_args(args) if hasattr(pcls, "from_args") else pcls()
 
     try:
         link = MasterLink(args.port, policy_name=policy.name, log_dir=args.log_dir)
