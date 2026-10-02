@@ -7,6 +7,9 @@
 #include "stm32f4xx_hal_def.h"
 #include <string.h> // Required for memcpy
 #include "motor_types.h"  // motor_t, motor_status_t, motor_error_t, rs_runmode_t
+/* Strict-aliasing-safe RobStride ext-id codec (path relative to Core/Inc/, as in
+   proto_common.h). Replaces the old (exCanIdInfo*)&ExtId pointer cast. */
+#include "../../../../common/include/robostride_id.h"
 
 // --- Constants (DO NOT CHANGE) ---
 #define P_MIN   -12.57f
@@ -23,17 +26,13 @@
 #define CAN_MASTER_ID 0xFD
 #define ROBOSTRIDE_READ_ONLY_MOTOR_ID 2u
 
-// --- Structs ---
-typedef struct {
-    uint32_t id   : 8;  // Bits 0-7: Target Motor ID (Tx) or Master ID (Rx Type 2)
-    uint32_t data : 16; // Bits 8-23: Data Payload / Master ID / Status
-    uint32_t mode : 5;  // Bits 24-28: Communication Type
-    uint32_t res  : 3;  // Bits 29-31: Unused (CAN Ext ID is 29 bits)
-} exCanIdInfo;
+// The 29-bit ext-id layout (id[0:7] / data[8:23] / mode[24:28]) is now encoded and
+// decoded by rs_extid_pack/mode/data/id (robostride_id.h) with explicit shifts —
+// no bitfield-struct pointer cast (that was undefined at -O2 under strict aliasing).
 
 // rs_runmode_t and motor_status_t are defined in motor_types.h
 
-// --- Feedback Decoding Masks (Based on exCanIdInfo.data field) ---
+// --- Feedback Decoding Masks (applied to the 16-bit data field, rs_extid_data()) ---
 // CAN Bits 8-15:  Motor ID -> .data bits 0-7
 // CAN Bits 16-21: Faults   -> .data bits 8-13
 // CAN Bits 22-23: Mode     -> .data bits 14-15

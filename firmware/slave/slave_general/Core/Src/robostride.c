@@ -1,4 +1,4 @@
-#include "robostride.h"
+#include "robostride.h"     /* also pulls in robostride_id.h (rs_extid_pack/mode/data/id) */
 #include "proto_common.h"   /* motor_can_range_by_id() — per-model V/T ranges */
 
 
@@ -17,9 +17,6 @@ volatile uint32_t can_tx_ok_count = 0;
 volatile uint32_t can_tx_error_count = 0;
 volatile uint32_t can_last_tx_error = 0;
 
-// Expand the .extid to self defined struct. defined in .h file
-#define txCanIdEx (*((exCanIdInfo*)&(rs_can_tx_header.ExtId)))
-#define rxCanIdEx (*((exCanIdInfo*)&(rs_can_rx_header.ExtId)))
 
 // --- Helper Functions ---
 static uint16_t float_to_uint(float x, float x_min, float x_max, unsigned int bits)
@@ -136,10 +133,7 @@ HAL_StatusTypeDef can_bus_init_read_state_filter(uint8_t motor_id, uint16_t mast
 // ============================================================================
 HAL_StatusTypeDef can_get_motor_id(uint8_t id, uint16_t master_id)
 {
-    txCanIdEx.mode = 0; // Type 0
-    txCanIdEx.id = id;  // Target Motor ID
-    txCanIdEx.data = master_id; // Bits 8-23: Master ID
-    txCanIdEx.res = 0;
+    rs_can_tx_header.ExtId = rs_extid_pack(0, master_id, id);   // Type 0
 
     uint8_t msg[8] = {0}; // Data is empty (0)
     rs_can_tx_header.DLC = 8;
@@ -150,9 +144,9 @@ HAL_StatusTypeDef can_get_motor_id(uint8_t id, uint16_t master_id)
 HAL_StatusTypeDef can_unpack_get_id(motor_t* motor, uint8_t* recv_buf)
 {
     // Rx Header Check: Mode should be 0.
-    if (rxCanIdEx.mode != 0) return HAL_ERROR;
+    if (rs_extid_mode(rs_can_rx_header.ExtId) != 0) return HAL_ERROR;
 
-    uint8_t reported_id = (uint8_t)(rxCanIdEx.data & 0xFF);
+    uint8_t reported_id = (uint8_t)(rs_extid_data(rs_can_rx_header.ExtId) & 0xFF);
 
     if (reported_id != motor->id) {
        motor -> id = reported_id;
@@ -184,10 +178,8 @@ HAL_StatusTypeDef can_mit_control_set(uint8_t id, float torque, float MechPositi
     float t_min = r ? r->t_min : T_MIN;
     float t_max = r ? r->t_max : T_MAX;
 
-    txCanIdEx.mode = 1; // Type 1
-    txCanIdEx.id = id;  // Target ID
-    txCanIdEx.data = float_to_uint(torque, t_min, t_max, 16);
-    txCanIdEx.res = 0;
+    rs_can_tx_header.ExtId = rs_extid_pack(1,                             // Type 1
+                                float_to_uint(torque, t_min, t_max, 16), id);
 
     rs_can_tx_header.DLC = 8;
 
@@ -214,10 +206,10 @@ HAL_StatusTypeDef can_read_motor_state(uint8_t id)
 HAL_StatusTypeDef can_unpack_motor_feedback(motor_t* motor, uint8_t* recv_buf)
 {
     // 1. Verify Header Mode is 2
-    if (rxCanIdEx.mode != 2) return HAL_ERROR;
+    if (rs_extid_mode(rs_can_rx_header.ExtId) != 2) return HAL_ERROR;
 
     // 2. Parse the .data field (CAN bits 8-23)
-    uint16_t data_field = rxCanIdEx.data;
+    uint16_t data_field = rs_extid_data(rs_can_rx_header.ExtId);
 
     // Bit 8-15 of CAN ID corresponds to bits 0-7 of data_field -> Motor ID
     uint8_t feedback_id = data_field & RS_FB_DATA_ID_MASK;
@@ -272,10 +264,7 @@ HAL_StatusTypeDef can_unpack_motor_feedback(motor_t* motor, uint8_t* recv_buf)
 HAL_StatusTypeDef can_enable_motor(uint8_t id, uint16_t master_id)
 {
     uint8_t msg[8] = {0};
-    txCanIdEx.mode = 3;
-    txCanIdEx.id = id;
-    txCanIdEx.res = 0;
-    txCanIdEx.data = master_id;
+    rs_can_tx_header.ExtId = rs_extid_pack(3, master_id, id);
 
     rs_can_tx_header.DLC = 8;
     return can_tx(msg);
@@ -286,10 +275,7 @@ HAL_StatusTypeDef can_enable_motor(uint8_t id, uint16_t master_id)
 // ============================================================================
 HAL_StatusTypeDef can_disable_motor(uint8_t id, uint16_t master_id)
 {
-    txCanIdEx.mode = 4;
-    txCanIdEx.id = id;
-    txCanIdEx.data = master_id;
-    txCanIdEx.res = 0;
+    rs_can_tx_header.ExtId = rs_extid_pack(4, master_id, id);
 
     uint8_t msg[8] = {0x0};
     rs_can_tx_header.DLC = 8;
@@ -304,10 +290,7 @@ HAL_StatusTypeDef can_disable_motor(uint8_t id, uint16_t master_id)
 // ============================================================================
 HAL_StatusTypeDef can_clear_fault(uint8_t id, uint16_t master_id)
 {
-    txCanIdEx.mode = 4;
-    txCanIdEx.id = id;
-    txCanIdEx.data = master_id;
-    txCanIdEx.res = 0;
+    rs_can_tx_header.ExtId = rs_extid_pack(4, master_id, id);
 
     uint8_t msg[8] = {0x0};
     msg[0] = 0x1;   // Byte0 = 1: clear latched fault
@@ -321,10 +304,7 @@ HAL_StatusTypeDef can_clear_fault(uint8_t id, uint16_t master_id)
 // ============================================================================
 HAL_StatusTypeDef can_set_mech_zero(uint8_t id, uint16_t master_id)
 {
-    txCanIdEx.mode = 0x6;
-    txCanIdEx.data = master_id;
-    txCanIdEx.id = id;
-    txCanIdEx.res = 0;
+    rs_can_tx_header.ExtId = rs_extid_pack(0x6, master_id, id);
 
     uint8_t msg[8] = {0};
     msg[0] = 0x1;
@@ -338,10 +318,8 @@ HAL_StatusTypeDef can_set_mech_zero(uint8_t id, uint16_t master_id)
 // ============================================================================
 HAL_StatusTypeDef can_set_motor_can_id(uint8_t id, uint16_t master_id, uint8_t new_motor_id)
 {
-    txCanIdEx.mode = 0x7;
-    txCanIdEx.id = id; // Target current ID
-    txCanIdEx.res = 0;
-    txCanIdEx.data = (new_motor_id << 8) | (master_id & 0xFF);
+    rs_can_tx_header.ExtId = rs_extid_pack(0x7,
+                                (uint16_t)((new_motor_id << 8) | (master_id & 0xFF)), id);
 
     uint8_t msg[8] = {0};
     rs_can_tx_header.DLC = 8;
@@ -353,10 +331,7 @@ HAL_StatusTypeDef can_set_motor_can_id(uint8_t id, uint16_t master_id, uint8_t n
 // ============================================================================
 HAL_StatusTypeDef can_read_single_param(uint8_t id, uint16_t master_id, uint16_t index)
 {
-    txCanIdEx.mode = 0x11; // 17
-    txCanIdEx.id = id;
-    txCanIdEx.data = master_id;
-    txCanIdEx.res = 0;
+    rs_can_tx_header.ExtId = rs_extid_pack(0x11, master_id, id);   // 17
 
     uint8_t msg[8] = {0};
     msg[0] = index & 0xFF;
@@ -368,7 +343,7 @@ HAL_StatusTypeDef can_read_single_param(uint8_t id, uint16_t master_id, uint16_t
 
 HAL_StatusTypeDef can_unpack_single_param(uint8_t* recv_buf, float* result_val)
 {
-    if (rxCanIdEx.mode != 0x11) return HAL_ERROR;
+    if (rs_extid_mode(rs_can_rx_header.ExtId) != 0x11) return HAL_ERROR;
 
     uint32_t raw_val = 0;
     raw_val |= recv_buf[4];
@@ -386,10 +361,7 @@ HAL_StatusTypeDef can_unpack_single_param(uint8_t* recv_buf, float* result_val)
 HAL_StatusTypeDef can_change_motor_mode(uint8_t id, uint16_t master_id, rs_runmode_t rs_runmode)
 {
     uint16_t reg_idx = 0x7005; // Index for run mode
-    txCanIdEx.mode = 0x12; // Type 18
-    txCanIdEx.id = id;
-    txCanIdEx.data = master_id;
-    txCanIdEx.res = 0;
+    rs_can_tx_header.ExtId = rs_extid_pack(0x12, master_id, id);   // Type 18
 
     uint8_t msg[8] = {0x0};
 

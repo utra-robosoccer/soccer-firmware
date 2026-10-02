@@ -92,12 +92,8 @@ void HAL_CAN_RxFifo0MsgPendingCallback(CAN_HandleTypeDef *hcan)
                         ((uint32_t)rx_data[6] << 16) |
                         ((uint32_t)rx_data[7] << 24);
 
-    exCanIdInfo *rx_id_info = (exCanIdInfo *)&rs_can_rx_header.ExtId;
-
-    uint8_t comm_type = rx_id_info->mode; // Bits 24-28
-    uint8_t sender_id = 0;
-
-    sender_id = (uint8_t)(rx_id_info->data & 0xFF);
+    uint8_t comm_type = rs_extid_mode(rs_can_rx_header.ExtId); // Bits 24-28
+    uint8_t sender_id = (uint8_t)(rs_extid_data(rs_can_rx_header.ExtId) & 0xFF);
     can_last_type = comm_type;
     can_last_sender_id = sender_id;
 
