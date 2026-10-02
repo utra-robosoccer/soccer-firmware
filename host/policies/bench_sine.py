@@ -58,11 +58,8 @@ class BenchSinePolicy(Policy):
             g = gidx.get(k)
             self._lim[k] = (MOTOR_SOFT_MIN[g], MOTOR_SOFT_MAX[g]) if g is not None else (None, None)
         self._t0 = None
-        # Distinct amplitude per motor so the telemetry proves each motor tracks its
-        # own target: motor i of N gets amp*(i+1)/N (so the last motor uses the full
-        # --amp, the rest scale down). Each is still soft-limit-checked in setup().
-        n = max(1, len(self._motors))
-        self._amp_of = {k: self._amp * (i + 1) / n for i, k in enumerate(self._motors)}
+        # Every motor uses the same --amp.
+        self._amp_of = {k: self._amp for k in self._motors}
         self._traj = {k: SineStart(self._amp_of[k], self._omega, self._move_speed)
                       for k in self._motors}
         self._mit_begun = False
