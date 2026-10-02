@@ -36,6 +36,9 @@ uint32_t master_rx_overflows = 0;  /* RX ring overruns (producer outran consumer
 #ifdef SPI_INJECT_TEST
 volatile uint8_t g_spi_inject = 0; /* test-only: clock one short SPI exchange to desync the slave */
 #endif
+#ifdef USB_TX_TEST
+static volatile uint8_t g_txtest = 0; /* test-only: armed by a 0xB00B cycle_id sentinel */
+#endif
 
 /* ── USB RX ring: CDC ISR produces, main loop consumes (SPSC, lock-free) ───── */
 #define USB_RX_RING_SIZE 1024u                       /* power of two               */
@@ -258,6 +261,9 @@ void MotorMaster_HandleRobotCmd(const cmd_robot_t *cmd)
 #ifdef SPI_INJECT_TEST
     if (cmd->cycle_id == 0xDEADu) g_spi_inject = 1u;   /* sentinel: arm the SPI desync injector */
 #endif
+#ifdef USB_TX_TEST
+    if (cmd->cycle_id == 0xB00Bu) g_txtest = 1u;       /* sentinel: arm the USB-TX frame test */
+#endif
     host_cmd_seq = cmd->cmd_seq;
     uint8_t n = (cmd->n_chains > MAX_CHAINS) ? MAX_CHAINS : cmd->n_chains;
     for (uint8_t c = 0; c < n; c++) {
@@ -433,6 +439,26 @@ static void poll_one_slave(uint8_t s)
     }
 }
 
+#ifdef USB_TX_TEST
+/* Emit self-describing frames of the packet-boundary lengths {63,64,65,128,129,496}
+   through the TX slot ring (the path under test): [A5 A5][len u16][idx u8][pattern…].
+   64 and 128 exercise the ZLP; 496 is the max telemetry frame. The host verifies all
+   six arrive intact and in order. */
+static void usb_tx_emit_test_frames(void)
+{
+    static const uint16_t lens[6] = { 63u, 64u, 65u, 128u, 129u, 496u };
+    static uint8_t f[512];
+    for (uint8_t k = 0; k < 6u; k++) {
+        uint16_t L = lens[k];
+        f[0] = 0xA5u; f[1] = 0xA5u;
+        f[2] = (uint8_t)(L & 0xFFu); f[3] = (uint8_t)(L >> 8);
+        f[4] = k;
+        for (uint16_t i = 5u; i < L; i++) f[i] = (uint8_t)((k * 31u + i) & 0xFFu);
+        usb_tx_write(f, L);
+    }
+}
+#endif
+
 void MotorMaster_ProcessLoop(void)
 {
     static uint16_t cycles_since_status = 0;
@@ -451,6 +477,13 @@ void MotorMaster_ProcessLoop(void)
         for (uint8_t s = 0; s < NUM_SLAVES; s++) {
             poll_one_slave(s);
         }
+#ifdef USB_TX_TEST
+        if (g_txtest) {                          /* emit only the test frames this cycle */
+            g_txtest = 0u;
+            usb_tx_emit_test_frames();
+        } else
+#endif
+        {
         emit_robot_tele(t0);                     /* stamp master_time_us = cycle start */
 
         /* 20 Hz status — cycle divider off the 200 Hz cycle (its own schedule). */
@@ -459,7 +492,7 @@ void MotorMaster_ProcessLoop(void)
             uint32_t now_ms = HAL_GetTick();
             emit_master_status(now_ms);
             for (uint8_t s = 0; s < NUM_SLAVES; s++) emit_slave_status(s, now_ms);
-
+        }
         }
     }
 }
