@@ -41,7 +41,11 @@ void spi_write_next_tx_buf(const uint8_t* src_frame, uint8_t* dst);
    cycle. Returns 1 if it re-armed (resync done), 0 if it skipped (NSS stuck low). */
 uint8_t slave_spi_resync(SPI_HandleTypeDef *hspi);
 
-
+/* Arm the DMA for the NEXT exchange (swap in a freshly-staged telemetry frame if ready).
+   Idempotent per exchange: the first caller this cycle arms, the rest no-op. Called from
+   the main loop once every live motor has replied, and from the TX-arm deadline timer ISR
+   as the guaranteed fallback — so the fresh reply rides the next exchange (no lag). */
+void spi_arm_tx(void);
 
 
 #endif /* INC_SLAVE_SPI_H_ */

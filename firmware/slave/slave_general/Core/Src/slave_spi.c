@@ -48,6 +48,7 @@
 #include "string.h"
 #include "cachel1_armv7.h"
 #include "../../../../common/include/spi_resync.h"  /* spi_resync_poll — NSS gating */
+#include "tx_arm_timer.h"                            /* TX-arm deadline (one-shot TIM3) */
 
 /* NSS (PA4) read + bound for the resync gate. One exchange is ≤ ~1 ms even at the
    slowest prescaler, so NSS returns high well within this; the bound only guards a
@@ -77,6 +78,13 @@ volatile uint8_t data_tx_ready_flag = 0;
 
 volatile uint8_t spi_error_flag = 0;
 
+/* Late-arm (removes the one-exchange telemetry lag): TxRxCplt no longer arms the next
+   exchange — it starts the TX-arm deadline timer. spi_arm_tx() (main loop on all-replied,
+   or the timer ISR at the deadline) does the arm; armed_this_cycle makes it once-per-cycle.
+   g_hspi is captured at init so spi_arm_tx can arm outside the TxRxCplt callback. */
+static SPI_HandleTypeDef *g_hspi = 0;
+static volatile uint8_t   armed_this_cycle = 0;
+
 //Callback functions redefinitions
 void HAL_SPI_TxRxCpltCallback(SPI_HandleTypeDef *hspi)
 {
@@ -92,21 +100,39 @@ void HAL_SPI_TxRxCpltCallback(SPI_HandleTypeDef *hspi)
 
 	data_receive_flag = 1;
 
-	//Handling TX ping-pong (only when main has staged a fresh telemetry frame)
-	if (data_tx_ready_flag){
-		//***The Tx ready flag is set in the CAN receive intr service routine***
-		data_tx_ready_flag = 0;
-		if(spi_tx_active == spi_tx_pingpong[0]){
+	/* LATE ARM: do NOT arm the next exchange here — the motor's reply to the command just
+	   received isn't in yet (it lands ~0.3–2 ms later). Start the deadline timer; spi_arm_tx()
+	   arms the next exchange once every live motor has replied (main loop) or at the deadline
+	   (timer ISR), so the fresh reply rides the very next exchange (no one-exchange lag). */
+	armed_this_cycle = 0u;
+	tx_arm_timer_start();
+}
+
+/* Arm the DMA for the next exchange with the freshest staged telemetry. Once per cycle:
+   the first caller (all-replied main loop, or the deadline timer ISR) arms; later callers
+   no-op. The TX ping-pong swap happens here (not in TxRxCplt) so A+1 carries this cycle's
+   reply. A whole frame is staged before data_tx_ready_flag is set, so the swapped buffer is
+   never torn. */
+void spi_arm_tx(void)
+{
+	uint32_t pm = __get_PRIMASK();
+	__disable_irq();
+	if (armed_this_cycle) { if (!pm) __enable_irq(); return; }
+	armed_this_cycle = 1u;
+	if (!pm) __enable_irq();
+
+	tx_arm_timer_cancel();                 /* if the main loop beat the deadline */
+	if (data_tx_ready_flag) {
+		data_tx_ready_flag = 0u;
+		if (spi_tx_active == spi_tx_pingpong[0]) {
 			spi_tx_active  = spi_tx_pingpong[1];
 			tele_stage_buf = spi_tx_pingpong[0];
-		}
-		else {
+		} else {
 			spi_tx_active  = spi_tx_pingpong[0];
 			tele_stage_buf = spi_tx_pingpong[1];
 		}
 	}
-
-	HAL_SPI_TransmitReceive_DMA(hspi, spi_tx_active, spi_rx_active, PAYLOAD_LENGTH); //rearm DMA
+	HAL_SPI_TransmitReceive_DMA(g_hspi, spi_tx_active, spi_rx_active, PAYLOAD_LENGTH);
 }
 
 void HAL_SPI_ErrorCallback(SPI_HandleTypeDef *hspi)
@@ -114,6 +140,8 @@ void HAL_SPI_ErrorCallback(SPI_HandleTypeDef *hspi)
 	//if we detected error, we restart dma, since the isr handler has already cleared all flags for us
 	spi_error_flag = 1;
 	HAL_SPI_Abort_IT(hspi);
+	tx_arm_timer_cancel();
+	armed_this_cycle = 1u;
 	HAL_SPI_TransmitReceive_DMA(hspi, spi_tx_active, spi_rx_active, PAYLOAD_LENGTH);
 
 }
@@ -121,11 +149,13 @@ void HAL_SPI_ErrorCallback(SPI_HandleTypeDef *hspi)
 void spi_dma_init(SPI_HandleTypeDef *hspi)
 {
 	//Critical ping-pong init: DMA on half [0], main owns half [1] each direction
+	  g_hspi = hspi;                              // captured for spi_arm_tx (late arm)
 	  spi_tx_active  = spi_tx_pingpong[0];
 	  tele_stage_buf = spi_tx_pingpong[1];
 
 	  spi_rx_active  = spi_rx_pingpong[0];
 	  cmd_inbox_buf  = spi_rx_pingpong[1];
+	  armed_this_cycle = 1u;                      // the initial arm below counts as this cycle's
 	  if (HAL_SPI_TransmitReceive_DMA(hspi, spi_tx_active, spi_rx_active, PAYLOAD_LENGTH) != HAL_OK){
 	  //Set up DMA here, ready to receive
 		  Error_Handler();
@@ -171,6 +201,8 @@ uint8_t slave_spi_resync(SPI_HandleTypeDef *hspi)
 	spi_rx_active  = spi_rx_pingpong[0];
 	cmd_inbox_buf  = spi_rx_pingpong[1];
 	data_receive_flag = 0;                                // drop the misaligned frame
+	tx_arm_timer_cancel();                                // this re-arm replaces the deferred one
+	armed_this_cycle = 1u;
 	HAL_SPI_TransmitReceive_DMA(hspi, spi_tx_active, spi_rx_active, PAYLOAD_LENGTH);
 	spi_resyncs++;                                        // wraps naturally (uint8_t)
 	return 1u;

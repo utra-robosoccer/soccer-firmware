@@ -31,6 +31,7 @@
 #include "motor_chain.h"
 #include "slave_spi.h"
 #include "motor_runtime.h"
+#include "tx_arm_timer.h"   /* TX-arm deadline (one-shot TIM3) — removes the telemetry lag */
 #include "../../../../common/include/slave_service.h"  /* slave_service_due — forward/fallback */
 #include "spi_proto.h"     /* SPI frame codec: build telemetry, parse commands */
 
@@ -253,6 +254,7 @@ int main(void)
     Error_Handler();
   }
 
+  tx_arm_timer_init(TX_ARM_DEADLINE_US);  /* ready BEFORE the first TxRxCplt starts it */
   spi_dma_init(&hspi1);
   motor_runtime_init();   /* discover motors via CAN, populate alive mask */
 
@@ -384,6 +386,10 @@ int main(void)
     if (need_stage) {
       stage_telemetry();
     }
+    /* TX-arm is deadline-driven (one-shot TIM3 → spi_arm_tx at TX_ARM_DEADLINE_US, after the
+       reply window and before the next exchange). An earlier all-replied arm was tried but
+       its reply-jitter-coupled timing skipped last_applied values (superseded); the fixed
+       deadline is deterministic and one cycle sooner than the old TxRxCplt arm. */
 
     if (status_led_off_ms != 0U && (int32_t)(now - status_led_off_ms) >= 0) {
       HAL_GPIO_WritePin(STATUS_LED_GPIO_Port, STATUS_LED_Pin, GPIO_PIN_RESET);

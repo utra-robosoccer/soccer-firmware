@@ -110,6 +110,10 @@ def timing_block(rates, timeouts):
     host_lost_ms     = max(25, round(3.0 * 1000.0 / rates["host_cmd_hz"]))
     host_lost_cyc    = max(1, round(host_lost_ms * rates["master_poll_hz"] / 1000.0))
     host_damp_cyc    = max(1, round(timeouts["master_lost_damp_ms"] * rates["master_poll_hz"] / 1000.0))
+    # Slave TX-arm deadline: how long after an exchange the slave waits for the motor replies
+    # before arming the DMA for the next exchange (so the fresh reply rides it). 0.6 cycle —
+    # after the ≤2 ms reply window, comfortably before the next NSS.
+    tx_arm_deadline_us = max(1, round(0.6 * 1000000.0 / rates["master_poll_hz"]))
     return f"""\
 /* Configured rates (Hz) — reported in MasterStatus and the .bin header. */
 #define MASTER_POLL_HZ  {rates['master_poll_hz']}u
@@ -144,7 +148,11 @@ def timing_block(rates, timeouts):
 #define HOST_LOST_CYCLES         {host_lost_cyc}u   /* host-death trigger (master cycles) */
 #define HOST_LOST_DAMP_CYCLES    {host_damp_cyc}u   /* master DAMPED dwell before IDLE (cycles) */
 #define MASTER_LOST_GRACE_MS     {timeouts['master_lost_grace_ms']}u   /* slave hold (v/tau=0) after exchanges stop */
-#define MASTER_LOST_DAMP_MS      {timeouts['master_lost_damp_ms']}u   /* slave DAMPED dwell before IDLE */"""
+#define MASTER_LOST_DAMP_MS      {timeouts['master_lost_damp_ms']}u   /* slave DAMPED dwell before IDLE */
+
+/* Slave SPI TX-arm deadline (µs after an exchange): wait for motor replies, then arm the
+   next exchange's DMA so the fresh reply rides it (removes the one-exchange telemetry lag). */
+#define TX_ARM_DEADLINE_US       {tx_arm_deadline_us}u"""
 
 
 def _f(x):

@@ -68,6 +68,10 @@ extern "C" {
 #define MASTER_LOST_GRACE_MS     50u   /* slave hold (v/tau=0) after exchanges stop */
 #define MASTER_LOST_DAMP_MS      300u   /* slave DAMPED dwell before IDLE */
 
+/* Slave SPI TX-arm deadline (µs after an exchange): wait for motor replies, then arm the
+   next exchange's DMA so the fresh reply rides it (removes the one-exchange telemetry lag). */
+#define TX_ARM_DEADLINE_US       3000u
+
 /* Motor models present on the bus */
 typedef enum {
     MOTOR_MODEL_RS00 = 0u,
