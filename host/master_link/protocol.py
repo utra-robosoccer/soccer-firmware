@@ -104,7 +104,7 @@ SZ_CMD_ROBOT      = 6 + SZ_CMD_CHAIN * MAX_CHAINS                    # 254 (6 + 
 
 FMT_TELE_MOTOR    = "<hhhBBBBBBBIHH"  # pos,vel,tau,temp,state,cause,mode,fault,flags,fb_age,fault_word,last_applied_seq,reserved → 21
 SZ_TELE_MOTOR     = struct.calcsize(FMT_TELE_MOTOR)
-FMT_TELE_CHAIN_HDR = "<BBBBIHH"   # chain_id,n_motors,spi_seq_echo,reserved,slave_time_us,cmd_crc_errors,can_tx_errors
+FMT_TELE_CHAIN_HDR = "<BBBBIHH"   # chain_id,n_motors,spi_seq_echo,spi_resyncs,slave_time_us,cmd_crc_errors,can_tx_errors
 SZ_TELE_CHAIN     = 12 + SZ_TELE_MOTOR * MAX_MOTORS_PER_CHAIN        # 117
 FMT_TELE_ROBOT_HDR = "<HIHHBB"    # cycle_id,master_time_us,last_cmd_seq_rx,missed_deadlines,n_chains,robot_state
 SZ_TELE_ROBOT     = 12 + SZ_TELE_CHAIN * MAX_CHAINS                  # 480 (12 + 117*4)
@@ -301,7 +301,8 @@ def pack_robot_tele(cycle_id: int, master_time_us: int, last_cmd_seq_rx: int,
             ch = chains[ci]
             motors = ch["motors"]
             out += struct.pack(FMT_TELE_CHAIN_HDR, ch["chain_id"] & 0xFF,
-                               len(motors) & 0xFF, ch.get("spi_seq_echo", 0) & 0xFF, 0,
+                               len(motors) & 0xFF, ch.get("spi_seq_echo", 0) & 0xFF,
+                               ch.get("spi_resyncs", 0) & 0xFF,
                                ch.get("slave_time_us", 0) & 0xFFFFFFFF,
                                ch.get("cmd_crc_errors", 0) & 0xFFFF,
                                ch.get("can_tx_errors", 0) & 0xFFFF)
@@ -334,13 +335,14 @@ def parse_robot_tele(p: bytes) -> dict:
         if ci >= n_chains:
             break
         base = base0 + ci * SZ_TELE_CHAIN
-        chain_id, n_motors, spi_seq_echo, _res, slave_us, cmd_crc, can_tx = \
+        chain_id, n_motors, spi_seq_echo, spi_resyncs, slave_us, cmd_crc, can_tx = \
             struct.unpack_from(FMT_TELE_CHAIN_HDR, p, base)
         mbase = base + 12
         motors = [TeleMotor.unpack(p, mbase + mi * SZ_TELE_MOTOR)
                   for mi in range(min(n_motors, MAX_MOTORS_PER_CHAIN))]
         chains.append(dict(chain_id=chain_id, n_motors=n_motors,
-                           spi_seq_echo=spi_seq_echo, slave_time_us=slave_us,
+                           spi_seq_echo=spi_seq_echo, spi_resyncs=spi_resyncs,
+                           slave_time_us=slave_us,
                            cmd_crc_errors=cmd_crc, can_tx_errors=can_tx, motors=motors))
     return dict(cycle_id=cycle_id, master_time_us=master_us,
                 last_cmd_seq_rx=last_cmd_seq_rx, missed_deadlines=missed,

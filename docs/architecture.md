@@ -254,7 +254,28 @@ One **full-duplex** transfer per poll (200 Hz): the master clocks out a command 
 the slave clocks out its telemetry frame simultaneously. **One chain per slave**, so the SPI
 payload is a single fixed-size `cmd_chain_t` / `tele_chain_t` (no per-N arithmetic). Transfer
 length = the larger of the two = `SPI_XFER_SIZE` = 119 B. Master SPI: `SPI_MODE_MASTER`,
-CPOL=0/CPHA=0, MSB-first, prescaler 64.
+CPOL=0/CPHA=0, MSB-first.
+
+**SPI clock — configurable.** The master prescaler is a generated value,
+`MASTER_SPI_PRESCALER_DIV` (`system_config.h`, from `gen_motor_config.py`), mapped to the
+HAL enum in `MX_SPI1_Init`. APB2 is 72 MHz, so div `{64,32,16,8}` → `{1.125, 2.25, 4.5, 9}`
+MHz. A 2-min streaming sweep found **all of 64/32/16/8 CRC-clean on the bench** (short wiring),
+both directions, 0 overruns; the HAL blocking transfer keeps up at every setting (its fixed
+~0.1–0.2 ms poll overhead just grows as a fraction of the shrinking bit-time). **Default: div
+16 (4.5 MHz)** — two steps of margin below the fastest tested, and the slave SPI resync (below)
+recovers isolated glitches. **Re-validate on the robot harness** (longer/noisier wiring) by
+watching the CRC counters (`slave_status.crc_errors`/`cmd_crc_errors`) and `spi_resyncs`, and
+drop the prescaler if they climb.
+
+**Slave DMA resync.** The slave receives in SPI-slave mode via a fixed-length DMA; a single
+bad exchange (a CS/clock glitch, over-speed bit error, or master reset mid-transfer) would
+otherwise offset the byte counter and wedge **every** later exchange permanently (persistent
+CRC failures both directions until the slave resets). On a command CRC failure the slave calls
+`slave_spi_resync` (`slave_spi.c`): gated on **NSS (PA4) high** (between exchanges, via the
+pure `spi_resync_poll`) it disables SPI, aborts both DMA streams, flushes the RX FIFO, and
+re-arms so the next exchange re-aligns — recovering in ~1–2 exchanges instead of wedging. The
+count rides in `tele_chain_t.spi_resyncs` (u8, **wraps**; the host takes deltas). A build-flag
+injector (`-DSPI_INJECT_TEST`) clocks one deliberately short exchange for the recovery test.
 
 ### Command frame (master → slave), CRC-protected — 70 B
 ```
@@ -275,8 +296,9 @@ CPOL=0/CPHA=0, MSB-first, prescaler 64.
 ```
 [ tele_chain_t (117) ][ crc16 u16 ]
 ```
-- `tele_chain_t` carries `spi_seq_echo` (gap detect), `cmd_crc_errors`, `can_tx_errors`,
-  `slave_time_us`, and `tele_motor_t[5]` (valid = `n_motors`). Motor "alive" is inferred by
+- `tele_chain_t` carries `spi_seq_echo` (gap detect), `spi_resyncs` (DMA realigns, wrapping),
+  `cmd_crc_errors`, `can_tx_errors`, `slave_time_us`, and `tele_motor_t[5]` (valid =
+  `n_motors`). Motor "alive" is inferred by
   the master from each motor's `state` (past BOOT/DISCOVERING).
 - `crc16` over the `tele_chain_t`. Built: `spi_proto_build_tele` (`spi_proto.c`).
   Parsed/verified: master `spi_exchange`.

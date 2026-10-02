@@ -281,6 +281,7 @@ int main(void)
       chain.chain_id       = 0u;
       chain.n_motors       = N_MOTORS;
       chain.spi_seq_echo   = spi_echo_seq;
+      chain.spi_resyncs    = spi_resyncs;                        /* DMA realigns (wraps) */
       chain.slave_time_us  = (uint32_t)(HAL_GetTick() * 1000u);  /* ms→µs (no µs timer) */
       chain.cmd_crc_errors = (uint16_t)cmd_crc_errors;
       chain.can_tx_errors  = (uint16_t)can_tx_error_count;
@@ -318,6 +319,10 @@ int main(void)
       cmd_chain_t chain;
       if (!spi_proto_parse_cmd(cmd_local, &hdr, &chain)) {
         cmd_crc_errors++;
+        /* A CRC failure can mean the SPI-slave DMA has desynced (one bad exchange
+           offsets every later one). Re-align it so the next exchange recovers —
+           a single bad exchange must never wedge the slave. */
+        slave_spi_resync(&hspi1);
       } else {
         spi_echo_seq = hdr.spi_seq;   /* echo the SPI link-health seq */
         /* A valid frame (NOP or ROBOT_CMD) proves the master link is alive —

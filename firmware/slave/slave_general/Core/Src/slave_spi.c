@@ -47,6 +47,15 @@
 #include "slave_spi.h"
 #include "string.h"
 #include "cachel1_armv7.h"
+#include "../../../../common/include/spi_resync.h"  /* spi_resync_poll — NSS gating */
+
+/* NSS (PA4) read + bound for the resync gate. One exchange is ≤ ~1 ms even at the
+   slowest prescaler, so NSS returns high well within this; the bound only guards a
+   genuinely stuck-low line (dead master) so the control loop never blocks. */
+#define SPI_NSS_HIGH()        ((GPIOA->IDR & GPIO_PIN_4) != 0u)
+#define SPI_RESYNC_TIMEOUT_MS 5u
+
+volatile uint8_t spi_resyncs = 0;   /* wraps; host takes deltas */
 
 // SPI DMA ping-pong buffers. One half is clocked by the DMA while the other is
 // owned by the main loop; the TxRxCplt ISR swaps roles at the end of each
@@ -132,6 +141,39 @@ void spi_write_next_tx_buf(const uint8_t* src_frame, uint8_t* dst)
 		dst[i] = src_frame[i];
 	}
 	data_tx_ready_flag = 1; //signal -> ok to send this frame next transfer
+}
+
+// Re-align the DMA after a bad exchange: abort + re-arm so the NEXT exchange starts
+// at byte 0. Gated on NSS high (between exchanges) so we never re-arm mid-exchange.
+uint8_t slave_spi_resync(SPI_HandleTypeDef *hspi)
+{
+	uint32_t t0 = HAL_GetTick();
+	for (;;) {
+		SpiResyncAction a = spi_resync_poll((uint8_t)SPI_NSS_HIGH(),
+		                                    HAL_GetTick() - t0, SPI_RESYNC_TIMEOUT_MS);
+		if (a == SPI_RESYNC_WAIT)    continue;            // mid-exchange: wait for NSS high
+		if (a == SPI_RESYNC_TIMEOUT) return 0u;           // stuck low: skip, retry next cycle
+		break;                                            // PROCEED: NSS high, safe to re-arm
+	}
+	/* Slave-safe reset: don't use HAL_SPI_Abort (its BSY wait needs a clock and can
+	   hang in slave mode). Disable SPI, abort both DMA streams, flush the RX FIFO and
+	   clear OVR so no stale byte offsets the next transfer, then re-arm. The re-armed
+	   DMA's byte 0 lands on the next NSS select, re-aligning the stream. */
+	__HAL_SPI_DISABLE(hspi);
+	if (hspi->hdmarx) HAL_DMA_Abort(hspi->hdmarx);
+	if (hspi->hdmatx) HAL_DMA_Abort(hspi->hdmatx);
+	while (__HAL_SPI_GET_FLAG(hspi, SPI_FLAG_RXNE)) { (void)hspi->Instance->DR; }
+	__HAL_SPI_CLEAR_OVRFLAG(hspi);
+	hspi->State = HAL_SPI_STATE_READY;                    // let the HAL accept a fresh transfer
+	// Re-init the ping-pong to the known starting split (as spi_dma_init).
+	spi_tx_active  = spi_tx_pingpong[0];
+	tele_stage_buf = spi_tx_pingpong[1];
+	spi_rx_active  = spi_rx_pingpong[0];
+	cmd_inbox_buf  = spi_rx_pingpong[1];
+	data_receive_flag = 0;                                // drop the misaligned frame
+	HAL_SPI_TransmitReceive_DMA(hspi, spi_tx_active, spi_rx_active, PAYLOAD_LENGTH);
+	spi_resyncs++;                                        // wraps naturally (uint8_t)
+	return 1u;
 }
 
 

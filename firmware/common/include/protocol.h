@@ -174,7 +174,7 @@ typedef struct PROTO_PACKED {
     uint8_t      chain_id;
     uint8_t      n_motors;
     uint8_t      spi_seq_echo;    /* SPI link-health seq echoed (NOT cmd_seq)   */
-    uint8_t      reserved;
+    uint8_t      spi_resyncs;     /* slave SPI DMA resync count (wraps; host deltas) */
     uint32_t     slave_time_us;   /* slave uptime (µs)                          */
     uint16_t     cmd_crc_errors;  /* SPI command frames rejected on CRC (slave) */
     uint16_t     can_tx_errors;   /* CAN TX errors seen by the slave            */

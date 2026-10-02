@@ -33,6 +33,9 @@ uint32_t master_proto_ver_mismatch = 0;
 uint32_t master_rx_resyncs  = 0;   /* USB RX resync events (contiguous discard runs) */
 uint32_t master_rx_discarded = 0;  /* bytes dropped while resyncing                  */
 uint32_t master_rx_overflows = 0;  /* RX ring overruns (producer outran consumer)    */
+#ifdef SPI_INJECT_TEST
+volatile uint8_t g_spi_inject = 0; /* test-only: clock one short SPI exchange to desync the slave */
+#endif
 
 /* ── USB RX ring: CDC ISR produces, main loop consumes (SPSC, lock-free) ───── */
 #define USB_RX_RING_SIZE 1024u                       /* power of two               */
@@ -252,6 +255,9 @@ static void emit_robot_tele(uint32_t master_time_us)
 void MotorMaster_HandleRobotCmd(const cmd_robot_t *cmd)
 {
     if (cmd == NULL) return;
+#ifdef SPI_INJECT_TEST
+    if (cmd->cycle_id == 0xDEADu) g_spi_inject = 1u;   /* sentinel: arm the SPI desync injector */
+#endif
     host_cmd_seq = cmd->cmd_seq;
     uint8_t n = (cmd->n_chains > MAX_CHAINS) ? MAX_CHAINS : cmd->n_chains;
     for (uint8_t c = 0; c < n; c++) {
@@ -351,6 +357,20 @@ void MotorMaster_FormatTxBuffer(void) {}
 /* Forward one slave's current command chain, then ingest its telemetry. */
 static void poll_one_slave(uint8_t s)
 {
+#ifdef SPI_INJECT_TEST
+    if (g_spi_inject && s == 0u) {
+        g_spi_inject = 0u;
+        /* Clock ONE deliberately short exchange (PAYLOAD-1 bytes) so the slave's
+           fixed-length DMA is left mid-frame → desync. slave_spi_resync must
+           recover on the next poll (spi_resyncs +1, CRC back to clean). */
+        static uint8_t itx[SPI_XFER_SIZE], irx[SPI_XFER_SIZE];
+        memset(itx, 0, sizeof(itx));
+        CS_SELECT((SpiDevId)s);
+        HAL_SPI_TransmitReceive(master_hspi, itx, irx, SPI_XFER_SIZE - 1u, HAL_MAX_DELAY);
+        CS_ALL_HIGH();
+        return;   /* skip the normal exchange this cycle */
+    }
+#endif
     /* Snapshot the host command for this slave under a brief mask (the USB ISR
        writes host_chain/host_cmd_seq). A ROBOT_CMD chain if one has arrived, else
        a NOP keepalive (still refreshes the slave watchdog and clocks telemetry). */
@@ -439,6 +459,7 @@ void MotorMaster_ProcessLoop(void)
             uint32_t now_ms = HAL_GetTick();
             emit_master_status(now_ms);
             for (uint8_t s = 0; s < NUM_SLAVES; s++) emit_slave_status(s, now_ms);
+
         }
     }
 }

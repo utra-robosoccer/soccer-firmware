@@ -29,9 +29,17 @@ extern uint8_t* volatile  tele_stage_buf; // inactive TX frame — main writes (
 extern volatile uint8_t data_receive_flag;
 extern volatile uint8_t data_tx_ready_flag;
 extern volatile uint8_t spi_error_flag;
+extern volatile uint8_t spi_resyncs;      // DMA realigns (wraps; host takes deltas)
 
 void spi_dma_init(SPI_HandleTypeDef *hspi);
 void spi_write_next_tx_buf(const uint8_t* src_frame, uint8_t* dst);
+
+/* Re-align the SPI-slave DMA after a bad exchange (called from the main loop on a
+   command CRC failure). Aborts + re-arms the fixed-length DMA so the NEXT exchange
+   starts at byte 0 — but ONLY while NSS (PA4) is high (between exchanges); if NSS
+   is low it waits (bounded) for the exchange to end, else skips and retries next
+   cycle. Returns 1 if it re-armed (resync done), 0 if it skipped (NSS stuck low). */
+uint8_t slave_spi_resync(SPI_HandleTypeDef *hspi);
 
 
 
