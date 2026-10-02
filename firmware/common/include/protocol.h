@@ -28,9 +28,10 @@ typedef enum {
 
 /* ── robot lifecycle ─────────────────────────────────────────────────────── */
 typedef enum {
-    ROBOT_INIT     = 0u,
-    ROBOT_READY    = 1u,
-    ROBOT_DEGRADED = 2u,
+    ROBOT_INIT      = 0u,
+    ROBOT_READY     = 1u,
+    ROBOT_DEGRADED  = 2u,
+    ROBOT_HOST_LOST = 3u,  /* master's host-death watchdog tripped (driving DAMPED→IDLE) */
 } RobotState;
 
 /* ── per-motor lifecycle state (tele_motor_t.state, full u8) ─────────────────
@@ -68,6 +69,8 @@ typedef enum {
     CAUSE_NOT_ENABLED = 6u,  /* armed motor reported not-running for K frames     */
     CAUSE_WOUND       = 7u,  /* HOLD refused: shaft wound beyond the safe single-
                                 turn range (|offset| too large) — re-zero offline */
+    CAUSE_MASTER_LOST = 8u,  /* SPI command exchanges stopped (master reset/dead) →
+                                slave ramped HOLD-grace → DAMPED → IDLE              */
 } MotorFaultCause;
 
 /* ── cmd_motor_t.flags ───────────────────────────────────────────────────── */
@@ -92,7 +95,7 @@ typedef enum {
 
 /* Wire-contract version. Carried in MsgHeader.ver_flags low byte; both ends drop
  * and count any frame whose version != this. High byte reserved (0). */
-#define PROTO_VERSION 6u
+#define PROTO_VERSION 7u
 
 /* cmd_seq sentinel: 0 = "no host command applied yet" (tele_motor_t.last_applied_seq
  * for pre-arm / idle). The host starts cmd_seq at 1 and skips 0 on wrap. */

@@ -78,6 +78,9 @@ TIMING_MS_DEFAULTS = {
     "zero_stall_ms":      1500,   # no TO_ZERO progress → CAUSE_ZERO_TIMEOUT
     "zero_settle_ms":       50,   # in-tolerance dwell before TO_ZERO arrival
     "enable_mon_ms":        15,   # not-NORMAL dwell while armed → CAUSE_NOT_ENABLED
+    # Dead-man watchdogs (task 6).
+    "master_lost_grace_ms":  50,  # slave: hold position (v/tau=0) this long after exchanges stop
+    "master_lost_damp_ms":  300,  # DAMPED dwell before IDLE (slave master-loss AND master host-death)
 }
 
 
@@ -103,6 +106,10 @@ def timing_block(rates, timeouts):
     tick_ms = max(1, round(1000.0 / rates["slave_tick_hz"]))
     settle_ticks = max(1, round(timeouts["zero_settle_ms"] / tick_ms))
     mon_k        = max(1, round(timeouts["enable_mon_ms"] / tick_ms))
+    # Host-death (master side): 3 host-command periods, floored at 25 ms, in master cycles.
+    host_lost_ms     = max(25, round(3.0 * 1000.0 / rates["host_cmd_hz"]))
+    host_lost_cyc    = max(1, round(host_lost_ms * rates["master_poll_hz"] / 1000.0))
+    host_damp_cyc    = max(1, round(timeouts["master_lost_damp_ms"] * rates["master_poll_hz"] / 1000.0))
     return f"""\
 /* Configured rates (Hz) — reported in MasterStatus and the .bin header. */
 #define MASTER_POLL_HZ  {rates['master_poll_hz']}u
@@ -129,7 +136,15 @@ def timing_block(rates, timeouts):
 #define MOTOR_CAN_FB_TIMEOUT_MS  {timeouts['can_fb_timeout_ms']}u
 #define MOTOR_ZERO_STALL_MS      {timeouts['zero_stall_ms']}u
 #define MOTOR_ZERO_SETTLE_TICKS  {settle_ticks}u   /* {timeouts['zero_settle_ms']} ms / {tick_ms} ms tick */
-#define MOTOR_ENABLE_MON_K       {mon_k}u   /* {timeouts['enable_mon_ms']} ms / {tick_ms} ms tick */"""
+#define MOTOR_ENABLE_MON_K       {mon_k}u   /* {timeouts['enable_mon_ms']} ms / {tick_ms} ms tick */
+
+/* Dead-man watchdogs (task 6). Master host-death is counted in master cycles; the slave
+   master-loss ramp is in ms (HAL_GetTick). */
+#define HOST_CMD_TIMEOUT_MS      {host_lost_ms}u   /* 3 host periods, 25 ms floor */
+#define HOST_LOST_CYCLES         {host_lost_cyc}u   /* host-death trigger (master cycles) */
+#define HOST_LOST_DAMP_CYCLES    {host_damp_cyc}u   /* master DAMPED dwell before IDLE (cycles) */
+#define MASTER_LOST_GRACE_MS     {timeouts['master_lost_grace_ms']}u   /* slave hold (v/tau=0) after exchanges stop */
+#define MASTER_LOST_DAMP_MS      {timeouts['master_lost_damp_ms']}u   /* slave DAMPED dwell before IDLE */"""
 
 
 def _f(x):

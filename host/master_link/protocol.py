@@ -56,13 +56,15 @@ MOTOR_MODE_NAMES = {0: "RESET", 1: "CAL", 2: "NORMAL"}
 
 # ── fault cause (tele_motor_t.cause, latched) ─────────────────────────────────
 (CAUSE_NONE, CAUSE_OVERTORQUE, CAUSE_CAN_TIMEOUT, CAUSE_WATCHDOG,
- CAUSE_MOTOR_FAULT, CAUSE_ZERO_TIMEOUT, CAUSE_NOT_ENABLED, CAUSE_WOUND) = range(8)
+ CAUSE_MOTOR_FAULT, CAUSE_ZERO_TIMEOUT, CAUSE_NOT_ENABLED, CAUSE_WOUND,
+ CAUSE_MASTER_LOST) = range(9)
 CAUSE_NAMES = {
     0: "NONE", 1: "OVERTORQUE", 2: "CAN_TIMEOUT", 3: "WATCHDOG", 4: "MOTOR_FAULT",
-    5: "ZERO_TIMEOUT", 6: "NOT_ENABLED", 7: "WOUND",
+    5: "ZERO_TIMEOUT", 6: "NOT_ENABLED", 7: "WOUND", 8: "MASTER_LOST",
 }
 
-ROBOT_STATE_NAMES = {0: "INIT", 1: "READY", 2: "DEGRADED"}
+(ROBOT_INIT, ROBOT_READY, ROBOT_DEGRADED, ROBOT_HOST_LOST) = range(4)
+ROBOT_STATE_NAMES = {0: "INIT", 1: "READY", 2: "DEGRADED", 3: "HOST_LOST"}
 
 # ── cmd_motor_t.flags ─────────────────────────────────────────────────────────
 CMD_FLAG_VALID            = 1 << 0
@@ -85,8 +87,9 @@ KP_SCALE  = 10.0      # Kp    → u16
 KD_SCALE  = 100.0     # Kd    → u16
 
 # ── wire-contract version ─────────────────────────────────────────────────────
-PROTO_VERSION = 6   # v6: tele_robot_t replaces missed_deadlines with cmd_seq_active +
-                    #     cmd_on_time/late/missing/duplicate (host-loop vs master-cycle)
+PROTO_VERSION = 7   # v7: dead-man watchdogs — ROBOT_HOST_LOST + CAUSE_MASTER_LOST, slave
+                    #     watchdog no longer refreshed by NOP keepalives (behavior change).
+                    # v6: tele_robot_t cmd_seq_active + cmd_on_time/late/missing/duplicate.
                     # v4: MAX_CHAINS 6→4 (4 slave chains) shrank the robot frames
 
 # ── wire layouts (little-endian, packed) ──────────────────────────────────────

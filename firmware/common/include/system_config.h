@@ -51,6 +51,14 @@ extern "C" {
 #define MOTOR_ZERO_SETTLE_TICKS  10u   /* 50 ms / 5 ms tick */
 #define MOTOR_ENABLE_MON_K       3u   /* 15 ms / 5 ms tick */
 
+/* Dead-man watchdogs (task 6). Master host-death is counted in master cycles; the slave
+   master-loss ramp is in ms (HAL_GetTick). */
+#define HOST_CMD_TIMEOUT_MS      60u   /* 3 host periods, 25 ms floor */
+#define HOST_LOST_CYCLES         12u   /* host-death trigger (master cycles) */
+#define HOST_LOST_DAMP_CYCLES    60u   /* master DAMPED dwell before IDLE (cycles) */
+#define MASTER_LOST_GRACE_MS     50u   /* slave hold (v/tau=0) after exchanges stop */
+#define MASTER_LOST_DAMP_MS      300u   /* slave DAMPED dwell before IDLE */
+
 /* Number of active motors on each slave (chain order). */
 static const uint8_t slave_motor_counts[NUM_SLAVES] = { 1u };
 
