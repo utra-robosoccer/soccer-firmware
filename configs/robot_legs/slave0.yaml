@@ -1,0 +1,129 @@
+# Motor chain configuration for SLAVE-0 — LEFT LEG (robot_legs).
+#
+# Each leg is one slave MCU on its own CAN bus; both legs share the same joint
+# order and enumerate can_id from 1. Joint order (hip pitch → hip roll → hip yaw
+# → knee → ankle):
+#   can 1  RS03  hip_pitch   max_tau 30  (rated 20, peak 60)
+#   can 2  RS06  hip_roll    max_tau 18  (rated 11, peak 36)
+#   can 3  RS02  hip_yaw     max_tau 10  (rated  6, peak 17)
+#   can 4  RS03  knee        max_tau 30  (rated 20, peak 60)
+#   can 5  RS00  ankle       max_tau  8  (rated  5, peak 14)
+# max_tau is the torque-trip (exceed → IDLE); set ≈1.5× rated — gait-transient
+# headroom, well below peak to still catch a collision/fault. HALVE these for
+# cautious unloaded bench bring-up. soft limits are generic ±0.79 placeholders —
+# tune per joint.
+#
+# Generated from this file:
+#     python3 scripts/gen_motor_config.py --slave  slave0
+#     python3 scripts/gen_motor_config.py --system          # all slaves of active setup
+# Edit here, regenerate, rebuild. Do not hand-edit the generated files.
+#
+# Kp/Kd CAN-encode ranges are PER-MODEL in the `models:` block below (RS00/02 use
+# 0–500 / 0–5, RS03/06 use 0–5000 / 0–100) and flow through MotorCanRange into the
+# slave's can_mit_control_set — no longer a hardcoded global.
+
+slave: slave0
+
+# Shared ranges: only position (p_min/p_max) is used (shared across all models).
+# Kp/Kd are per-model in `models:`; the kp/kd here are unused (kept for schema).
+shared_ranges:
+  p_min: -12.57   # rad  (-4*pi)
+  p_max:  12.57   # rad  (+4*pi)
+  kp_min:  0.0
+  kp_max:  500.0
+  kd_min:  0.0
+  kd_max:  5.0
+
+# Per-model CAN velocity/torque ranges (Type-1 operation-control tables), from
+# docs/robostride-motor-reference.md.
+models:
+  RS00:
+    v_min: -33.0   # rad/s
+    v_max:  33.0
+    t_min: -14.0   # N·m
+    t_max:  14.0
+    kp_min:  0.0
+    kp_max:  500.0
+    kd_min:  0.0
+    kd_max:  5.0
+  RS02:
+    v_min: -44.0
+    v_max:  44.0
+    t_min: -17.0
+    t_max:  17.0
+    kp_min:  0.0
+    kp_max:  500.0
+    kd_min:  0.0
+    kd_max:  5.0
+  RS03:
+    v_min: -20.0
+    v_max:  20.0
+    t_min: -60.0
+    t_max:  60.0
+    kp_min:  0.0
+    kp_max:  5000.0
+    kd_min:  0.0
+    kd_max:  100.0
+  RS06:
+    v_min: -50.0
+    v_max:  50.0
+    t_min: -36.0
+    t_max:  36.0
+    kp_min:  0.0
+    kp_max:  5000.0
+    kd_min:  0.0
+    kd_max:  100.0
+
+# Left leg. motor_idx is the array index (LOCAL to this slave); can_id is the node
+# id on this leg's bus. Tune soft limits per joint.
+motors:
+  - idx: 0
+    can_id: 1
+    model: RS03
+    joint_name: L_hip_pitch
+    soft_min: -0.79
+    soft_max:  0.79
+    max_vel:   10.0
+    max_tau:   30.0
+    default_kp: 15.0
+    default_kd:  1.0
+  - idx: 1
+    can_id: 2
+    model: RS06
+    joint_name: L_hip_roll
+    soft_min: -0.79
+    soft_max:  0.79
+    max_vel:   10.0
+    max_tau:   18.0
+    default_kp: 15.0
+    default_kd:  1.0
+  - idx: 2
+    can_id: 3
+    model: RS02
+    joint_name: L_hip_yaw
+    soft_min: -0.79
+    soft_max:  0.79
+    max_vel:   10.0
+    max_tau:   10.0
+    default_kp: 15.0
+    default_kd:  1.0
+  - idx: 3
+    can_id: 4
+    model: RS03
+    joint_name: L_knee
+    soft_min: -0.79
+    soft_max:  0.79
+    max_vel:   10.0
+    max_tau:   30.0
+    default_kp: 15.0
+    default_kd:  1.0
+  - idx: 4
+    can_id: 5
+    model: RS00
+    joint_name: L_ankle
+    soft_min: -0.79
+    soft_max:  0.79
+    max_vel:   10.0
+    max_tau:   8.0
+    default_kp: 15.0
+    default_kd:  1.0
