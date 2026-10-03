@@ -1,6 +1,6 @@
 /* AUTO-GENERATED — DO NOT EDIT.
- * Source: configs/2s_10m/slave0.yaml
- * Regenerate: python3 scripts/gen_motor_config.py --slave configs/2s_10m/slave0.yaml
+ * Source: configs/1s_5m/slave0.yaml
+ * Regenerate: python3 scripts/gen_motor_config.py --slave configs/1s_5m/slave0.yaml
  */
 #ifndef MOTOR_CONFIG_H
 #define MOTOR_CONFIG_H
