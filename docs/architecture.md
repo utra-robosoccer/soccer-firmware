@@ -643,6 +643,21 @@ is compile-time on all three sides — there is **no in-band N check**.
 - Dependencies: §4 measurements (done).
 - Status / notes:
 
+**Per-model Kp/Kd CAN-encode ranges**
+- Problem: the slave encodes Type-1 **Kp/Kd over hardcoded global ranges** (`robostride.h`
+  `KP_MAX 500`, `KD_MAX 5`); only velocity/torque are per-model (`MotorCanRange`). RS03/04/06 use
+  Kp 0–5000 / Kd 0–100, so in a mixed-model config (e.g. `robot_legs`) their gains are mis-scaled
+  ~10×/20× — unsafe to drive.
+- Idea: add `kp_min/max`, `kd_min/max` to `MotorCanRange`; emit them per-model in
+  `gen_motor_config.py` from the yaml `models:` block; `can_mit_control_set` uses `r->kp_*/kd_*`
+  instead of the `robostride.h` globals.
+- Trade-offs: a `MotorCanRange` size change + regen; the yaml `models:` block must carry kp/kd.
+- Dependencies: none (the host/wire fixed-point scales already cover 0–5000 / 0–100).
+- Status / notes: **DONE (this branch)** — `MotorCanRange` gained `kp_min/max`, `kd_min/max`,
+  emitted per-model from the yaml `models:` block (`gen_motor_config.py`, with a class default:
+  RS03/04/06 → 0–5000 / 0–100, else 0–500 / 0–5); `can_mit_control_set` uses `r->kp_*/kd_*`
+  (the `robostride.h` globals are now only the not-in-config fallback).
+
 **Interrupt-driven CAN TX queue**
 - Problem: `can_tx` busy-waits ~280 µs CPU/cycle.
 - Idea: queue frames, feed mailboxes from the CAN TX-empty interrupt.

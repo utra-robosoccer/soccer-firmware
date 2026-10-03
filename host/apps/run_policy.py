@@ -20,11 +20,13 @@ from master_link.link import MasterLink, MotorCommand, MODE_IDLE
 from policies.listen_policy import ListenPolicy
 from policies.man_1s_1m_policy import Man1s1mPolicy
 from policies.bench_sine import BenchSinePolicy
+from policies.legs_sine import LegsSinePolicy
 
 POLICIES = {
     "listen": ListenPolicy,
     "man_1s_1m": Man1s1mPolicy,
     "bench_sine": BenchSinePolicy,
+    "legs_sine": LegsSinePolicy,
 }
 
 
@@ -36,16 +38,24 @@ def _pct(sorted_vals, p):
 
 
 def main(argv=None):
+    # Pre-parse --policy so we register only the SELECTED policy's args — different sine
+    # policies reuse flag names (bench_sine and legs_sine both use --amp/--freq/…), which
+    # would collide if every policy registered its args on one parser.
+    pre = argparse.ArgumentParser(add_help=False)
+    pre.add_argument("--policy", default="listen",
+                     choices=sorted(POLICIES) + ["__invalid__"])
+    pre_args, _ = pre.parse_known_args(argv)
+    pcls_pre = POLICIES.get(pre_args.policy)
+
     ap = argparse.ArgumentParser(description="Headless policy runner")
     ap.add_argument("--policy", default="listen", choices=sorted(POLICIES),
                     help="policy to run (default: listen)")
     ap.add_argument("--port", default=None, help="serial port (default: auto-detect master)")
     ap.add_argument("--rate", type=float, default=50.0, help="control loop rate Hz (default 50)")
     ap.add_argument("--log-dir", default="logs", help="log directory (default: logs/)")
-    # Let policies register their own CLI args (e.g. bench_sine's --amp/--freq/--motors/--dur).
-    for cls in dict.fromkeys(POLICIES.values()):
-        if hasattr(cls, "add_args"):
-            cls.add_args(ap)
+    # Only the selected policy registers its own CLI args (e.g. --amp/--freq/--motors/--dur).
+    if pcls_pre is not None and hasattr(pcls_pre, "add_args"):
+        pcls_pre.add_args(ap)
     args = ap.parse_args(argv)
 
     # Config staleness: warn loudly, but don't refuse to run.
