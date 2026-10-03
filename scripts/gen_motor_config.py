@@ -181,6 +181,20 @@ def validate(cfg):
         raise ValueError(f"duplicate can_id in motors: {can_ids}")
 
 
+# Per-model Kp/Kd CAN ranges. RS00/01/02/05 use Kp 0–500 / Kd 0–5; the larger
+# RS03/04/06 use Kp 0–5000 / Kd 0–100 (RobStride Type-1 tables). A model in the yaml
+# `models:` block may give kp_min/kp_max/kd_min/kd_max explicitly; otherwise this
+# per-model default applies — NOT a single global, which would mis-scale a mixed chain.
+_LARGE_GAIN_MODELS = ("RS03", "RS04", "RS06")
+
+def _gain(model_name, model_dict, key):
+    if key in model_dict:
+        return model_dict[key]
+    large = model_name in _LARGE_GAIN_MODELS
+    return {"kp_min": 0.0, "kp_max": 5000.0 if large else 500.0,
+            "kd_min": 0.0, "kd_max": 100.0 if large else 5.0}[key]
+
+
 def _transport_bounds(cfgs):
     """Global SPI transport encoding bounds across all given configs: widest
     model velocity/torque so every motor's value fits losslessly, plus the
@@ -212,8 +226,12 @@ def gen_header(cfg, src_name, rates, timeouts):
                               for i, name in enumerate(model_names))
 
     range_entries = ",\n".join(
-        f"    [MOTOR_MODEL_{name}] = {{ {_f(models[name]['v_min'])}, {_f(models[name]['v_max'])}, "
-        f"{_f(models[name]['t_min'])}, {_f(models[name]['t_max'])} }}"
+        (lambda md: (
+            f"    [MOTOR_MODEL_{name}] = {{ {_f(md['v_min'])}, {_f(md['v_max'])}, "
+            f"{_f(md['t_min'])}, {_f(md['t_max'])}, "
+            f"{_f(_gain(name, md, 'kp_min'))}, {_f(_gain(name, md, 'kp_max'))}, "
+            f"{_f(_gain(name, md, 'kd_min'))}, {_f(_gain(name, md, 'kd_max'))} }}"
+        ))(models[name])
         for name in model_names
     )
 
@@ -273,13 +291,18 @@ typedef enum {{
 {enum_entries}
 }} MotorModel;
 
-/* Per-model CAN "operation control mode" (Type 1) velocity/torque ranges.
- * Position, Kp and Kd are identical across models and stay global. */
+/* Per-model CAN "operation control mode" (Type 1) ranges — velocity, torque AND
+ * Kp/Kd (RS00/02 use Kp 0–500, Kd 0–5; RS03/04/06 use Kp 0–5000, Kd 0–100).
+ * From slaveN.yaml `models:`. Only position is shared (MOTOR_P_MIN/MAX). */
 typedef struct {{
     float v_min;
     float v_max;
     float t_min;
     float t_max;
+    float kp_min;
+    float kp_max;
+    float kd_min;
+    float kd_max;
 }} MotorCanRange;
 
 static const MotorCanRange motor_can_ranges[] = {{

@@ -169,14 +169,19 @@ HAL_StatusTypeDef can_mit_control_set(uint8_t id, float torque, float MechPositi
 {
     uint8_t msg[8];
 
-    /* Velocity and torque ranges are model-specific (RS00 vs RS02); position,
-     * Kp and Kd are identical across models. Fall back to the RS02 globals if
-     * the id is not in this slave's config. */
+    /* Velocity, torque AND Kp/Kd ranges are model-specific (e.g. RS00/02 Kp 0–500,
+     * Kd 0–5; RS03/06 Kp 0–5000, Kd 0–100) and come from the config (slaveN.yaml
+     * models → MotorCanRange). Only position is shared across models. Fall back to the
+     * robostride.h globals if the id is not in this slave's config. */
     const MotorCanRange *r = motor_can_range_by_id(id);
-    float v_min = r ? r->v_min : V_MIN;
-    float v_max = r ? r->v_max : V_MAX;
-    float t_min = r ? r->t_min : T_MIN;
-    float t_max = r ? r->t_max : T_MAX;
+    float v_min  = r ? r->v_min  : V_MIN;
+    float v_max  = r ? r->v_max  : V_MAX;
+    float t_min  = r ? r->t_min  : T_MIN;
+    float t_max  = r ? r->t_max  : T_MAX;
+    float kp_min = r ? r->kp_min : KP_MIN;
+    float kp_max = r ? r->kp_max : KP_MAX;
+    float kd_min = r ? r->kd_min : KD_MIN;
+    float kd_max = r ? r->kd_max : KD_MAX;
 
     rs_can_tx_header.ExtId = rs_extid_pack(1,                             // Type 1
                                 float_to_uint(torque, t_min, t_max, 16), id);
@@ -187,10 +192,10 @@ HAL_StatusTypeDef can_mit_control_set(uint8_t id, float torque, float MechPositi
     msg[1] = float_to_uint(MechPosition, P_MIN, P_MAX, 16) & 0xFF;
     msg[2] = float_to_uint(speed, v_min, v_max, 16) >> 8;
     msg[3] = float_to_uint(speed, v_min, v_max, 16) & 0xFF;
-    msg[4] = float_to_uint(kp, KP_MIN, KP_MAX, 16) >> 8;
-    msg[5] = float_to_uint(kp, KP_MIN, KP_MAX, 16) & 0xFF;
-    msg[6] = float_to_uint(kd, KD_MIN, KD_MAX, 16) >> 8;
-    msg[7] = float_to_uint(kd, KD_MIN, KD_MAX, 16) & 0xFF;
+    msg[4] = float_to_uint(kp, kp_min, kp_max, 16) >> 8;
+    msg[5] = float_to_uint(kp, kp_min, kp_max, 16) & 0xFF;
+    msg[6] = float_to_uint(kd, kd_min, kd_max, 16) >> 8;
+    msg[7] = float_to_uint(kd, kd_min, kd_max, 16) & 0xFF;
 
     return can_tx(msg);
 }

@@ -1,6 +1,6 @@
 /* AUTO-GENERATED — DO NOT EDIT.
- * Source: configs/1s_5m/slave0.yaml
- * Regenerate: python3 scripts/gen_motor_config.py --slave configs/1s_5m/slave0.yaml
+ * Source: configs/2s_10m/slave0.yaml
+ * Regenerate: python3 scripts/gen_motor_config.py --slave configs/2s_10m/slave0.yaml
  */
 #ifndef MOTOR_CONFIG_H
 #define MOTOR_CONFIG_H
@@ -78,18 +78,23 @@ typedef enum {
     MOTOR_MODEL_RS02 = 1u
 } MotorModel;
 
-/* Per-model CAN "operation control mode" (Type 1) velocity/torque ranges.
- * Position, Kp and Kd are identical across models and stay global. */
+/* Per-model CAN "operation control mode" (Type 1) ranges — velocity, torque AND
+ * Kp/Kd (RS00/02 use Kp 0–500, Kd 0–5; RS03/04/06 use Kp 0–5000, Kd 0–100).
+ * From slaveN.yaml `models:`. Only position is shared (MOTOR_P_MIN/MAX). */
 typedef struct {
     float v_min;
     float v_max;
     float t_min;
     float t_max;
+    float kp_min;
+    float kp_max;
+    float kd_min;
+    float kd_max;
 } MotorCanRange;
 
 static const MotorCanRange motor_can_ranges[] = {
-    [MOTOR_MODEL_RS00] = { -33.0f, 33.0f, -14.0f, 14.0f },
-    [MOTOR_MODEL_RS02] = { -44.0f, 44.0f, -17.0f, 17.0f }
+    [MOTOR_MODEL_RS00] = { -33.0f, 33.0f, -14.0f, 14.0f, 0.0f, 500.0f, 0.0f, 5.0f },
+    [MOTOR_MODEL_RS02] = { -44.0f, 44.0f, -17.0f, 17.0f, 0.0f, 500.0f, 0.0f, 5.0f }
 };
 
 typedef struct {
