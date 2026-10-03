@@ -29,9 +29,13 @@ class SineStart:
         self.phase = math.pi / 2.0
 
     def begin(self, p0: float, t0_ns: int, lo: float | None = None, hi: float | None = None,
-              who: str = "") -> None:
+              who: str = "", peak_sign: int | None = None) -> None:
         """Capture the start (p0, t0) and plan the move. Raises ValueError if ±A exceeds
-        [lo, hi] (when given)."""
+        [lo, hi] (when given).
+
+        peak_sign forces which peak to start at (+1 → +A, −1 → −A); the resulting sines of two
+        starters with opposite signs run in anti-phase (a half-cycle offset — used for the two
+        legs of a walk). Default (None) picks the nearest peak to p0."""
         if lo is not None and hi is not None and not fits_soft_limits(self.amp, lo, hi):
             raise ValueError(
                 f"sine start refused{(' for ' + who) if who else ''}: amplitude A={self.amp:.3f} "
@@ -39,7 +43,10 @@ class SineStart:
                 f"(need -A>={lo:.3f} and A<={hi:.3f}). Reduce the amplitude.")
         self.p0 = float(p0)
         self.t0_ns = t0_ns
-        self.peak = self.amp if p0 >= 0.0 else -self.amp
+        if peak_sign is not None:
+            self.peak = self.amp if peak_sign >= 0 else -self.amp
+        else:
+            self.peak = self.amp if p0 >= 0.0 else -self.amp
         dist = abs(self.peak - self.p0)
         # Min-jerk peak speed = 1.875*dist/T; cap it at v_max → T >= 1.875*dist/v_max.
         self.T = 0.0 if dist < 1e-6 else max(self.min_move_s, 1.875 * dist / self.v_max)
