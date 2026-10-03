@@ -277,6 +277,8 @@ static void emit_robot_tele(uint32_t master_time_us)
     for (uint8_t s = 0; s < NUM_SLAVES; s++) {
         if (slave_alive[s] && nc < MAX_CHAINS) {
             memcpy(&pay.chains[nc], &latest_tele[s], sizeof(tele_chain_t));
+            pay.chains[nc].chain_id = s;   /* stamp the slave index — the slave hardcodes 0,
+                                              so multi-slave telemetry would otherwise collide */
             nc++;
         }
     }
