@@ -1,4 +1,5 @@
 #include "spi_master.h"
+#include "imu_service.h"
 #include <stdio.h>
 #include <stdarg.h>
 #include <string.h>
@@ -443,6 +444,7 @@ void MotorMaster_ProcessLoop(void)
     static uint32_t next_poll_ms   = 0;
     static uint32_t next_tele_ms   = 0;
     static uint32_t next_status_ms = 0;
+    static uint32_t next_imu_poll_ms = 0;
     uint32_t now = HAL_GetTick();
 
     /* Move ISR-posted responses (ControlResp/PONG) into the ring — this is the
@@ -489,5 +491,11 @@ void MotorMaster_ProcessLoop(void)
                 slave_zero_rejects_seen[s] = slave_zero_rejects[s];
             }
         }
+    }
+
+    /* Sample the BMI088 at 100 Hz after motor and telemetry work for this pass. */
+    if ((int32_t)(now - next_imu_poll_ms) >= 0) {
+        next_imu_poll_ms = now + IMU_SERVICE_POLL_PERIOD_MS;
+        (void)ImuService_Poll();
     }
 }
