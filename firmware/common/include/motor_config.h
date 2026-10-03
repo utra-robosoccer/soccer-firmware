@@ -1,6 +1,6 @@
 /* AUTO-GENERATED — DO NOT EDIT.
- * Source: configs/2s_10m/slave0.yaml
- * Regenerate: python3 scripts/gen_motor_config.py --slave configs/2s_10m/slave0.yaml
+ * Source: configs/robot_legs/slave0.yaml
+ * Regenerate: python3 scripts/gen_motor_config.py --slave configs/robot_legs/slave0.yaml
  */
 #ifndef MOTOR_CONFIG_H
 #define MOTOR_CONFIG_H
@@ -17,10 +17,10 @@ extern "C" {
  * Set to the widest model so every motor's value fits losslessly. */
 #define MOTOR_P_MIN  -12.57f
 #define MOTOR_P_MAX  12.57f
-#define MOTOR_V_MIN  -44.0f
-#define MOTOR_V_MAX  44.0f
-#define MOTOR_T_MIN  -17.0f
-#define MOTOR_T_MAX  17.0f
+#define MOTOR_V_MIN  -50.0f
+#define MOTOR_V_MAX  50.0f
+#define MOTOR_T_MIN  -60.0f
+#define MOTOR_T_MAX  60.0f
 
 /* TO_ZERO motion parameters */
 #define MOTOR_ZERO_TOL 0.05f
@@ -75,7 +75,9 @@ extern "C" {
 /* Motor models present on the bus */
 typedef enum {
     MOTOR_MODEL_RS00 = 0u,
-    MOTOR_MODEL_RS02 = 1u
+    MOTOR_MODEL_RS02 = 1u,
+    MOTOR_MODEL_RS03 = 2u,
+    MOTOR_MODEL_RS06 = 3u
 } MotorModel;
 
 /* Per-model CAN "operation control mode" (Type 1) ranges — velocity, torque AND
@@ -94,7 +96,9 @@ typedef struct {
 
 static const MotorCanRange motor_can_ranges[] = {
     [MOTOR_MODEL_RS00] = { -33.0f, 33.0f, -14.0f, 14.0f, 0.0f, 500.0f, 0.0f, 5.0f },
-    [MOTOR_MODEL_RS02] = { -44.0f, 44.0f, -17.0f, 17.0f, 0.0f, 500.0f, 0.0f, 5.0f }
+    [MOTOR_MODEL_RS02] = { -44.0f, 44.0f, -17.0f, 17.0f, 0.0f, 500.0f, 0.0f, 5.0f },
+    [MOTOR_MODEL_RS03] = { -20.0f, 20.0f, -60.0f, 60.0f, 0.0f, 5000.0f, 0.0f, 100.0f },
+    [MOTOR_MODEL_RS06] = { -50.0f, 50.0f, -36.0f, 36.0f, 0.0f, 5000.0f, 0.0f, 100.0f }
 };
 
 typedef struct {
@@ -112,56 +116,56 @@ typedef struct {
 static const MotorConfig motor_configs[N_MOTORS] = {
     {
         .can_id     = 1u,
-        .model      = MOTOR_MODEL_RS02,
-        .joint_name = "motor0",
+        .model      = MOTOR_MODEL_RS03,
+        .joint_name = "L_hip_pitch",
         .soft_min   = -0.79f,
         .soft_max   = 0.79f,
         .max_vel    = 10.0f,
-        .max_tau    = 0.8f,
+        .max_tau    = 30.0f,
         .default_kp = 15.0f,
         .default_kd = 1.0f,
     },
     {
         .can_id     = 2u,
-        .model      = MOTOR_MODEL_RS02,
-        .joint_name = "motor1",
-        .soft_min   = -1.05f,
-        .soft_max   = 1.05f,
+        .model      = MOTOR_MODEL_RS06,
+        .joint_name = "L_hip_roll",
+        .soft_min   = -0.79f,
+        .soft_max   = 0.79f,
         .max_vel    = 10.0f,
-        .max_tau    = 0.8f,
+        .max_tau    = 18.0f,
         .default_kp = 15.0f,
         .default_kd = 1.0f,
     },
     {
         .can_id     = 3u,
-        .model      = MOTOR_MODEL_RS00,
-        .joint_name = "motor2",
-        .soft_min   = -1.31f,
-        .soft_max   = 1.31f,
+        .model      = MOTOR_MODEL_RS02,
+        .joint_name = "L_hip_yaw",
+        .soft_min   = -0.79f,
+        .soft_max   = 0.79f,
         .max_vel    = 10.0f,
-        .max_tau    = 0.8f,
+        .max_tau    = 10.0f,
         .default_kp = 15.0f,
         .default_kd = 1.0f,
     },
     {
         .can_id     = 4u,
-        .model      = MOTOR_MODEL_RS00,
-        .joint_name = "motor3",
-        .soft_min   = -1.31f,
-        .soft_max   = 1.31f,
+        .model      = MOTOR_MODEL_RS03,
+        .joint_name = "L_knee",
+        .soft_min   = -0.79f,
+        .soft_max   = 0.79f,
         .max_vel    = 10.0f,
-        .max_tau    = 0.8f,
+        .max_tau    = 30.0f,
         .default_kp = 15.0f,
         .default_kd = 1.0f,
     },
     {
         .can_id     = 5u,
         .model      = MOTOR_MODEL_RS00,
-        .joint_name = "motor4",
-        .soft_min   = -1.31f,
-        .soft_max   = 1.31f,
+        .joint_name = "L_ankle",
+        .soft_min   = -0.79f,
+        .soft_max   = 0.79f,
         .max_vel    = 10.0f,
-        .max_tau    = 0.8f,
+        .max_tau    = 8.0f,
         .default_kp = 15.0f,
         .default_kd = 1.0f,
     }

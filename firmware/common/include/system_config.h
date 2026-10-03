@@ -1,6 +1,6 @@
 /* AUTO-GENERATED — DO NOT EDIT.
- * Sources: 2s_10m/slave0.yaml, 2s_10m/slave1.yaml
- * Regenerate: python3 scripts/gen_motor_config.py --system configs/2s_10m/slave0.yaml configs/2s_10m/slave1.yaml
+ * Sources: robot_legs/slave0.yaml, robot_legs/slave1.yaml
+ * Regenerate: python3 scripts/gen_motor_config.py --system configs/robot_legs/slave0.yaml configs/robot_legs/slave1.yaml
  */
 #ifndef SYSTEM_CONFIG_H
 #define SYSTEM_CONFIG_H
@@ -18,10 +18,10 @@ extern "C" {
 /* SPI transport encoding bounds (global, widest model across all slaves). */
 #define MOTOR_P_MIN  -12.57f
 #define MOTOR_P_MAX  12.57f
-#define MOTOR_V_MIN  -44.0f
-#define MOTOR_V_MAX  44.0f
-#define MOTOR_T_MIN  -17.0f
-#define MOTOR_T_MAX  17.0f
+#define MOTOR_V_MIN  -50.0f
+#define MOTOR_V_MAX  50.0f
+#define MOTOR_T_MIN  -60.0f
+#define MOTOR_T_MAX  60.0f
 
 /* Timing, rates & derived tick counts (system-wide; mirror of motor_config.h). */
 /* Configured rates (Hz) — reported in MasterStatus and the .bin header. */

@@ -1,11 +1,13 @@
 # Motor chain configuration for SLAVE-1 — RIGHT LEG (robot_legs).
 #
-# Identical layout to the left leg (slave0), on this slave's own CAN bus, can_id 1..5:
-#   can 1  RS03  hip_pitch   max_tau 30  (rated 20, peak 60)
-#   can 2  RS06  hip_roll    max_tau 18  (rated 11, peak 36)
-#   can 3  RS02  hip_yaw     max_tau 10  (rated  6, peak 17)
-#   can 4  RS03  knee        max_tau 30  (rated 20, peak 60)
-#   can 5  RS00  ankle       max_tau  8  (rated  5, peak 14)
+# Same joint layout as the left leg (slave0), but CAN ids continue 6..10 so the id is
+# globally unique (left leg 1–5, right leg 6–10) — the can_id alone identifies the joint.
+# Each slave still has its own bus; ids need not restart at 1.
+#   can 6   RS03  hip_pitch   max_tau 30  (rated 20, peak 60)
+#   can 7   RS06  hip_roll    max_tau 18  (rated 11, peak 36)
+#   can 8   RS02  hip_yaw     max_tau 10  (rated  6, peak 17)
+#   can 9   RS03  knee        max_tau 30  (rated 20, peak 60)
+#   can 10  RS00  ankle       max_tau  8  (rated  5, peak 14)
 # max_tau is the torque-trip (exceed → IDLE); ≈1.5× rated. HALVE for cautious
 # unloaded bench bring-up. soft limits are generic ±0.79 placeholders — tune per joint.
 #
@@ -69,7 +71,7 @@ models:
 # Right leg.
 motors:
   - idx: 0
-    can_id: 1
+    can_id: 6
     model: RS03
     joint_name: R_hip_pitch
     soft_min: -0.79
@@ -79,7 +81,7 @@ motors:
     default_kp: 15.0
     default_kd:  1.0
   - idx: 1
-    can_id: 2
+    can_id: 7
     model: RS06
     joint_name: R_hip_roll
     soft_min: -0.79
@@ -89,7 +91,7 @@ motors:
     default_kp: 15.0
     default_kd:  1.0
   - idx: 2
-    can_id: 3
+    can_id: 8
     model: RS02
     joint_name: R_hip_yaw
     soft_min: -0.79
@@ -99,7 +101,7 @@ motors:
     default_kp: 15.0
     default_kd:  1.0
   - idx: 3
-    can_id: 4
+    can_id: 9
     model: RS03
     joint_name: R_knee
     soft_min: -0.79
@@ -109,7 +111,7 @@ motors:
     default_kp: 15.0
     default_kd:  1.0
   - idx: 4
-    can_id: 5
+    can_id: 10
     model: RS00
     joint_name: R_ankle
     soft_min: -0.79
