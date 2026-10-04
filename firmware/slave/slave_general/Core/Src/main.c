@@ -31,6 +31,9 @@
 #include "motor_chain.h"
 #include "slave_spi.h"
 #include "motor_runtime.h"
+#include "tx_arm_timer.h"   /* TX-arm deadline (one-shot TIM3) — removes the telemetry lag */
+#include "../../../../common/include/slave_service.h"  /* slave_service_due — forward/fallback */
+#include "spi_proto.h"     /* SPI frame codec: build telemetry, parse commands */
 
 /* USER CODE END Includes */
 
@@ -41,15 +44,25 @@
 
 /* Private define ------------------------------------------------------------*/
 /* USER CODE BEGIN PD */
-#define PHASE1_POLL_PERIOD_MS MOTOR_LOOP_PERIOD_MS   /* 200 Hz CAN control loop */
-#define PHASE1_PRINT_PERIOD_MS 500U
-#define PHASE1_LED_PULSE_MS 40U
-#define PHASE1_STATUS_LED_GPIO_Port GPIOA
-#define PHASE1_STATUS_LED_Pin GPIO_PIN_5
-#if defined(__GNUC__)
-#define PHASE1_UNUSED_FN __attribute__((unused))
+/* Compile-time gate for ALL UART4 debug output (TX on pin PA0, 115200 8N1).
+   OFF by default: no debug console is wired in the normal build, and
+   HAL_UART_Transmit is blocking (~8 ms per line) inside the 200 Hz control loop.
+   Set to 1 (e.g. -DSLAVE_UART_DEBUG=1) for bring-up on a UART adapter on PA0. */
+#ifndef SLAVE_UART_DEBUG
+#define SLAVE_UART_DEBUG 0
+#endif
+#if SLAVE_UART_DEBUG
+#define DBG_PRINTF(...) printf(__VA_ARGS__)
 #else
-#define PHASE1_UNUSED_FN
+#define DBG_PRINTF(...) ((void)0)
+#endif
+
+#define LOOP_POLL_PERIOD_MS MOTOR_LOOP_PERIOD_MS   /* 200 Hz CAN control loop */
+#define STATUS_LED_PULSE_MS 40U
+#define STATUS_LED_GPIO_Port GPIOA
+#define STATUS_LED_Pin GPIO_PIN_5
+#if SLAVE_UART_DEBUG
+#define DBG_PRINT_PERIOD_MS 500U   /* min ms between debug motor-state prints */
 #endif
 
 /* USER CODE END PD */
@@ -66,16 +79,19 @@ SPI_HandleTypeDef hspi1;
 DMA_HandleTypeDef hdma_spi1_rx;
 DMA_HandleTypeDef hdma_spi1_tx;
 
+#if SLAVE_UART_DEBUG
 UART_HandleTypeDef huart4;
+#endif
 
 /* USER CODE BEGIN PV */
-static uint32_t phase1_next_poll_ms = 0;
-static uint32_t phase1_last_print_ms = 0;
-static uint32_t phase1_last_feedback_count = 0;
-static uint32_t phase1_led_off_ms = 0;
-static uint8_t  phase1_echo_seq = 0;   /* seq byte of the most recent VALID command */
+static uint32_t loop_next_poll_ms = 0;
+#if SLAVE_UART_DEBUG
+static uint32_t dbg_last_print_ms = 0;
+#endif
+static uint32_t last_feedback_count = 0;
+static uint32_t status_led_off_ms = 0;
+static uint8_t  spi_echo_seq    = 0;   /* SPI link-health seq of the last VALID frame */
 static uint32_t cmd_crc_errors  = 0;   /* SPI command frames rejected on CRC */
-static uint32_t zero_rejects    = 0;   /* GOTO_ZERO commands refused (gate/state) */
 
 /* USER CODE END PV */
 
@@ -85,7 +101,9 @@ static void MX_GPIO_Init(void);
 static void MX_DMA_Init(void);
 static void MX_CAN1_Init(void);
 static void MX_SPI1_Init(void);
+#if SLAVE_UART_DEBUG
 static void MX_UART4_Init(void);
+#endif
 /* USER CODE BEGIN PFP */
 
 /* USER CODE END PFP */
@@ -93,11 +111,14 @@ static void MX_UART4_Init(void);
 /* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
 int __io_putchar(int ch) {
+#if SLAVE_UART_DEBUG
     uint8_t c = (uint8_t)ch;
     HAL_UART_Transmit(&huart4, &c, 1, HAL_MAX_DELAY);
+#endif
     return ch;
 }
 
+#if SLAVE_UART_DEBUG
 static int32_t to_milli(float value)
 {
     return (int32_t)(value * 1000.0f);
@@ -119,7 +140,7 @@ static void append_milli(char *dst, size_t dst_len, int32_t milli)
     snprintf(dst, dst_len, "%s%ld.%03ld", sign, (long)whole, (long)frac);
 }
 
-static void phase1_print_motor_state(const motor_t *motor)
+static void dbg_print_motor_state(const motor_t *motor)
 {
     char pos[20];
     char vel[20];
@@ -159,6 +180,31 @@ static void phase1_print_motor_state(const motor_t *motor)
         HAL_UART_Transmit(&huart4, (uint8_t *)line, (uint16_t)len, 50);
     }
 }
+#endif /* SLAVE_UART_DEBUG */
+
+/* Assemble + stage this slave's tele_chain_t for the next SPI exchange. Called once per
+   loop iteration after the service (send) and feedback handling, so it carries the
+   freshest mirrored motor state and the cmd_seq confirmation paired from the most recent
+   reply — which the master then reads on the very next exchange. */
+static void stage_telemetry(void)
+{
+    tele_chain_t chain;
+    memset(&chain, 0, sizeof(chain));
+    chain.chain_id       = 0u;
+    chain.n_motors       = N_MOTORS;
+    chain.spi_seq_echo   = spi_echo_seq;
+    chain.spi_resyncs      = spi_resyncs;                      /* DMA realigns (wraps) */
+    chain.spi_tx_arm_fails = (uint8_t)spi_tx_arm_fails;        /* TX-arm DMA failures (wraps) */
+    chain.slave_time_us  = (uint32_t)(HAL_GetTick() * 1000u);  /* ms→µs (no µs timer) */
+    chain.cmd_crc_errors = (uint16_t)cmd_crc_errors;
+    chain.can_tx_errors  = (uint16_t)can_tx_error_count;
+    for (uint8_t _i = 0; _i < N_MOTORS; _i++) {
+        motor_runtime_sample(&chain.motors[_i], _i);
+    }
+    uint8_t frame[PAYLOAD_LENGTH];
+    spi_proto_build_tele(frame, &chain);
+    spi_write_next_tx_buf(frame, tele_stage_buf);
+}
 
 /* USER CODE END 0 */
 
@@ -196,7 +242,9 @@ int main(void)
   MX_DMA_Init();
   MX_CAN1_Init();
   MX_SPI1_Init();
+#if SLAVE_UART_DEBUG
   MX_UART4_Init();
+#endif
   /* USER CODE BEGIN 2 */
 
   /* Bind CAN ids into the (private) motors[] before the bus starts, so the RX
@@ -207,13 +255,27 @@ int main(void)
     Error_Handler();
   }
 
+  tx_arm_timer_init(TX_ARM_DEADLINE_US);  /* ready BEFORE the first TxRxCplt starts it */
   spi_dma_init(&hspi1);
   motor_runtime_init();   /* discover motors via CAN, populate alive mask */
 
-  phase1_next_poll_ms   = HAL_GetTick();
-  phase1_last_print_ms  = HAL_GetTick();
-  phase1_last_feedback_count = can_feedback_count;
-  printf("slave: %u/%u motors alive\r\n",
+  loop_next_poll_ms   = HAL_GetTick();
+  last_feedback_count = can_feedback_count;
+
+  /* µs-resolution timebase (DWT cycle counter) for forward/fallback service gating.
+     Thresholds scale with the generated master cycle, so 200/400 Hz both work. */
+  CoreDebug->DEMCR |= CoreDebug_DEMCR_TRCENA_Msk;
+  DWT->CYCCNT = 0u;
+  DWT->CTRL  |= DWT_CTRL_CYCCNTENA_Msk;
+  const uint32_t cyc_per_us    = SystemCoreClock / 1000000u;
+  const uint32_t svc_min_ticks = (MASTER_CYCLE_US / 2u) * cyc_per_us;         /* 0.5 cycle */
+  const uint32_t svc_fb_ticks  = ((MASTER_CYCLE_US * 8u) / 5u) * cyc_per_us;  /* 1.6 cycle */
+  uint32_t last_send_cyc = 0u;   /* last service of any kind (cycles)       */
+  uint32_t last_exch_cyc = 0u;   /* last exchange-driven service (cycles)   */
+#if SLAVE_UART_DEBUG
+  dbg_last_print_ms   = HAL_GetTick();
+#endif
+  DBG_PRINTF("slave: %u/%u motors alive\r\n",
          (unsigned)__builtin_popcount(motor_runtime_motors_alive()),
          (unsigned)N_MOTORS);
 
@@ -226,135 +288,115 @@ int main(void)
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
-    uint32_t now = HAL_GetTick();
+    uint32_t now     = HAL_GetTick();
+    uint32_t now_cyc = DWT->CYCCNT;
+    uint8_t  need_stage = 0u;   /* stage telemetry once at iteration end if anything changed */
 
-    /* 200 Hz CAN poll — motor_runtime handles MIT hold vs read-state per motor */
-    if ((int32_t)(now - phase1_next_poll_ms) >= 0) {
-      phase1_next_poll_ms += PHASE1_POLL_PERIOD_MS;
-      motor_runtime_update(now);
-    }
-
-    /* On each new CAN feedback: refresh SPI telemetry buffer */
-    if (can_feedback_count != phase1_last_feedback_count) {
-      phase1_last_feedback_count = can_feedback_count;
-      HAL_GPIO_WritePin(PHASE1_STATUS_LED_GPIO_Port, PHASE1_STATUS_LED_Pin, GPIO_PIN_SET);
-      phase1_led_off_ms = now + PHASE1_LED_PULSE_MS;
-
-      if ((now - phase1_last_print_ms) >= PHASE1_PRINT_PERIOD_MS) {
-        phase1_last_print_ms = now;
-        motor_t snap0;
-        motor_get_snapshot(0, &snap0);          /* coherent read for the debug print */
-        phase1_print_motor_state(&snap0);
-      }
-
-      /* Build the whole telemetry frame in one atomic pass, then CRC it, before
-         handing it to the DMA double-buffer. Layout (protocol.h):
-         [alive_mask][echo_seq][MotorState × N][slave_debug_rsvd[8]][crc16]. */
-      uint8_t frame[PAYLOAD_LENGTH];
-      memset(frame, 0, sizeof(frame));            /* zeroes slave_debug_rsvd + padding */
-      frame[0] = motor_runtime_motors_alive();
-      frame[1] = phase1_echo_seq;
-      MotorState *ms = (MotorState *)&frame[SPI_TELE_HDR_BYTES];
-      for (uint8_t _i = 0; _i < N_MOTORS; _i++) {
-        motor_runtime_pack_tele(&ms[_i], _i);
-      }
-      /* slave_debug_rsvd[0..3] = cmd_crc_errors (u32 LE); [4..7] = zero_rejects
-         (u32 LE). Both are relayed to the master over the reserved (CRC-covered)
-         debug region — no wire-layout change. The master surfaces cmd_crc_errors
-         in SlaveStatus and logs zero_rejects when it climbs. */
-      uint8_t *dbg = &frame[SPI_TELE_DEBUG_OFF(N_MOTORS)];
-      dbg[0] = (uint8_t)(cmd_crc_errors & 0xFFu);
-      dbg[1] = (uint8_t)((cmd_crc_errors >> 8) & 0xFFu);
-      dbg[2] = (uint8_t)((cmd_crc_errors >> 16) & 0xFFu);
-      dbg[3] = (uint8_t)((cmd_crc_errors >> 24) & 0xFFu);
-      dbg[4] = (uint8_t)(zero_rejects & 0xFFu);
-      dbg[5] = (uint8_t)((zero_rejects >> 8) & 0xFFu);
-      dbg[6] = (uint8_t)((zero_rejects >> 16) & 0xFFu);
-      dbg[7] = (uint8_t)((zero_rejects >> 24) & 0xFFu);
-      uint16_t crc = proto_crc16(frame, (size_t)(PAYLOAD_LENGTH - SPI_TELE_CRC_BYTES));
-      frame[PAYLOAD_LENGTH - 2] = (uint8_t)(crc & 0xFFu);   /* little-endian */
-      frame[PAYLOAD_LENGTH - 1] = (uint8_t)(crc >> 8);
-      spi_write_next_tx_buf(frame, tele_stage_buf);
-    }
-
-    if (phase1_led_off_ms != 0U && (int32_t)(now - phase1_led_off_ms) >= 0) {
-      HAL_GPIO_WritePin(PHASE1_STATUS_LED_GPIO_Port, PHASE1_STATUS_LED_Pin, GPIO_PIN_RESET);
-      phase1_led_off_ms = 0U;
-    }
-
-    /* SPI command handler — dispatch to motor_runtime state machine */
+    /* SPI command handler FIRST — forward-on-command: service the motors immediately
+       on every valid (CRC-OK) exchange, so a new command reaches the motor without
+       waiting for the slave's own tick. Each exchange is one master cycle. */
     if (data_receive_flag) {
       /* Fix 1 (torn-parse): cmd_inbox_buf is a pointer the SPI ISR reswaps, so
          parsing it in place could split a command across two transfers. Copy the
          current command frame into a main-owned local under a brief IRQ mask
          (COPY, not latch: after a swap the old buffer becomes the DMA's next
          write target), then parse only the local. */
-      uint8_t cmd_local[SPI_CMD_FRAME_SIZE(N_MOTORS)];
+      uint8_t cmd_local[SPI_CMD_FRAME_SIZE];
       __disable_irq();
       memcpy(cmd_local, (const void *)cmd_inbox_buf, sizeof(cmd_local));
       data_receive_flag = 0;
       __enable_irq();
 
-      /* Fix 3 (command integrity): verify the command-frame CRC before applying
-         anything. On failure apply nothing this tick (a corrupt command must not
-         refresh watchdogs or move a motor) and count it; the master re-sends
-         every 5 ms and the watchdog covers sustained loss. */
-      uint16_t ccrc = proto_crc16(cmd_local, SPI_CMD_CRC_OFF(N_MOTORS));
-      uint16_t cwire = (uint16_t)(cmd_local[SPI_CMD_CRC_OFF(N_MOTORS)] |
-                        ((uint16_t)cmd_local[SPI_CMD_CRC_OFF(N_MOTORS) + 1] << 8));
-      if (ccrc != cwire) {
+      /* Verify the command-frame CRC + extract the header and cmd_chain_t. On a CRC
+         failure apply nothing (a corrupt command must not refresh watchdogs or move a
+         motor), count it, and resync the DMA — send nothing this exchange. */
+      SpiCmdHdr   hdr;
+      cmd_chain_t chain;
+      if (!spi_proto_parse_cmd(cmd_local, &hdr, &chain)) {
         cmd_crc_errors++;
+        slave_spi_resync(&hspi1);
       } else {
-      uint8_t cmd = cmd_local[0];
-      phase1_echo_seq = cmd_local[1];   /* echo the seq of this VALID command */
-      /* A valid command proves the master link is alive — refresh EVERY motor's
-         watchdog. Otherwise a long blocking op on one motor (e.g. zeroing
-         several motors in a row, each ~60 ms) lets an already-armed motor's
-         watchdog expire mid-sequence and it falls back to IDLE. */
-      for (uint8_t _w = 0; _w < N_MOTORS; _w++)
-        motor_runtime_refresh_watchdog(_w);
-      switch (cmd & 0x0Fu) {
-        case SPI_CMD_ARM: {
-          uint8_t idx = SPI_CMD_MOTOR_IDX(cmd);
-          motor_runtime_arm(idx);
-          break;
-        }
-        case SPI_CMD_GOTO_ZERO: {
-          uint8_t idx = SPI_CMD_MOTOR_IDX(cmd);
-          /* A refused GOTO_ZERO (bad idx, not-IDLE, dead motor, 0 outside soft
-             limits, or a hardware/overtravel latch needing explicit ARM) is
-             counted so the reject is visible on the host, not silent. */
-          if (motor_runtime_goto_zero(idx) != HAL_OK) zero_rejects++;
-          break;
-        }
-        case SPI_CMD_MIT: {
-          for (uint8_t _i = 0; _i < N_MOTORS; _i++) {
-            SpiMitCmd mc;
-            /* MIT payload rides after the [cmd][seq] header (SPI_CMD_HDR_BYTES). */
-            memcpy(&mc, cmd_local + SPI_CMD_HDR_BYTES + _i * (uint8_t)sizeof(SpiMitCmd),
-                   sizeof(SpiMitCmd));
-            if (mc.valid) {
-              /* Clamp to the motor's soft angle limits on the slave side. */
-              motor_runtime_apply_mit(_i, mc.pos, mc.vel);
-            }
-            /* Master is alive — always refresh watchdog regardless of valid flag */
-            motor_runtime_refresh_watchdog(_i);
+        spi_echo_seq = hdr.spi_seq;   /* echo the SPI link-health seq */
+        uint8_t cmd_fresh = (hdr.opcode == SPI_OP_ROBOT_CMD) ? 1u : 0u;
+
+        if (cmd_fresh) {
+          /* Only a real command refreshes the master-link watchdog — a NOP keepalive does
+             NOT (task 6), so the slave's master-loss ramp still fires if the master falls
+             back to keepalives or dies. Level-triggered per-motor mode requests. */
+          for (uint8_t _w = 0; _w < N_MOTORS; _w++)
+            motor_runtime_refresh_watchdog(_w);
+          uint8_t n = (chain.n_motors > N_MOTORS) ? N_MOTORS : chain.n_motors;
+          for (uint8_t _i = 0; _i < n; _i++) {
+            motor_runtime_apply_cmd(_i, &chain.motors[_i], hdr.cmd_seq);
           }
-          break;
         }
-        case SPI_CMD_HOLD:
-          for (uint8_t _i = 0; _i < N_MOTORS; _i++)
-            motor_runtime_refresh_watchdog(_i);
-          break;
-        case SPI_CMD_DISARM:
-          for (uint8_t _i = 0; _i < N_MOTORS; _i++)
-            motor_runtime_disable(_i);
-          break;
-        default:
-          break;
+        /* apply_cmd → arm_enable can BLOCK ~25 ms (CAN enable handshake + settle delays),
+           so refresh the time base before servicing. Otherwise the watchdog/fault checks
+           run against the pre-arm `now` while watchdog_ms was just set to a later tick, and
+           (now - watchdog_ms) underflows u32 → a spurious WATCHDOG trip right after arming. */
+        now     = HAL_GetTick();
+        now_cyc = DWT->CYCCNT;
+        /* Forward service: drive the applied command (cmd_fresh) or, on a NOP, hold/ramp.
+           The min-guard prevents a double send. */
+        if (slave_service_due(SVC_EXCHANGE, 1u, now_cyc, last_send_cyc, last_exch_cyc,
+                              svc_min_ticks, svc_fb_ticks)) {
+          motor_runtime_update(now, cmd_fresh);
+          last_send_cyc = now_cyc;
+          last_exch_cyc = now_cyc;
+          need_stage = 1u;
+        }
       }
-      }  /* CRC ok */
     }
+
+    /* Fallback tick — services ONLY when exchanges have stopped (SPI link lost), so
+       the motors keep holding until the watchdog trips. In normal streaming every
+       exchange forwards, so this never fires (no double send). */
+    if ((int32_t)(now - loop_next_poll_ms) >= 0) {
+      loop_next_poll_ms += LOOP_POLL_PERIOD_MS;
+      if (slave_service_due(SVC_FALLBACK, 1u, now_cyc, last_send_cyc, last_exch_cyc,
+                            svc_min_ticks, svc_fb_ticks)) {
+        motor_runtime_update(now, /*cmd_fresh=*/0u);   /* no command → hold/ramp */
+        last_send_cyc = now_cyc;
+        need_stage = 1u;
+      }
+    }
+
+    /* On each new CAN feedback: mirror the reply into motor state + pair cmd_seq NOW
+       (not at the next exchange), so the telemetry staged below carries the freshest
+       state and this reply's confirmation → read by the master on the next exchange. */
+    if (can_feedback_count != last_feedback_count) {
+      last_feedback_count = can_feedback_count;
+      motor_runtime_on_feedback(now);
+      need_stage = 1u;
+      HAL_GPIO_WritePin(STATUS_LED_GPIO_Port, STATUS_LED_Pin, GPIO_PIN_SET);
+      status_led_off_ms = now + STATUS_LED_PULSE_MS;
+
+#if SLAVE_UART_DEBUG
+      if ((now - dbg_last_print_ms) >= DBG_PRINT_PERIOD_MS) {
+        dbg_last_print_ms = now;
+        motor_t snap0;
+        motor_get_snapshot(0, &snap0);          /* coherent read for the debug print */
+        dbg_print_motor_state(&snap0);
+      }
+#endif
+    }
+
+    /* Stage telemetry once per iteration, after both the service (send + any state/fault
+       change) and feedback (fresh state + confirmation) — so the next exchange carries the
+       freshest frame. Gated so an idle spin doesn't rebuild needlessly. */
+    if (need_stage) {
+      stage_telemetry();
+    }
+    /* TX-arm is deadline-driven (one-shot TIM3 → spi_arm_tx at TX_ARM_DEADLINE_US, after the
+       reply window and before the next exchange). An earlier all-replied arm was tried but
+       its reply-jitter-coupled timing skipped last_applied values (superseded); the fixed
+       deadline is deterministic and one cycle sooner than the old TxRxCplt arm. */
+
+    if (status_led_off_ms != 0U && (int32_t)(now - status_led_off_ms) >= 0) {
+      HAL_GPIO_WritePin(STATUS_LED_GPIO_Port, STATUS_LED_Pin, GPIO_PIN_RESET);
+      status_led_off_ms = 0U;
+    }
+
   }
   /* USER CODE END 3 */
 }
@@ -484,6 +526,7 @@ static void MX_SPI1_Init(void)
   * @param None
   * @retval None
   */
+#if SLAVE_UART_DEBUG
 static void MX_UART4_Init(void)
 {
 
@@ -511,6 +554,7 @@ static void MX_UART4_Init(void)
   /* USER CODE END UART4_Init 2 */
 
 }
+#endif /* SLAVE_UART_DEBUG */
 
 /**
   * Enable DMA controller clock
@@ -547,12 +591,12 @@ static void MX_GPIO_Init(void)
 
 /* USER CODE BEGIN MX_GPIO_Init_2 */
   GPIO_InitTypeDef GPIO_InitStruct = {0};
-  HAL_GPIO_WritePin(PHASE1_STATUS_LED_GPIO_Port, PHASE1_STATUS_LED_Pin, GPIO_PIN_RESET);
-  GPIO_InitStruct.Pin = PHASE1_STATUS_LED_Pin;
+  HAL_GPIO_WritePin(STATUS_LED_GPIO_Port, STATUS_LED_Pin, GPIO_PIN_RESET);
+  GPIO_InitStruct.Pin = STATUS_LED_Pin;
   GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
   GPIO_InitStruct.Pull = GPIO_NOPULL;
   GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
-  HAL_GPIO_Init(PHASE1_STATUS_LED_GPIO_Port, &GPIO_InitStruct);
+  HAL_GPIO_Init(STATUS_LED_GPIO_Port, &GPIO_InitStruct);
 /* USER CODE END MX_GPIO_Init_2 */
 }
 

@@ -6,6 +6,10 @@
 #include "main.h"
 #include "stm32f4xx_hal_def.h"
 #include <string.h> // Required for memcpy
+#include "motor_types.h"  // motor_t, motor_status_t, motor_error_t, rs_runmode_t
+/* Strict-aliasing-safe RobStride ext-id codec (path relative to Core/Inc/, as in
+   proto_common.h). Replaces the old (exCanIdInfo*)&ExtId pointer cast. */
+#include "../../../../common/include/robostride_id.h"
 
 // --- Constants (DO NOT CHANGE) ---
 #define P_MIN   -12.57f
@@ -22,29 +26,13 @@
 #define CAN_MASTER_ID 0xFD
 #define ROBOSTRIDE_READ_ONLY_MOTOR_ID 2u
 
-// --- Structs ---
-typedef struct {
-    uint32_t id   : 8;  // Bits 0-7: Target Motor ID (Tx) or Master ID (Rx Type 2)
-    uint32_t data : 16; // Bits 8-23: Data Payload / Master ID / Status
-    uint32_t mode : 5;  // Bits 24-28: Communication Type
-    uint32_t res  : 3;  // Bits 29-31: Unused (CAN Ext ID is 29 bits)
-} exCanIdInfo;
+// The 29-bit ext-id layout (id[0:7] / data[8:23] / mode[24:28]) is now encoded and
+// decoded by rs_extid_pack/mode/data/id (robostride_id.h) with explicit shifts —
+// no bitfield-struct pointer cast (that was undefined at -O2 under strict aliasing).
 
-typedef enum{
-    MIT_MODE        = 0,
-    POS_PP_MODE     = 1,
-    VELOCITY_MODE   = 2,
-    CURRENT_MODE    = 3,
-    CSP_MODE        = 4
-} rs_runmode_t;
+// rs_runmode_t and motor_status_t are defined in motor_types.h
 
-typedef enum{
-    RS_MODE_RESET = 0,
-    RS_MODE_CALI,
-    RS_MODE_NORMAL
-} motor_status_t;
-
-// --- Feedback Decoding Masks (Based on exCanIdInfo.data field) ---
+// --- Feedback Decoding Masks (applied to the 16-bit data field, rs_extid_data()) ---
 // CAN Bits 8-15:  Motor ID -> .data bits 0-7
 // CAN Bits 16-21: Faults   -> .data bits 8-13
 // CAN Bits 22-23: Mode     -> .data bits 14-15
@@ -61,47 +49,7 @@ typedef enum{
 #define FAULT_BIT_DRIVER_FAULT    1 // Bit 17 in CAN
 #define FAULT_BIT_UNDERVOLTAGE    0 // Bit 16 in CAN
 
-typedef struct {
-    uint8_t uncalibrated;
-    uint8_t stall_overload;
-    uint8_t encoder_fault;
-    uint8_t overheat;
-    uint8_t driver_fault;
-    uint8_t undervoltage;
-} motor_error_t;
-
-typedef struct {
-    uint8_t id;
-    uint16_t master_id;
-    uint64_t mcu_id; // Unique MCU Identifier (from Type 0)
-
-    motor_status_t status;
-    motor_error_t motor_errors;
-    rs_runmode_t motor_mode;
-
-    float temperature; // motor temperature
-
-    // MIT parameters
-    float pos;  // rad
-    float rpm;  // rad/s
-    float kp;
-    float kd;
-    float torq; // Nm
-
-    // Telemetry health. Read only via motor_get_snapshot() (a critical-section
-    // struct copy), so no volatile is needed here — the copy's memory barrier
-    // orders the ISR's writes. last_fb_ms is ISR-written; fault_word is written
-    // by the ISR (0x3022 latch) and by main via motor_set_fault_word().
-    uint32_t last_fb_ms;   // HAL_GetTick() at last Type-2 feedback
-    uint32_t fault_word;   // latched 0x3022 read (0=clear, 0xFFFFFFFF=read-fail)
-
-    // Motor set point
-    float set_pos;
-    float set_rpm;
-    float set_kp;
-    float set_kd;
-    float set_torq;
-} motor_t;
+// motor_error_t and motor_t are defined in motor_types.h
 
 extern uint32_t TxMailbox;
 extern CAN_RxHeaderTypeDef rs_can_rx_header;

@@ -13,20 +13,14 @@
 #include "proto_common.h"
 #include "main.h"
 
-#define SPI_CMD_NOP       0x00
-#define SPI_CMD_ARM       0x01  /* bits[7:4] = motor index */
-#define SPI_CMD_HOLD      0x02
-#define SPI_CMD_DISARM    0x03
-#define SPI_CMD_GOTO_ZERO 0x04  /* bits[7:4] = motor index */
-#define SPI_CMD_MIT       0x05  /* pass-through MIT command, data in bytes [1..] */
+/* SPI opcodes (SPI_OP_*) and frame-size macros are defined once in the shared
+   common/include/protocol.h (via proto_common.h) so master and slave cannot
+   drift. One chain per slave → fixed frame sizes (no per-N arithmetic):
+     master→slave: [opcode][spi_seq][cycle_id][cmd_seq][cmd_chain_t][crc16]  (70 B)
+     slave→master: [tele_chain_t][crc16]                                     (119 B) */
 
-#define SPI_CMD_ARM_IDX(idx)       (SPI_CMD_ARM       | ((uint8_t)(idx) << 4u))
-#define SPI_CMD_GOTO_ZERO_IDX(idx) (SPI_CMD_GOTO_ZERO | ((uint8_t)(idx) << 4u))
-#define SPI_CMD_MOTOR_IDX(cmd)     ((uint8_t)((cmd) >> 4u))
-
-/* slave→master telemetry frame (see protocol.h SPI_TELE_FRAME_SIZE):
-   [alive_mask u8][echo_seq u8][MotorState × N][slave_debug_rsvd[8]][crc16 u16] */
-#define PAYLOAD_LENGTH SPI_TELE_FRAME_SIZE(N_MOTORS)
+/* The full-duplex transfer is the larger of the two frames. */
+#define PAYLOAD_LENGTH SPI_XFER_SIZE
 /* DMA buffers must hold the full frame; round up to a 32-byte multiple. */
 #define BUFFER_SIZE    (((PAYLOAD_LENGTH) + 31u) & ~31u)
 
@@ -35,14 +29,24 @@ extern uint8_t* volatile  tele_stage_buf; // inactive TX frame — main writes (
 extern volatile uint8_t data_receive_flag;
 extern volatile uint8_t data_tx_ready_flag;
 extern volatile uint8_t spi_error_flag;
-
-extern uint8_t random_count; // just for spi dbg
-
+extern volatile uint8_t spi_resyncs;      // DMA realigns (wraps; host takes deltas)
+extern volatile uint32_t spi_tx_arm_fails; // HAL TX-arm failures (then retried; wraps)
 
 void spi_dma_init(SPI_HandleTypeDef *hspi);
 void spi_write_next_tx_buf(const uint8_t* src_frame, uint8_t* dst);
 
+/* Re-align the SPI-slave DMA after a bad exchange (called from the main loop on a
+   command CRC failure). Aborts + re-arms the fixed-length DMA so the NEXT exchange
+   starts at byte 0 — but ONLY while NSS (PA4) is high (between exchanges); if NSS
+   is low it waits (bounded) for the exchange to end, else skips and retries next
+   cycle. Returns 1 if it re-armed (resync done), 0 if it skipped (NSS stuck low). */
+uint8_t slave_spi_resync(SPI_HandleTypeDef *hspi);
 
+/* Arm the DMA for the NEXT exchange (swap in a freshly-staged telemetry frame if ready).
+   Called from the TX-arm deadline timer ISR (TX_ARM_DEADLINE_US after each exchange), after
+   the motor replies are in — so the fresh reply rides the next exchange (no one-exchange lag).
+   Idempotent per cycle (armed_this_cycle); resync/error claim the cycle so this no-ops. */
+void spi_arm_tx(void);
 
 
 #endif /* INC_SLAVE_SPI_H_ */

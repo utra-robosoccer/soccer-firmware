@@ -1,0 +1,19 @@
+# System-wide rates and timeouts for this setup (optional; defaults in
+# scripts/gen_motor_config.py if this file is absent). Rates in Hz; timeouts and
+# debounces in ms — the generator derives firmware tick counts from the rates, so
+# changing a rate keeps the real-world durations fixed.
+#
+# Timing behavior is intentionally the SAME as before this task (200 Hz poll/tele/
+# tick, 50 Hz host); the master-clock redesign is a separate task.
+rates:
+  master_poll_hz: 200   # SPI poll / command delivery
+  telemetry_hz:   200   # MSG_ROBOT_TELE emission
+  slave_tick_hz:  200   # slave control tick (motor_runtime_update)
+  host_cmd_hz:     50   # expected host command rate (run_policy --rate default)
+
+timeouts_ms:
+  motor_watchdog:  200  # master-link (SPI) watchdog → IDLE
+  can_fb_timeout:  100  # per-motor Type-2 staleness → CAUSE_CAN_TIMEOUT
+  zero_stall:     1500  # no TO_ZERO progress → CAUSE_ZERO_TIMEOUT
+  zero_settle:      50  # in-tolerance dwell before TO_ZERO arrival
+  enable_mon:       15  # not-NORMAL dwell while armed → CAUSE_NOT_ENABLED

@@ -1,56 +1,70 @@
 #include "usb_tx.h"
 #include "usbd_cdc_if.h"
+#include "proto_common.h"   /* protocol.h (tele_robot_t, MSG_HEADER_SIZE) for the size guard */
 #include <string.h>
 
-#define RING_SIZE  4096u   /* must be power-of-two */
-#define RING_MASK  (RING_SIZE - 1u)
-#define PKT_MAX    64u     /* USB FS CDC max packet */
+/* Frame-aware slot ring. Each slot holds one whole framed message; the pump hands
+   one whole frame per CDC_Transmit_FS and the USB stack splits it into 64 B packets.
+   One frame per transfer → frames never interleave; a frame queued while a transfer
+   is in progress waits here and goes out as soon as it completes. Producer and
+   consumer are both main-context (ProcessLoop), so no locking is needed.
 
-static uint8_t  ring[RING_SIZE];
-static uint16_t head = 0;   /* write pointer */
-static uint16_t tail = 0;   /* read  pointer */
-static uint8_t  staging[PKT_MAX];
+   This supersedes the old 64 B-per-call drain, whose only reason was to avoid
+   starving multi-packet OUT on the shared OTG-FS core; the USB-RX and SPI resync
+   paths now recover any OUT hiccup, and validation watches the resync/error
+   counters to confirm whole-frame IN does not starve OUT. */
+#define NUM_SLOTS     16u
+#define TX_SLOT_MAX   512u   /* ≥ largest frame = MSG_HEADER_SIZE + sizeof(tele_robot_t) */
+#define USB_FS_MPS    64u    /* bulk IN max packet size */
 
-static uint16_t ring_used(void) { return (head - tail) & RING_MASK; }
-static uint16_t ring_free(void) { return (RING_SIZE - 1u) - ring_used(); }
+/* The largest frame the master ever enqueues is a tele_robot_t (16 B header + 488 B =
+   504 B at PROTO_VERSION 6). If it ever outgrows a slot, raise TX_SLOT_MAX. */
+_Static_assert(MSG_HEADER_SIZE + sizeof(tele_robot_t) <= TX_SLOT_MAX,
+               "tele_robot_t frame must fit one TX slot");
+
+static uint8_t  tx_slot[NUM_SLOTS][TX_SLOT_MAX];
+static uint16_t tx_len[NUM_SLOTS];
+static uint8_t  head = 0;        /* producer: next free slot    */
+static uint8_t  tail = 0;        /* consumer: next slot to send */
+static uint8_t  zlp_pending = 0; /* last frame was a 64 B multiple → owe a ZLP */
+static uint8_t  zlp_dummy[1];    /* a valid (unread) buffer for the 0-length transfer */
+uint32_t        usb_tx_drops = 0;
+
+static inline uint8_t slot_next(uint8_t i) { return (uint8_t)((i + 1u) % NUM_SLOTS); }
 
 void usb_tx_write(const uint8_t *data, uint16_t len)
 {
-    if (len == 0u || data == NULL) return;
-    if (len > ring_free()) return;   /* drop if no space */
-    for (uint16_t i = 0u; i < len; i++) {
-        ring[head & RING_MASK] = data[i];
-        head++;
-    }
+    if (len == 0u || data == NULL || len > TX_SLOT_MAX) return;
+    uint8_t n = slot_next(head);
+    if (n == tail) { usb_tx_drops++; return; }   /* full → drop the WHOLE frame */
+    memcpy(tx_slot[head], data, len);
+    tx_len[head] = len;
+    head = n;
+    usb_tx_pump();   /* kick on enqueue: send now if the endpoint is idle */
 }
 
 /*
- * Drain one USB packet from the ring.
- *
- * Strategy: peek n bytes into staging WITHOUT advancing tail, then call
- * CDC_Transmit_FS.  Only advance tail on USBD_OK so data is never lost on
- * a busy endpoint.  staging remains valid for the DMA until we overwrite it
- * on the next successful call — which can only happen after TxState clears
- * (CDC_Transmit_FS returns USBD_OK again), so there is no aliasing hazard.
+ * Hand one whole frame to the USB stack per call. CDC_Transmit_FS returns USBD_BUSY
+ * while a transfer is in progress (TxState≠0), so queued frames simply wait. A frame
+ * whose length is an exact multiple of the 64 B packet size needs a trailing
+ * zero-length packet to terminate the bulk transfer; we send it before the next frame.
+ * The slot stays valid until its transfer completes (we only advance tail on OK and
+ * only reuse a slot after wrapping the whole ring), so there is no aliasing hazard.
  */
 void usb_tx_pump(void)
 {
-    uint16_t avail = ring_used();
-    if (avail == 0u) return;
-
-    uint16_t n = (avail > PKT_MAX) ? PKT_MAX : avail;
-
-    /* Peek: copy without consuming */
-    uint16_t peek = tail;
-    for (uint16_t i = 0u; i < n; i++) {
-        staging[i] = ring[peek & RING_MASK];
-        peek++;
+    if (zlp_pending) {
+        if (CDC_Transmit_FS(zlp_dummy, 0u) == USBD_OK) zlp_pending = 0u;
+        return;                                  /* BUSY → data transfer still running */
     }
+    if (head == tail) return;                    /* ring empty */
 
-    if (CDC_Transmit_FS(staging, n) == USBD_OK) {
-        tail = peek;   /* consume only on success */
+    uint16_t len = tx_len[tail];
+    if (CDC_Transmit_FS(tx_slot[tail], len) == USBD_OK) {
+        zlp_pending = (uint8_t)((len % USB_FS_MPS) == 0u);
+        tail = slot_next(tail);
     }
-    /* On USBD_BUSY: tail unchanged, data stays in ring for next call */
+    /* USBD_BUSY → leave tail; retry next pump */
 }
 
 /* ── ISR-context response queue (fix 4: restore SPSC on the ring) ────────────

@@ -2,54 +2,49 @@
 #define MOTOR_RUNTIME_H
 
 #include "stm32f4xx_hal.h"
-#include "proto_common.h"
+#include "proto_common.h"   /* protocol.h wire structs + generated motor_config.h */
+#include "cmd_seq_track.h"  /* CmdSeqTrack — reply-window pairing for last_applied_seq */
 #include <stdint.h>
 
-#define MOTOR_WATCHDOG_MS 200u
+/* Loop period, watchdog and timeout constants are GENERATED into motor_config.h
+   (derived from configs/<setup>/system.yaml rates); see proto_common.h. */
 
-/* Per-motor CAN-feedback staleness threshold. If an armed motor's Type-2
-   feedback goes silent this long, trip it to IDLE with CAUSE_CAN_TIMEOUT. Kept
-   below MOTOR_WATCHDOG_MS so "CAN died" (this) and "master link died" (watchdog)
-   stay distinguishable as fault causes. */
-#define MOTOR_CAN_FB_TIMEOUT_MS 100u
-
-/* Control-loop period — single source of truth for slave loop timing.
-   motor_runtime_update() runs at this cadence; goto-zero derives its waypoint
-   dt from MOTOR_LOOP_DT_S so the creep rate stays MOTOR_ZERO_RATE (rad/s)
-   regardless of loop frequency. Keep zeroing slow enough that a human can cut
-   power mid-creep. */
-#define MOTOR_LOOP_PERIOD_MS 5U
-#define MOTOR_LOOP_DT_S      ((float)MOTOR_LOOP_PERIOD_MS * 0.001f)
-
+/* Per-motor runtime state. `state` is a MotorLifecycle (LIFE_*). */
 typedef struct {
     const MotorConfig *cfg;
-    MotorLifecycle     state;
-    float              pos;          /* wrapped to [-pi, pi] (home frame) */
+    uint8_t            state;         /* MotorLifecycle (LIFE_*)                  */
+    float              pos;           /* wrapped to [-pi, pi] (home frame)        */
     float              vel;
     float              tau;
     float              temp;
-    float              hold_pos;      /* home-frame setpoint */
-    float              hold_vel;      /* velocity feedforward for ARMED_HOLD */
-    float              pos_offset;    /* raw - wrapped: the multiple of 2*pi the
-                                         motor adopted at power-up. Added back to
-                                         every command so the motor takes the
-                                         short path to a home-frame target. */
-    uint8_t            motor_fault;   /* 6 compact Type-2 fault bits (u8)         */
-    uint32_t           fault_word;    /* telemetry mirror of the snapshot's       */
+    uint8_t            motor_mode;    /* RS Type-2 status (0 reset/1 cal/2 normal) */
+    float              hold_pos;      /* home-frame setpoint                      */
+    float              hold_vel;      /* velocity feedforward                     */
+    float              cmd_kp;        /* gains for the active armed mode          */
+    float              cmd_kd;
+    float              pos_offset;    /* raw - wrapped (the 2*pi multiple adopted) */
+    uint8_t            motor_fault;   /* packed Type-2 fault bits                 */
+    uint32_t           fault_word;    /* telemetry mirror of the latched 0x3022   */
     uint32_t           last_fb_ms;    /* snapshot's last-Type-2 stamp, for fb_age */
-    uint8_t            cause;         /* MotorFaultCause — LATCHED on trip,
-                                         cleared only on arm/disable              */
-    uint8_t            cmd_flags;     /* SPI_CMDFLAG_* — recomputed every tick     */
-    uint8_t            last_apply_clamp; /* clamp bits from the most recent apply_mit */
-    uint8_t            got_fresh_cmd; /* a fresh MIT arrived since the last tick   */
+    uint32_t           armed_ms;      /* when arm_enable ran — CAN-timeout grace baseline */
+    uint8_t            mon_verdict;   /* latest EnableMonVerdict (set on feedback, read by service) */
+    uint8_t            cause;         /* MotorFaultCause — LATCHED on trip         */
+    uint8_t            last_apply_clamp; /* clamp bits from the most recent apply  */
+    uint8_t            cmd_flags_latched; /* clamp|stale bits assembled each tick for tele */
+    uint8_t            got_fresh_cmd; /* a fresh MIT setpoint arrived this tick    */
+    uint8_t            req_rejected;  /* last mode request was illegal (sticky to next tele) */
+    uint8_t            to_zero_arrived; /* TO_ZERO has settled at home            */
+    uint8_t            saturated;     /* a commanded fixed-point field saturated   */
     uint32_t           watchdog_ms;
-    float              zero_best_abs;    /* MOTOR_ZEROING: smallest |pos| reached so
-                                            far — the progress/stall reference        */
-    uint32_t           zero_progress_ms; /* MOTOR_ZEROING: last tick |pos| improved;
-                                            stall = no progress for MOTOR_ZERO_STALL_MS */
-    uint16_t           zero_settle;   /* MOTOR_ZEROING: consecutive ticks with the
-                                         ramp done AND |pos|<TOL — arrival gate        */
+    float              zero_best_abs;    /* TO_ZERO: smallest |pos| reached          */
+    uint32_t           zero_progress_ms; /* TO_ZERO: last tick |pos| improved        */
+    uint16_t           zero_settle;      /* TO_ZERO: consecutive in-tolerance ticks  */
     uint8_t            alive;
+    /* Enable monitor: fault if an armed motor reports not-running for K frames. */
+    uint8_t            mon_not_enabled;
+    uint32_t           mon_prev_fb_count;
+    uint16_t           target_cmd_seq;   /* host cmd_seq of the current MIT target */
+    CmdSeqTrack        cmd_track;        /* reply-window pairing → last_applied_seq */
 } MotorRuntime;
 
 extern MotorRuntime motors_rt[N_MOTORS];
@@ -57,30 +52,30 @@ extern MotorRuntime motors_rt[N_MOTORS];
 /* Lifecycle */
 void motor_runtime_init(void);
 
-/* Called every MOTOR_LOOP_PERIOD_MS from the CAN poll loop */
-void motor_runtime_update(uint32_t now_ms);
+/* Feedback-driven: call when a fresh CAN Type-2 arrives. Mirrors motor state, steps
+   the enable monitor, and pairs cmd_seq (last_applied) — so telemetry staged right
+   after carries the freshest state + this cycle's confirmation. */
+void motor_runtime_on_feedback(uint32_t now_ms);
 
-/* ARM_HOLD: transition IDLE → ARMED_HOLD. Returns HAL_OK or HAL_ERROR.
-   Clears any latched fault (cause + fault_word), issuing a CAN fault-clear first
-   when the motor's own fault was latched. ARM is thus a fault-clearing action —
-   the host must treat it as deliberate/edge-triggered, never a periodic retry. */
-HAL_StatusTypeDef motor_runtime_arm(uint8_t idx);
+/* Service (send): call once per master cycle. cmd_fresh=1 on a forward service (a fresh
+   ROBOT_CMD was applied this cycle) → drive the commanded lifecycle. cmd_fresh=0 on the
+   fallback tick (no fresh command) → a still-armed motor runs the master-loss ramp
+   (HOLD-grace → DAMPED → IDLE). Also runs the fault detectors on the mirrored state. */
+void motor_runtime_update(uint32_t now_ms, uint8_t cmd_fresh);
 
-/* GOTO_ZERO: enable, creep toward pos=0 with low gains, then lock ARMED_HOLD. */
-HAL_StatusTypeDef motor_runtime_goto_zero(uint8_t idx);
+/* Apply one motor's level-triggered mode request + targets for this cycle (the
+   mode-request state machine). `cmd_seq` is the robot-level command sequence from
+   the SPI header (stamped onto MIT targets for the last_applied echo). Honoured
+   only for CMD_FLAG_VALID slots; an illegal transition leaves the state unchanged
+   and sets the request_rejected telemetry flag. HOLD is the only arm-from-IDLE
+   transition, and it is the ONLY place the motor is enabled. */
+void motor_runtime_apply_cmd(uint8_t idx, const cmd_motor_t *m, uint16_t cmd_seq);
 
-/* DISABLE: transition any state → IDLE (commanded; clears latched fault) */
-HAL_StatusTypeDef motor_runtime_disable(uint8_t idx);
-
-/* Refresh watchdog (called when master sends SPI_CMD_HOLD) */
+/* Refresh the master-link watchdog (any valid SPI frame proves the link alive). */
 void motor_runtime_refresh_watchdog(uint8_t idx);
 
-/* Apply a streamed MIT setpoint while armed, clamping the commanded position
-   to the motor's soft angle limits (soft_min/soft_max). No-op if not armed. */
-void motor_runtime_apply_mit(uint8_t idx, float pos, float vel);
-
-/* Pack one motor's telemetry atom for the SPI TX frame */
-void motor_runtime_pack_tele(MotorState *out, uint8_t idx);
+/* Project one motor's live state into the wire tele_motor_t (fixed-point encoded). */
+void motor_runtime_sample(tele_motor_t *out, uint8_t idx);
 
 /* Aggregate alive bitmask (bit i = motor i alive) */
 uint8_t motor_runtime_motors_alive(void);

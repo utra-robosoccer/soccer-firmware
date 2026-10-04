@@ -24,7 +24,8 @@
 /* USER CODE BEGIN Includes */
 #include "spi_master.h"
 #include "usb_tx.h"
-#include "imu_service.h"
+#include "master_cycle.h"
+#include "imu_service.h"   /* optional BMI088 IMU on I2C1 (merged from the IMU PR) */
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -95,7 +96,23 @@ int main(void)
   SystemClock_Config();
 
   /* USER CODE BEGIN SysInit */
-
+  /* USB soft-disconnect at boot. After an ST-Link reflash/reset the host often keeps
+     the stale CDC-ACM device node, and the OTG OUT endpoint can wedge so multi-packet
+     ROBOT_CMD frames never complete — previously only a power cycle cleared it. Driving
+     USB D+ (PA12) low for ~10 ms makes the host see a disconnect; when MX_USB_DEVICE_Init
+     re-enables the DP pull-up the host re-enumerates fresh, so a reflash alone recovers. */
+  __HAL_RCC_GPIOA_CLK_ENABLE();
+  {
+      GPIO_InitTypeDef dp = {0};
+      dp.Pin   = GPIO_PIN_12;            /* USB_OTG_FS D+ */
+      dp.Mode  = GPIO_MODE_OUTPUT_PP;
+      dp.Pull  = GPIO_NOPULL;
+      dp.Speed = GPIO_SPEED_FREQ_LOW;
+      HAL_GPIO_Init(GPIOA, &dp);
+      HAL_GPIO_WritePin(GPIOA, GPIO_PIN_12, GPIO_PIN_RESET);
+      HAL_Delay(10);
+      HAL_GPIO_DeInit(GPIOA, GPIO_PIN_12);   /* release; USB init reclaims PA12 as AF */
+  }
   /* USER CODE END SysInit */
 
   /* Initialize all configured peripherals */
@@ -107,13 +124,17 @@ int main(void)
   MX_USB_DEVICE_Init();
   /* USER CODE BEGIN 2 */
 
-  /* Keep the motor master operational if the optional IMU is unavailable. */
+  /* Optional BMI088 IMU on I2C1. Runs its blocking init (soft-reset + ~420 ms of
+     HAL_Delay) here, BEFORE the TIM2 cycle starts, so it never steals cycle time;
+     if the IMU is absent the init fails fast (I2C timeouts) and the master runs on. */
   (void)ImuService_Init(&hi2c1);
   MotorMaster_Init(&hspi1, &huart4);
-  usb_printf("USB Test/r/n");
   HAL_GPIO_WritePin(GREEN_LED_GPIO_Port, GREEN_LED_Pin, GPIO_PIN_SET);
   HAL_Delay(3000);
   HAL_GPIO_WritePin(GREEN_LED_GPIO_Port, GREEN_LED_Pin, GPIO_PIN_RESET);
+
+  /* Drive the 200 Hz cycle from TIM2 (period from the generated MASTER_POLL_HZ). */
+  master_cycle_init(1000000u / MASTER_POLL_HZ);
 
 
 
@@ -225,7 +246,26 @@ static void MX_SPI1_Init(void)
   /* USER CODE END SPI1_Init 0 */
 
   /* USER CODE BEGIN SPI1_Init 1 */
-
+  /* Map the generated MASTER_SPI_PRESCALER_DIV (system_config.h) → HAL enum. */
+#if   MASTER_SPI_PRESCALER_DIV == 2
+#define MASTER_SPI_BAUD SPI_BAUDRATEPRESCALER_2
+#elif MASTER_SPI_PRESCALER_DIV == 4
+#define MASTER_SPI_BAUD SPI_BAUDRATEPRESCALER_4
+#elif MASTER_SPI_PRESCALER_DIV == 8
+#define MASTER_SPI_BAUD SPI_BAUDRATEPRESCALER_8
+#elif MASTER_SPI_PRESCALER_DIV == 16
+#define MASTER_SPI_BAUD SPI_BAUDRATEPRESCALER_16
+#elif MASTER_SPI_PRESCALER_DIV == 32
+#define MASTER_SPI_BAUD SPI_BAUDRATEPRESCALER_32
+#elif MASTER_SPI_PRESCALER_DIV == 64
+#define MASTER_SPI_BAUD SPI_BAUDRATEPRESCALER_64
+#elif MASTER_SPI_PRESCALER_DIV == 128
+#define MASTER_SPI_BAUD SPI_BAUDRATEPRESCALER_128
+#elif MASTER_SPI_PRESCALER_DIV == 256
+#define MASTER_SPI_BAUD SPI_BAUDRATEPRESCALER_256
+#else
+#error "MASTER_SPI_PRESCALER_DIV must be a power of two in [2,256]"
+#endif
   /* USER CODE END SPI1_Init 1 */
   /* SPI1 parameter configuration*/
   hspi1.Instance = SPI1;
@@ -235,7 +275,7 @@ static void MX_SPI1_Init(void)
   hspi1.Init.CLKPolarity = SPI_POLARITY_LOW;
   hspi1.Init.CLKPhase = SPI_PHASE_1EDGE;
   hspi1.Init.NSS = SPI_NSS_SOFT;
-  hspi1.Init.BaudRatePrescaler = SPI_BAUDRATEPRESCALER_64;
+  hspi1.Init.BaudRatePrescaler = MASTER_SPI_BAUD;
   hspi1.Init.FirstBit = SPI_FIRSTBIT_MSB;
   hspi1.Init.TIMode = SPI_TIMODE_DISABLE;
   hspi1.Init.CRCCalculation = SPI_CRCCALCULATION_DISABLE;

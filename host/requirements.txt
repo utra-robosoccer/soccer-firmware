@@ -1,0 +1,3 @@
+pyserial>=3.5      # serial link to the master (apps/)
+rich>=13.0         # dashboard TUI (apps/dashboard.py)
+matplotlib>=3.5    # log plotting (analysis/plot_motor_state.py)

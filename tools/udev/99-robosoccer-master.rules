@@ -1,0 +1,16 @@
+# Robosoccer master USB-CDC "Virtual ComPort" (STM32 VCP, VID:PID 0483:5740).
+#
+#  - ID_MM_DEVICE_IGNORE=1: stop ModemManager probing it. The VCP enumerates as
+#    CDC-ACM subclass "Abstract (modem)", so MM grabs /dev/ttyACM* for ~1-2 s on
+#    connect and the first host commands race its AT probe. Ignoring it frees the
+#    port the instant it enumerates (removes the ~1 s startup delay).
+#  - SYMLINK robosoccer-master: a stable name regardless of ttyACM enumeration
+#    order (the two ST-Link VCPs, 0483:374b, share the ttyACM pool and shift the
+#    master's number). Open /dev/robosoccer-master instead of guessing ttyACMn.
+#
+# Install:
+#   sudo cp tools/udev/99-robosoccer-master.rules /etc/udev/rules.d/
+#   sudo udevadm control --reload-rules && sudo udevadm trigger --subsystem-match=tty
+# (or replug / reboot the master). Verify:
+#   udevadm info -q property -n /dev/robosoccer-master | grep -E 'ID_MM_DEVICE_IGNORE|DEVLINKS'
+SUBSYSTEM=="tty", ATTRS{idVendor}=="0483", ATTRS{idProduct}=="5740", ENV{ID_MM_DEVICE_IGNORE}="1", SYMLINK+="robosoccer-master"

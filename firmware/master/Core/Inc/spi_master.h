@@ -9,27 +9,14 @@
 #include <stdio.h>
 #include <stdint.h>
 
-#define SPI_CMD_NOP       0x00
-#define SPI_CMD_ARM       0x01  /* bits[7:4] = motor index */
-#define SPI_CMD_HOLD      0x02
-#define SPI_CMD_DISARM    0x03
-#define SPI_CMD_GOTO_ZERO 0x04  /* bits[7:4] = motor index */
-#define SPI_CMD_MIT       0x05  /* pass-through MIT command, data in bytes [1..] */
-
-#define SPI_CMD_ARM_IDX(idx)       (SPI_CMD_ARM       | ((uint8_t)(idx) << 4u))
-#define SPI_CMD_GOTO_ZERO_IDX(idx) (SPI_CMD_GOTO_ZERO | ((uint8_t)(idx) << 4u))
+/* SPI opcodes (SPI_OP_*) and the fixed frame-size macros (one chain per slave)
+   are defined once in the shared common/include/protocol.h (via proto_common.h)
+   so master and slave cannot drift. The full-duplex transfer is SPI_XFER_SIZE. */
 
 /* NUM_SLAVES, MAX_MOTORS_PER_SLAVE come from system_config.h (via proto_common.h). */
 #define NUM_SLV               NUM_SLAVES
 #define BYTES_PER_MOTOR       5
 #define USB_BYTES_PER_MOTOR  sizeof(motor_cmd_t)
-
-/* One full-duplex transfer per slave carries the CRC-framed telemetry frame
-   (protocol.h SPI_TELE_FRAME_SIZE) in the RX direction and the command frame in
-   the TX prefix. Per-slave sizes differ; buffers are sized for the widest slave
-   and the per-slave length is computed at runtime from slave_motor_counts[]. */
-#define SPI_MAX_PKT_SIZE SPI_TELE_FRAME_SIZE(MAX_MOTORS_PER_SLAVE)
-#define SPI_PKT_SIZE(n)  SPI_TELE_FRAME_SIZE(n)
 
 typedef enum {
     DEV1 = 0,
@@ -72,11 +59,15 @@ void MotorMaster_ProcessLoop(void);
 void MotorMaster_ParseRxBuffer(void);
 void MotorMaster_FormatTxBuffer(void);
 
-void MotorMaster_SetArmed(uint8_t armed);
-void MotorMaster_HandleControlReq(const ControlReq *req, uint16_t req_seq);
-void MotorMaster_SetMitCmd(uint8_t slave_id, uint8_t idx, float pos, float vel,
-                            float kp, float kd, float tau_ff);
+/* Split the host's cmd_robot_t into per-slave command mailboxes (ISR context). */
+void MotorMaster_HandleRobotCmd(const cmd_robot_t *cmd);
+
+/* USB RX split: the CDC ISR copies each packet into the RX ring (ISR-safe,
+   producer); the main loop drains + resync-scans + dispatches (consumer). */
+void MotorMaster_UsbRxFromISR(const uint8_t *buf, uint16_t len);
+void MotorMaster_ProcessUsbRx(void);
 
 extern uint32_t master_link_errors;
 extern uint32_t master_rx_frames;
+extern uint32_t master_proto_ver_mismatch;  /* host frames rejected on PROTO_VERSION */
 #endif /* INC_SPI_MASTER_H_ */

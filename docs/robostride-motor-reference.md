@@ -113,6 +113,27 @@ bits[7:0]   = target motor CAN_ID
 Default host/master CAN_ID = `0xFD`. MIT payload and feedback are **big-endian**
 16-bit fields (high byte first). Each motor has its own CAN_ID (settable).
 
+### Bus limits — classic CAN only, bandwidth ceiling
+
+- **No CAN FD, no CAN XL.** RobStride is **classic CAN 2.0** — fixed 1 Mbps, max 8-byte
+  payload, no FD data-phase bit-rate switch, no 64-byte frames. The whole protocol is built
+  around 8-byte frames. (The host STM32F446 uses the classic **bxCAN** peripheral, which could
+  not do FD either.) The only link-speed knob is the Type-23 baud change (1M/500K/250K/125K),
+  all classic rates.
+- **Bandwidth caps the control rate.** A closed MIT loop costs **2 frames per motor per tick**
+  (Type-1 command out + Type-2 feedback back). A classic extended 8-byte frame @ 1 Mbps is
+  ~131 bits min / ~160 bits worst-case (bit-stuffing) + 3-bit IFS ≈ **~140 µs typical**.
+  Ceiling ≈ `1 / (2·N·140 µs)` at 100 % bus; halve for a safe (~65–70 %) target:
+
+  | motors (N) | frames/tick | bus/tick (~140 µs) | ceiling @100 % | safe target |
+  | ---: | ---: | ---: | ---: | ---: |
+  | 1 | 2 | ~0.28 ms | ~3.5 kHz | ~1.5–2 kHz |
+  | 6 | 12 | ~1.68 ms | ~520–600 Hz | **~300–400 Hz** |
+
+  With `AutoRetransmission` off (one-shot CAN, this firmware), lost-arbitration frames are not
+  retried, so keep real headroom at high motor counts. See `architecture.md` §13.7 for the full
+  per-stage derivation and the SPI/master-poll interaction.
+
 ### 3.1 Complete communication-type table
 
 | Type (hex) | Name | Direction | Purpose |

@@ -1,0 +1,122 @@
+# Motor chain configuration for SLAVE-1 — RIGHT LEG (robot_legs).
+#
+# Same joint layout as the left leg (slave0), but CAN ids continue 6..10 so the id is
+# globally unique (left leg 1–5, right leg 6–10) — the can_id alone identifies the joint.
+# Each slave still has its own bus; ids need not restart at 1.
+#   can 6   RS03  hip_pitch   max_tau 30  (rated 20, peak 60)
+#   can 7   RS06  hip_roll    max_tau 18  (rated 11, peak 36)
+#   can 8   RS02  hip_yaw     max_tau 10  (rated  6, peak 17)
+#   can 9   RS03  knee        max_tau 30  (rated 20, peak 60)
+#   can 10  RS00  ankle       max_tau  8  (rated  5, peak 14)
+# max_tau is the torque-trip (exceed → IDLE); ≈1.5× rated. HALVE for cautious
+# unloaded bench bring-up. soft limits are generic ±0.79 placeholders — tune per joint.
+#
+# Generated from this file:
+#     python3 scripts/gen_motor_config.py --slave  slave1
+#     python3 scripts/gen_motor_config.py --system          # all slaves of active setup
+# Edit here, regenerate, rebuild. Do not hand-edit the generated files.
+#
+# Kp/Kd CAN-encode ranges are PER-MODEL in the `models:` block below (RS00/02 use
+# 0–500 / 0–5, RS03/06 use 0–5000 / 0–100) and flow through MotorCanRange into the
+# slave's can_mit_control_set — no longer a hardcoded global.
+
+slave: slave1
+
+shared_ranges:
+  p_min: -12.57   # rad  (-4*pi)
+  p_max:  12.57   # rad  (+4*pi)
+  kp_min:  0.0
+  kp_max:  500.0
+  kd_min:  0.0
+  kd_max:  5.0
+
+models:
+  RS00:
+    v_min: -33.0
+    v_max:  33.0
+    t_min: -14.0
+    t_max:  14.0
+    kp_min:  0.0
+    kp_max:  500.0
+    kd_min:  0.0
+    kd_max:  5.0
+  RS02:
+    v_min: -44.0
+    v_max:  44.0
+    t_min: -17.0
+    t_max:  17.0
+    kp_min:  0.0
+    kp_max:  500.0
+    kd_min:  0.0
+    kd_max:  5.0
+  RS03:
+    v_min: -20.0
+    v_max:  20.0
+    t_min: -60.0
+    t_max:  60.0
+    kp_min:  0.0
+    kp_max:  5000.0
+    kd_min:  0.0
+    kd_max:  100.0
+  RS06:
+    v_min: -50.0
+    v_max:  50.0
+    t_min: -36.0
+    t_max:  36.0
+    kp_min:  0.0
+    kp_max:  5000.0
+    kd_min:  0.0
+    kd_max:  100.0
+
+# Right leg.
+motors:
+  - idx: 0
+    can_id: 6
+    model: RS03
+    joint_name: R_hip_pitch
+    soft_min: -0.79
+    soft_max:  0.79
+    max_vel:   10.0
+    max_tau:   30.0
+    default_kp: 15.0
+    default_kd:  1.0
+  - idx: 1
+    can_id: 7
+    model: RS06
+    joint_name: R_hip_roll
+    soft_min: -0.79
+    soft_max:  0.79
+    max_vel:   10.0
+    max_tau:   18.0
+    default_kp: 15.0
+    default_kd:  1.0
+  - idx: 2
+    can_id: 8
+    model: RS02
+    joint_name: R_hip_yaw
+    soft_min: -0.79
+    soft_max:  0.79
+    max_vel:   10.0
+    max_tau:   10.0
+    default_kp: 15.0
+    default_kd:  1.0
+  - idx: 3
+    can_id: 9
+    model: RS03
+    joint_name: R_knee
+    soft_min: -0.79
+    soft_max:  0.79
+    max_vel:   10.0
+    max_tau:   30.0
+    default_kp: 15.0
+    default_kd:  1.0
+  - idx: 4
+    can_id: 10
+    model: RS00
+    joint_name: R_ankle
+    soft_min: -0.79
+    soft_max:  0.79
+    max_vel:   10.0
+    max_tau:   8.0
+    default_kp: 15.0
+    default_kd:  1.0

@@ -11,15 +11,15 @@ own motor chains. Which one is live is selected in ONE place:
 
 ```
 configs/
-  active            <- one line: the active setup name (e.g. `bench-1-chain`)
-  bench-1-chain/
+  active            <- one line: the active setup name (e.g. `1s_5m`)
+  1s_5m/
     slave0.yaml
-  bench-2-chain/
-    slave0.yaml
-    slave1.yaml
-  robot/
+  2s_10m/
     slave0.yaml
     slave1.yaml
+  robot_legs/
+    slave0.yaml   (left leg)
+    slave1.yaml   (right leg)
 ```
 
 `configs/active` names a subdirectory. Switch setups by editing that one line:
@@ -58,7 +58,7 @@ python3 scripts/gen_motor_config.py --system        # just the master + host fil
 ```
 
 An explicit path still works and ignores the active switch
-(`--slave configs/robot/slave0.yaml`). Generated files (each carries an
+(`--slave configs/robot_legs/slave0.yaml`). Generated files (each carries an
 `AUTO-GENERATED — DO NOT EDIT` banner — edit the YAML, not these):
 
 - `firmware/common/include/motor_config.h` — per-slave header for the slave and

@@ -1,6 +1,10 @@
 #include "motor_runtime.h"
 #include "motor_chain.h"
 #include "robostride.h"
+#include "enable_monitor.h"
+#include "mode_sm.h"
+#include "../../../../common/include/master_watchdog.h"   /* master-loss ramp (task 6) */
+#include "../../../../common/include/soft_limit.h"         /* one-sided soft-limit clamp */
 #include <math.h>
 #include <string.h>
 
@@ -10,40 +14,41 @@ MotorRuntime motors_rt[N_MOTORS];
 
 /* ── helpers ─────────────────────────────────────────────────────────────── */
 
-/* Wrap an angle into [-pi, pi]. The RobStride reports its single-turn absolute
-   angle after power-up, so a slightly-negative joint can come back reading
-   ~+2pi. Joints are constrained to within +-pi of home, so the nearest
-   representative is unambiguous. */
+/* Wrap an angle into [-pi, pi]. */
 static float wrap_pi(float a)
 {
     return a - TWO_PI * roundf(a / TWO_PI);
 }
 
-/* Send an MIT command whose position is given in the home frame ([-pi, pi]).
-   pos_offset (the 2*pi multiple the motor adopted at power-up) is added back so
-   the motor's controller drives the short path to the home-frame target instead
-   of unwinding a full turn. */
+/* Send an MIT command whose position is given in the home frame. pos_offset (the
+   2*pi multiple the motor adopted at power-up) is added back so the controller
+   drives the short path. Opens the cmd_seq reply window for this motor. */
 static void send_mit(uint8_t idx, float torque, float home_pos, float vel,
                      float kp, float kd)
 {
     can_mit_control_set(motor_configs[idx].can_id, torque,
                         home_pos + motors_rt[idx].pos_offset, vel, kp, kd);
+    cmd_seq_on_mit_frame(&motors_rt[idx].cmd_track, motors_rt[idx].target_cmd_seq);
 }
 
-/* Drop a single motor's output and return it to IDLE. Disabling an already-idle
-   motor is harmless, so this is safe to call from any state. */
-static void idle_motor(uint8_t idx)
+/* Trip a motor to a LATCHED fault: drop CAN output, LIFE_FAULT, latch the cause.
+   Clearing requires an IDLE request (then re-arm) or the fault_reset flag. */
+static void fault_to(uint8_t idx, uint8_t cause)
 {
     can_disable_motor(motor_configs[idx].can_id, CAN_MASTER_ID);
-    motors_rt[idx].state    = MOTOR_IDLE;
+    motors_rt[idx].state    = LIFE_FAULT;
     motors_rt[idx].hold_vel = 0.0f;
+    motors_rt[idx].cause    = cause;
 }
 
-static uint16_t f_to_u16(float x, float lo, float hi)
+/* Reset the enable monitor: clear the not-NORMAL count, seed the fresh-frame
+   reference to the motor's current fb_count. Called on each HOLD-arm. */
+static void enable_monitor_reset(uint8_t idx)
 {
-    if (x < lo) x = lo;
-    if (x > hi) x = hi;
-    return (uint16_t)((x - lo) * 65535.0f / (hi - lo));
+    motor_t s;
+    motor_get_snapshot(idx, &s);
+    motors_rt[idx].mon_not_enabled   = 0u;
+    motors_rt[idx].mon_prev_fb_count = s.fb_count;
 }
 
 static uint8_t pack_faults(const motor_t *m)
@@ -58,11 +63,27 @@ static uint8_t pack_faults(const motor_t *m)
     return f;
 }
 
-/* Discover one motor: ping and wait up to 200 ms for response */
+/* Soft-limit clamp on a commanded (pos, vel). One-sided about the shaft's ACTUAL position
+   (soft_clamp_pos): a joint parked outside [lo,hi] can be held or driven back, never further
+   out — so arming/commanding it never fights the shaft into an overtorque. Returns clamp
+   flag bits; also cancels feedforward velocity driving further out. */
+static uint8_t apply_soft_clamp(const MotorRuntime *r, float *pos, float *vel)
+{
+    float before = *pos;
+    uint8_t clamp = 0u;
+    if (soft_clamp_pos(pos, r->pos, r->cfg->soft_min, r->cfg->soft_max)) {
+        clamp |= TELE_FLAG_CLAMPED_POS;
+        if (before > *pos && *vel > 0.0f)      { *vel = 0.0f; clamp |= TELE_FLAG_CLAMPED_TAU; }
+        else if (before < *pos && *vel < 0.0f) { *vel = 0.0f; clamp |= TELE_FLAG_CLAMPED_TAU; }
+    }
+    return clamp;
+}
+
+/* Discover one motor: ping and wait up to 300 ms for a response. */
 static void discover(uint8_t idx)
 {
     uint8_t cid = motor_configs[idx].can_id;
-    motors_rt[idx].state = MOTOR_DISCOVERING;
+    motors_rt[idx].state = LIFE_DISCOVERING;
 
     for (uint8_t attempt = 0; attempt < 3u; attempt++) {
         can_rx_flag = 0;
@@ -74,15 +95,68 @@ static void discover(uint8_t idx)
         while (can_rx_flag == 0 && (HAL_GetTick() - t) < 300u) {}
         if (can_rx_flag) {
             motors_rt[idx].alive = 1u;
-            motors_rt[idx].state = MOTOR_IDLE;
+            motors_rt[idx].state = LIFE_IDLE;
             HAL_Delay(20u);
             return;
         }
-        HAL_Delay(50u);  /* brief pause before retry */
+        HAL_Delay(50u);
     }
-
     motors_rt[idx].alive = 0u;
-    motors_rt[idx].state = MOTOR_FAULT;
+    motors_rt[idx].state = LIFE_FAULT;
+    motors_rt[idx].cause = CAUSE_NONE;
+}
+
+/* Run the CAN enable handshake and capture the home-frame hold position. The ONLY
+   place the motor is enabled. Never writes mechanical zero. The caller (apply_cmd)
+   has already cleared the wound guard via the state machine; this just enables. */
+static void arm_enable(uint8_t idx)
+{
+    MotorRuntime *r = &motors_rt[idx];
+    uint8_t cid = motor_configs[idx].can_id;
+
+    motor_t snap;
+    motor_get_snapshot(idx, &snap);
+    float wrapped = wrap_pi(snap.pos);
+
+    /* Clear a latched motor fault first (the RS refuses enable otherwise). */
+    if (snap.fault_word != 0u) {
+        can_clear_fault(cid, CAN_MASTER_ID);
+        HAL_Delay(5u);
+    }
+    motor_set_fault_word(idx, 0u);
+    r->fault_word = 0u;
+    r->cause      = CAUSE_NONE;
+
+    r->pos        = wrapped;
+    r->pos_offset = snap.pos - wrapped;
+    r->hold_pos   = wrapped;
+    r->hold_vel   = 0.0f;
+    r->cmd_kp     = r->cfg->default_kp;
+    r->cmd_kd     = r->cfg->default_kd;
+
+    /* Enable handshake: mode + enable, each with an ACK wait + 10 ms settle. */
+    uint32_t ts = HAL_GetTick();
+    can_rx_flag = 0;
+    can_change_motor_mode(cid, CAN_MASTER_ID, MIT_MODE);
+    while (can_rx_flag == 0 && (HAL_GetTick() - ts) < 10u) {}
+    HAL_Delay(10u);
+
+    ts = HAL_GetTick();
+    can_rx_flag = 0;
+    can_enable_motor(cid, CAN_MASTER_ID);
+    while (can_rx_flag == 0 && (HAL_GetTick() - ts) < 10u) {}
+    HAL_Delay(10u);
+
+    send_mit(idx, 0.0f, r->hold_pos, 0.0f, r->cmd_kp, r->cmd_kd);
+
+    /* cmd_seq re-baseline (target_cmd_seq = NONE, last_applied → 0) is done centrally in
+       apply_cmd from ModeDecision.reset_cmd_seq, which covers this arm plus re-hold /
+       goto-zero / disable. */
+    enable_monitor_reset(idx);
+    r->to_zero_arrived = 0u;
+    r->watchdog_ms = HAL_GetTick();
+    r->armed_ms    = HAL_GetTick();   /* CAN-timeout grace: a just-disabled motor has a
+                                         stale last_fb; don't trip until it can reply. */
 }
 
 /* ── public API ──────────────────────────────────────────────────────────── */
@@ -92,22 +166,109 @@ void motor_runtime_init(void)
     memset(motors_rt, 0, sizeof(motors_rt));
     for (uint8_t i = 0; i < N_MOTORS; i++) {
         motors_rt[i].cfg   = &motor_configs[i];
-        motors_rt[i].state = MOTOR_BOOT;
+        motors_rt[i].state = LIFE_BOOT;
     }
     for (uint8_t i = 0; i < N_MOTORS; i++) {
         discover(i);
     }
 }
 
-void motor_runtime_update(uint32_t now_ms)
+void motor_runtime_apply_cmd(uint8_t idx, const cmd_motor_t *m, uint16_t cmd_seq)
 {
-    for (uint8_t i = 0; i < N_MOTORS; i++) {
-        uint8_t cid = motor_configs[i].can_id;
+    if (idx >= N_MOTORS || m == NULL) return;
+    if (!(m->flags & CMD_FLAG_VALID)) return;   /* no request for this slot */
 
-        /* ONE coherent snapshot per motor per tick — feeds both the control logic
-           below AND the telemetry mirror cached into motors_rt[], so what we
-           report is exactly the state the logic acted on. pack_tele() then reads
-           only motors_rt[] (no second read of the live motors[]). */
+    MotorRuntime *r = &motors_rt[idx];
+    uint8_t cid = motor_configs[idx].can_id;
+
+    /* Wound guard is consulted only on an IDLE→HOLD arm; compute it from a fresh
+       snapshot in that case so the pure SM can decide. */
+    uint8_t wound = 0u;
+    if (m->mode_req == REQ_HOLD && r->state == LIFE_IDLE) {
+        if (!r->alive) { r->req_rejected = 1u; return; }
+        motor_t snap;
+        motor_get_snapshot(idx, &snap);
+        float off = snap.pos - wrap_pi(snap.pos);
+        wound = (off > MOTOR_WOUND_OFFSET_MAX || off < -MOTOR_WOUND_OFFSET_MAX) ? 1u : 0u;
+    }
+
+    ModeDecision d = mode_sm_step(r->state, m->mode_req,
+                                  (uint8_t)((m->flags & CMD_FLAG_VALID) != 0u),
+                                  (uint8_t)((m->flags & CMD_FLAG_FAULT_RESET) != 0u),
+                                  wound);
+
+    r->req_rejected = d.rejected;
+
+    if (d.clear_fault || d.do_disable) {
+        motor_set_fault_word(idx, 0u);
+        r->fault_word = 0u;
+        r->cause      = CAUSE_NONE;
+    }
+    if (d.set_cause_wound) r->cause = CAUSE_WOUND;
+    if (d.do_disable) {
+        can_disable_motor(cid, CAN_MASTER_ID);
+        r->hold_vel        = 0.0f;
+        r->to_zero_arrived = 0u;
+    }
+    if (d.do_arm) {
+        arm_enable(idx);                 /* enable + capture (handshake, once) */
+    }
+    if (d.capture_hold) {                /* re-hold without re-enabling */
+        r->hold_pos = r->pos;
+        r->hold_vel = 0.0f;
+        r->cmd_kp   = r->cfg->default_kp;
+        r->cmd_kd   = r->cfg->default_kd;
+        r->to_zero_arrived = 0u;
+    }
+    if (d.enter_to_zero) {               /* init creep on entry */
+        r->hold_pos         = r->pos;
+        r->hold_vel         = 0.0f;
+        r->zero_best_abs    = fabsf(r->pos);
+        r->zero_progress_ms = HAL_GetTick();
+        r->zero_settle      = 0u;
+        r->to_zero_arrived  = 0u;
+    }
+    /* Central cmd_seq re-baseline: any arm / re-hold / goto-zero / disable starts the next
+       command stream from last_applied_seq = 0 (fixes a stale seq surviving across a
+       re-hold of an already-armed motor). MIT/DAMPED below then set the live target. */
+    if (d.reset_cmd_seq) {
+        cmd_seq_reset(&r->cmd_track);
+        r->target_cmd_seq = CMD_SEQ_NONE;
+    }
+
+    uint8_t use_cfg = (m->flags & CMD_FLAG_USE_CONFIG_GAINS) != 0u;
+    if (d.next_state == LIFE_MIT) {
+        r->hold_pos = proto_i16_to_f(m->pos, PROTO_POS_SCALE);
+        r->hold_vel = proto_i16_to_f(m->vel, PROTO_VEL_SCALE);
+        r->last_apply_clamp = apply_soft_clamp(r, &r->hold_pos, &r->hold_vel);
+        r->cmd_kp = use_cfg ? r->cfg->default_kp : proto_u16_to_f(m->kp, PROTO_KP_SCALE);
+        r->cmd_kd = use_cfg ? r->cfg->default_kd : proto_u16_to_f(m->kd, PROTO_KD_SCALE);
+        r->target_cmd_seq  = cmd_seq;
+        r->got_fresh_cmd   = 1u;
+        r->to_zero_arrived = 0u;
+    } else if (d.next_state == LIFE_DAMPED) {
+        r->cmd_kp   = 0.0f;              /* backdrive-safe: no position hold */
+        r->cmd_kd   = use_cfg ? r->cfg->default_kd : proto_u16_to_f(m->kd, PROTO_KD_SCALE);
+        r->hold_vel = 0.0f;
+        r->to_zero_arrived = 0u;
+    }
+
+    r->state = d.next_state;
+}
+
+/* Wrap/stale-safe elapsed-time test. If `t` was stamped after `now` was captured (e.g. a
+   timestamp set inside the just-run ~25 ms arm handshake), the signed difference is
+   negative → "not yet elapsed", instead of a huge unsigned value that would false-trip a
+   timeout. Thresholds are small ms, far from the ±2^31 wrap. */
+static inline int32_t ms_since(uint32_t now, uint32_t t) { return (int32_t)(now - t); }
+
+/* Feedback-driven: mirror the latest Type-2 into motors_rt, step the enable monitor,
+   and pair cmd_seq (last_applied). Run when fresh feedback arrives, BEFORE telemetry is
+   staged, so the staged frame carries the freshest state + this cycle's confirmation. */
+void motor_runtime_on_feedback(uint32_t now_ms)
+{
+    (void)now_ms;
+    for (uint8_t i = 0; i < N_MOTORS; i++) {
         motor_t snap;
         motor_get_snapshot(i, &snap);
 
@@ -117,165 +278,138 @@ void motor_runtime_update(uint32_t now_ms)
         motors_rt[i].vel         = snap.rpm;
         motors_rt[i].tau         = snap.torq;
         motors_rt[i].temp        = snap.temperature;
+        motors_rt[i].motor_mode  = (uint8_t)snap.status;
         motors_rt[i].motor_fault = pack_faults(&snap);
-        motors_rt[i].fault_word  = snap.fault_word;   /* telemetry mirror */
-        motors_rt[i].last_fb_ms  = snap.last_fb_ms;   /* fb_age basis      */
+        motors_rt[i].fault_word  = snap.fault_word;
+        motors_rt[i].last_fb_ms  = snap.last_fb_ms;
 
-        /* ── Fault detection while driving (hold, live MIT, or homing). Any trip
-           idles the motor and LATCHES a cause (cleared only on re-arm/disable).
-           Checked in priority order; the first to fire idles the motor, so the
-           chained else-ifs then see IDLE and skip.
+        uint8_t driving = (motors_rt[i].state == LIFE_HOLD ||
+                           motors_rt[i].state == LIFE_MIT  ||
+                           motors_rt[i].state == LIFE_DAMPED ||
+                           motors_rt[i].state == LIFE_TO_ZERO);
 
-           CAN_TIMEOUT first: if this motor's feedback is stale, its tau and fault
-           bits are stale too and must not be trusted. OVERTORQUE guards ZEROING
-           as well — the creep waypoint marches toward 0 even when the joint is
-           blocked, so a jam would otherwise build torque unbounded; free creep
-           peaks well under max_tau so this does not false-trip a normal homing.
-           MOTOR_FAULT means the RS motor's own protection fired (it isn't running
-           MIT anyway) — idle, latch the cause, and one-shot read 0x3022 for the
-           detail (ISR latches the reply into the live fault_word). All are
-           one-shot: once idled the motor is no longer "driving", so no re-fire. */
-        uint8_t driving = (motors_rt[i].state == MOTOR_ARMED_HOLD ||
-                           motors_rt[i].state == MOTOR_ARMED_MIT  ||
-                           motors_rt[i].state == MOTOR_ZEROING);
+        uint8_t mon_fresh = (snap.fb_count != motors_rt[i].mon_prev_fb_count);
+        motors_rt[i].mon_verdict = (uint8_t)enable_monitor_step(
+            driving, mon_fresh, (uint8_t)(snap.status == RS_MODE_NORMAL),
+            MOTOR_ENABLE_MON_K, &motors_rt[i].mon_not_enabled);
+        if (mon_fresh) {
+            motors_rt[i].mon_prev_fb_count = snap.fb_count;
+            cmd_seq_on_reply(&motors_rt[i].cmd_track);   /* pairs this reply with its MIT */
+        }
+    }
+}
+
+void motor_runtime_update(uint32_t now_ms, uint8_t cmd_fresh)
+{
+    for (uint8_t i = 0; i < N_MOTORS; i++) {
+        uint8_t cid = motor_configs[i].can_id;
+
+        uint8_t driving = (motors_rt[i].state == LIFE_HOLD ||
+                           motors_rt[i].state == LIFE_MIT  ||
+                           motors_rt[i].state == LIFE_DAMPED ||
+                           motors_rt[i].state == LIFE_TO_ZERO);
+
+        /* Fault detection on the mirrored feedback state (priority; first trip latches).
+           CAN-timeout is time-based (feedback absence) so it belongs here in the per-cycle
+           service, not the feedback path; the armed_ms grace covers the first cycles after
+           an arm (a just-disabled motor's last_fb is stale). */
         if (driving &&
-            (uint32_t)(now_ms - snap.last_fb_ms) >= MOTOR_CAN_FB_TIMEOUT_MS) {
-            idle_motor(i);
-            motors_rt[i].cause = CAUSE_CAN_TIMEOUT;
+            ms_since(now_ms, motors_rt[i].last_fb_ms) >= (int32_t)MOTOR_CAN_FB_TIMEOUT_MS &&
+            ms_since(now_ms, motors_rt[i].armed_ms)   >= (int32_t)MOTOR_CAN_FB_TIMEOUT_MS) {
+            fault_to(i, CAUSE_CAN_TIMEOUT);
         } else if (driving && motors_rt[i].motor_fault != 0u) {
-            idle_motor(i);
-            motors_rt[i].cause = CAUSE_MOTOR_FAULT;
-            motor_set_fault_word(i, 0xFFFFFFFFu);   /* sentinel in live motors[] */
-            motors_rt[i].fault_word = 0xFFFFFFFFu;   /* mirror it this tick too   */
+            fault_to(i, CAUSE_MOTOR_FAULT);
+            motor_set_fault_word(i, 0xFFFFFFFFu);
+            motors_rt[i].fault_word = 0xFFFFFFFFu;
             can_read_single_param(cid, CAN_MASTER_ID, 0x3022u);
+        } else if (driving && motors_rt[i].mon_verdict == ENABLE_MON_FAULT_NOT_ENABLED) {
+            fault_to(i, CAUSE_NOT_ENABLED);
         } else if (driving &&
                    fabsf(motors_rt[i].tau) > motors_rt[i].cfg->max_tau) {
-            idle_motor(i);
-            motors_rt[i].cause = CAUSE_OVERTORQUE;
+            fault_to(i, CAUSE_OVERTORQUE);
         }
 
-        switch (motors_rt[i].state) {
-            case MOTOR_IDLE:
+        /* Master-loss ramp (task 6): a cycle with NO fresh ROBOT_CMD (the fallback tick)
+           means SPI exchanges stopped — master reset/dead. A still-armed joint ramps down
+           by time since the last command (watchdog_ms, refreshed ONLY by ROBOT_CMD): hold
+           the position with v_des/tau_ff zeroed for the grace, then DAMPED (config Kd),
+           then IDLE. Recompute driving first — a fault above may have cleared it. */
+        driving = (motors_rt[i].state == LIFE_HOLD || motors_rt[i].state == LIFE_MIT ||
+                   motors_rt[i].state == LIFE_DAMPED || motors_rt[i].state == LIFE_TO_ZERO);
+        if (driving && !cmd_fresh) {
+            uint32_t since = (uint32_t)ms_since(now_ms, motors_rt[i].watchdog_ms);
+            MasterLossPhase ph = master_loss_phase(since, MASTER_LOST_GRACE_MS,
+                                                   MASTER_LOST_DAMP_MS);
+            if (ph == MASTER_HOLD_GRACE) {
+                send_mit(i, 0.0f, motors_rt[i].hold_pos, 0.0f,       /* v_des=0, tau_ff=0 */
+                         motors_rt[i].cmd_kp, motors_rt[i].cmd_kd);
+            } else if (ph == MASTER_DAMPED) {
+                motors_rt[i].state  = LIFE_DAMPED;
+                motors_rt[i].cause  = CAUSE_MASTER_LOST;
+                motors_rt[i].cmd_kp = 0.0f;
+                motors_rt[i].cmd_kd = motors_rt[i].cfg->default_kd;  /* config Kd */
+                send_mit(i, 0.0f, motors_rt[i].pos, 0.0f, 0.0f, motors_rt[i].cfg->default_kd);
+            } else {   /* MASTER_IDLE */
+                can_disable_motor(cid, CAN_MASTER_ID);
+                motors_rt[i].state          = LIFE_IDLE;
+                motors_rt[i].cause          = CAUSE_MASTER_LOST;
+                motors_rt[i].hold_vel       = 0.0f;
+                motors_rt[i].target_cmd_seq = CMD_SEQ_NONE;
+                cmd_seq_reset(&motors_rt[i].cmd_track);
+            }
+        } else switch (motors_rt[i].state) {
+            case LIFE_IDLE:
                 can_read_motor_state(cid);
                 break;
 
-            case MOTOR_ARMED_HOLD:
-                send_mit(i, 0.0f,
-                         motors_rt[i].hold_pos,
-                         motors_rt[i].hold_vel,
-                         motors_rt[i].cfg->default_kp,
-                         motors_rt[i].cfg->default_kd);
-                if ((now_ms - motors_rt[i].watchdog_ms) > MOTOR_WATCHDOG_MS) {
-                    can_disable_motor(cid, CAN_MASTER_ID);
-                    motors_rt[i].state    = MOTOR_IDLE;
-                    motors_rt[i].hold_vel = 0.0f;
-                    motors_rt[i].cause    = CAUSE_WATCHDOG;
-                }
+            case LIFE_HOLD:
+            case LIFE_MIT:
+                /* With a fresh command every cycle, HOLD and MIT both drive the current
+                   targets; master-loss is handled by the ramp above, not here. */
+                send_mit(i, 0.0f, motors_rt[i].hold_pos, motors_rt[i].hold_vel,
+                         motors_rt[i].cmd_kp, motors_rt[i].cmd_kd);
                 break;
 
-            case MOTOR_ZEROING: {
+            case LIFE_DAMPED:
+                /* Kp=0 so home_pos is inert; Kd provides damping. */
+                send_mit(i, 0.0f, motors_rt[i].pos, 0.0f, 0.0f, motors_rt[i].cmd_kd);
+                break;
+
+            case LIFE_TO_ZERO: {
                 float pos     = motors_rt[i].pos;
                 float abs_pos = fabsf(pos);
 
-                /* (1) Progress/stall watchdog. A "stall" is *no progress toward
-                   home* for MOTOR_ZERO_STALL_MS — which correctly catches a
-                   leash-pause that never clears (a blocked joint) WITHOUT
-                   false-tripping a slow-but-converging creep or a motor already
-                   sitting at home. (An absolute-time budget can't tell "slow" from
-                   "stuck", and collapsed to ~1 s whenever homing started near
-                   zero.) Any improvement of |pos| by MOTOR_ZERO_PROGRESS_EPS
-                   refreshes the timer. On trip, damp the joint (Kp=0, Kd high,
-                   tau=0) so a partially-homed link is held compliant rather than
-                   dropped, then latch FAULT; damping is one-shot (FAULT stops
-                   further MIT, so the motor holds it until its own CAN timeout). */
+                /* (1) progress/stall watchdog → damp + CAUSE_ZERO_TIMEOUT. */
                 if (abs_pos < motors_rt[i].zero_best_abs - MOTOR_ZERO_PROGRESS_EPS) {
                     motors_rt[i].zero_best_abs    = abs_pos;
                     motors_rt[i].zero_progress_ms = now_ms;
                 }
-                if ((now_ms - motors_rt[i].zero_progress_ms) > MOTOR_ZERO_STALL_MS) {
+                if (ms_since(now_ms, motors_rt[i].zero_progress_ms) > (int32_t)MOTOR_ZERO_STALL_MS) {
                     send_mit(i, 0.0f, 0.0f, 0.0f, 0.0f, MOTOR_ZERO_DAMP_KD);
-                    motors_rt[i].state    = MOTOR_FAULT;
+                    motors_rt[i].state    = LIFE_FAULT;
                     motors_rt[i].cause    = CAUSE_ZERO_TIMEOUT;
                     motors_rt[i].hold_vel = 0.0f;
                     break;
                 }
 
-                /* (2) Watchdog — bail to IDLE if the host stopped commanding
-                   mid-creep. (Only reached while still ZEROING; the arrival branch
-                   below transitions out and breaks before this, so its blocking
-                   re-enable can't underflow the freshly-set watchdog_ms.) */
-                if ((now_ms - motors_rt[i].watchdog_ms) > MOTOR_WATCHDOG_MS) {
-                    can_disable_motor(cid, CAN_MASTER_ID);
-                    motors_rt[i].state = MOTOR_IDLE;
-                    motors_rt[i].cause = CAUSE_WATCHDOG;
-                    break;
-                }
-
-                /* (3) Arrival = SETTLED, not merely near. The waypoint ramp must
-                   have finished (hold_pos clamped to 0) AND the joint held within
-                   MOTOR_ZERO_TOL of it for MOTOR_ZERO_SETTLE_TICKS in a row. We
-                   gate on ramp-done + position, NOT instantaneous velocity: at the
-                   soft homing gains the RS velocity-feedback noise floor (~0.2
-                   rad/s) sits right against the 0.3 rad/s creep rate, so no vel
-                   threshold separates a true hold from a slewing creep. "Ramp
-                   finished and still within tol" is the reliable settled signal —
-                   you cannot be passing through fast once the commanded waypoint
-                   has stopped at 0 and you've tracked it for the settle window. */
+                /* (2) arrival = ramp done + within tol for SETTLE_TICKS. Hold at 0
+                   and set the arrived flag; STAY in TO_ZERO (never writes mech zero,
+                   never disables/re-enables — the old arrival sequence is removed). */
                 if (fabsf(motors_rt[i].hold_pos) < 1e-4f && abs_pos < MOTOR_ZERO_TOL) {
-                    if (++motors_rt[i].zero_settle < MOTOR_ZERO_SETTLE_TICKS) {
-                        /* Hold at home while the joint settles. */
-                        send_mit(i, 0.0f, 0.0f, 0.0f, MOTOR_ZERO_KP, MOTOR_ZERO_KD);
-                        break;
+                    if (++motors_rt[i].zero_settle >= MOTOR_ZERO_SETTLE_TICKS) {
+                        motors_rt[i].to_zero_arrived = 1u;
                     }
-                    /* Settled → arrival. Reset the motor's mechanical zero HERE so
-                       its multi-turn frame is 0 at home. Without this a motor that
-                       has wound up sits near the ±4π position-report limit, where
-                       the 16-bit position feedback wraps; the short-path pos_offset
-                       then flips sign mid-motion and MIT commands run away.
-                       Resetting at home removes the winding while keeping the
-                       physical home reference. Home therefore drifts by the settled
-                       residual (< MOTOR_ZERO_TOL) each re-zero — reference
-                       calibration is a separate manual procedure (docs/command.md). */
-                    uint32_t ts;
-                    can_disable_motor(cid, CAN_MASTER_ID);
-                    HAL_Delay(5u);
-                    can_set_mech_zero(cid, CAN_MASTER_ID);
-                    HAL_Delay(5u);
-                    /* Re-establish MIT with the SAME ACK-wait + 10 ms settle as
-                       motor_runtime_arm. The RS02 needs the longer settle after
-                       disable/set-zero — with only ~2 ms the enable is missed and
-                       the motor silently ignores MIT (holds at 0, tau 0). */
-                    ts = HAL_GetTick(); can_rx_flag = 0;
-                    can_change_motor_mode(cid, CAN_MASTER_ID, MIT_MODE);
-                    while (can_rx_flag == 0 && (HAL_GetTick() - ts) < 10u) {}
-                    HAL_Delay(10u);
-                    ts = HAL_GetTick(); can_rx_flag = 0;
-                    can_enable_motor(cid, CAN_MASTER_ID);
-                    while (can_rx_flag == 0 && (HAL_GetTick() - ts) < 10u) {}
-                    HAL_Delay(10u);
-                    motors_rt[i].pos         = 0.0f;
-                    motors_rt[i].pos_offset  = 0.0f;
-                    motors_rt[i].hold_pos    = 0.0f;
-                    motors_rt[i].hold_vel    = 0.0f;
-                    motors_rt[i].watchdog_ms = HAL_GetTick(); /* post-delay, not stale now_ms */
-                    motors_rt[i].state       = MOTOR_ARMED_HOLD;
+                    send_mit(i, 0.0f, 0.0f, 0.0f, MOTOR_ZERO_KP, MOTOR_ZERO_KD);
                     break;
                 }
-                motors_rt[i].zero_settle = 0u;   /* left the tolerance band — restart the settle count */
+                motors_rt[i].zero_settle = 0u;
 
-                /* (4) Leashed creep. Advance the waypoint toward 0 at
-                   MOTOR_ZERO_RATE (scaled by the real loop period so the speed is
-                   loop-frequency-independent) ONLY while it isn't already leading
-                   the joint by more than MOTOR_ZERO_LEASH. If the joint lags
-                   further (obstruction/binding), pause the ramp and zero the
-                   velocity feed-forward so the commanded error — and thus the
-                   force — stays bounded at ~Kp*leash instead of winding up. */
+                /* (3) leashed creep toward 0. */
                 float sign = (pos > 0.0f) ? -1.0f : 1.0f;
-                float lead = motors_rt[i].hold_pos - pos;   /* both in home frame */
+                float lead = motors_rt[i].hold_pos - pos;
                 float vff  = 0.0f;
                 if (fabsf(lead) < MOTOR_ZERO_LEASH) {
                     motors_rt[i].hold_pos += sign * MOTOR_ZERO_RATE * MOTOR_LOOP_DT_S;
-                    /* Clamp — don't overshoot zero */
                     if (sign < 0.0f && motors_rt[i].hold_pos < 0.0f) motors_rt[i].hold_pos = 0.0f;
                     if (sign > 0.0f && motors_rt[i].hold_pos > 0.0f) motors_rt[i].hold_pos = 0.0f;
                     vff = sign * MOTOR_ZERO_RATE;
@@ -285,205 +419,22 @@ void motor_runtime_update(uint32_t now_ms)
                 break;
             }
 
-            case MOTOR_ARMED_MIT:
-                send_mit(i, 0.0f,
-                         motors_rt[i].hold_pos,
-                         motors_rt[i].hold_vel,
-                         motors_rt[i].cfg->default_kp,
-                         motors_rt[i].cfg->default_kd);
-                if ((now_ms - motors_rt[i].watchdog_ms) > MOTOR_WATCHDOG_MS) {
-                    /* MIT commands stopped — lock position and fall back to hold */
-                    motors_rt[i].hold_pos = motors_rt[i].pos;
-                    motors_rt[i].hold_vel = 0.0f;
-                    motors_rt[i].state    = MOTOR_ARMED_HOLD;
-                }
-                break;
-
-            default:
+            default:   /* LIFE_BOOT / LIFE_DISCOVERING / LIFE_FAULT */
                 break;
         }
 
-        /* cmd_flags — recomputed every tick, never latched. Only meaningful while
-           armed: CLAMPED_* reflect the most recent MIT command's clamping;
-           CMD_STALE means we're executing a held/watchdog setpoint, not a fresh
-           command this window. */
+        /* Assemble the per-tick telemetry cmd flags (clamp while fresh, else stale). */
         {
             uint8_t cf = 0u;
-            if (motors_rt[i].state == MOTOR_ARMED_HOLD ||
-                motors_rt[i].state == MOTOR_ARMED_MIT) {
+            if (motors_rt[i].state == LIFE_HOLD || motors_rt[i].state == LIFE_MIT) {
                 cf = motors_rt[i].got_fresh_cmd
                          ? motors_rt[i].last_apply_clamp
-                         : (uint8_t)SPI_CMDFLAG_CMD_STALE;
+                         : (uint8_t)TELE_FLAG_CMD_STALE;
             }
-            motors_rt[i].got_fresh_cmd = 0u;
-            motors_rt[i].cmd_flags     = cf;
+            motors_rt[i].got_fresh_cmd     = 0u;
+            motors_rt[i].cmd_flags_latched = cf;
         }
     }
-}
-
-HAL_StatusTypeDef motor_runtime_arm(uint8_t idx)
-{
-    if (idx >= N_MOTORS)                          return HAL_ERROR;
-    if (motors_rt[idx].state != MOTOR_IDLE)       return HAL_ERROR;
-    if (!motors_rt[idx].alive)                    return HAL_ERROR;
-
-    uint8_t cid = motor_configs[idx].can_id;
-
-    motor_t snap;
-    motor_get_snapshot(idx, &snap);
-
-    /* ARM clears any latched fault. If the motor's OWN fault was latched, its
-       controller refuses the Type-3 enable until cleared, so send the CAN
-       fault-clear (Type-4, Byte0=1) first. */
-    if (snap.fault_word != 0u) {
-        can_clear_fault(cid, CAN_MASTER_ID);
-        HAL_Delay(5u);
-    }
-    motor_set_fault_word(idx, 0u);
-    motors_rt[idx].fault_word = 0u;        /* mirror the clear */
-    motors_rt[idx].cause      = CAUSE_NONE;
-
-    float wrapped = wrap_pi(snap.pos);
-    motors_rt[idx].pos        = wrapped;
-    motors_rt[idx].pos_offset = snap.pos - wrapped;
-    motors_rt[idx].hold_pos   = wrapped;   /* hold where it is, in home frame */
-    motors_rt[idx].hold_vel   = 0.0f;
-
-    /* Set MIT mode. Wait up to 10 ms for CAN ACK, then 10 ms settle so the
-       motor completes its internal mode switch before the enable arrives.
-       Budget per motor: 2 x (10+10) = 40 ms.  5 motors = 200 ms total, which
-       keeps every already-zeroing motor's watchdog delta at ≤160 ms < 200 ms. */
-    uint32_t ts = HAL_GetTick();
-    can_rx_flag = 0;
-    can_change_motor_mode(cid, CAN_MASTER_ID, MIT_MODE);
-    while (can_rx_flag == 0 && (HAL_GetTick() - ts) < 10u) {}
-    HAL_Delay(10u);
-
-    /* Enable */
-    ts = HAL_GetTick();
-    can_rx_flag = 0;
-    can_enable_motor(cid, CAN_MASTER_ID);
-    while (can_rx_flag == 0 && (HAL_GetTick() - ts) < 10u) {}
-    HAL_Delay(10u);
-
-    /* First hold command */
-    send_mit(idx, 0.0f, motors_rt[idx].hold_pos, 0.0f,
-             motors_rt[idx].cfg->default_kp,
-             motors_rt[idx].cfg->default_kd);
-
-    motors_rt[idx].state       = MOTOR_ARMED_HOLD;
-    motors_rt[idx].watchdog_ms = HAL_GetTick();
-    return HAL_OK;
-}
-
-HAL_StatusTypeDef motor_runtime_disable(uint8_t idx)
-{
-    if (idx >= N_MOTORS) return HAL_ERROR;
-    idle_motor(idx);
-    motors_rt[idx].cause = CAUSE_NONE;      /* commanded stop, not a fault */
-    motor_set_fault_word(idx, 0u);
-    motors_rt[idx].fault_word = 0u;         /* mirror the clear */
-    return HAL_OK;
-}
-
-HAL_StatusTypeDef motor_runtime_goto_zero(uint8_t idx)
-{
-    if (idx >= N_MOTORS)                    return HAL_ERROR;
-    if (motors_rt[idx].state != MOTOR_IDLE) return HAL_ERROR;
-    if (!motors_rt[idx].alive)              return HAL_ERROR;
-
-    /* Gate 5a: home (0 rad) must lie inside the joint's soft limits, or zeroing
-       would creep straight into a limit it can never satisfy. Refuse up front —
-       a joint whose travel excludes 0 must be homed to a reachable reference by a
-       separate procedure, not by GOTO_ZERO. */
-    if (motor_configs[idx].soft_min > 0.0f || motor_configs[idx].soft_max < 0.0f)
-        return HAL_ERROR;
-
-    /* Gate 5b: GOTO_ZERO clears a latched fault as a side effect, but only for
-       transient link causes (WATCHDOG, CAN_TIMEOUT) and a clean motor. A
-       hardware/overtravel latch (OVERTORQUE, MOTOR_FAULT) must be acknowledged by
-       an explicit ARM first — auto-clearing it here would let a jammed joint be
-       re-driven blindly. Refuse; the reject is counted by the caller. */
-    if (motors_rt[idx].cause == CAUSE_OVERTORQUE ||
-        motors_rt[idx].cause == CAUSE_MOTOR_FAULT)
-        return HAL_ERROR;
-
-    uint8_t cid = motor_configs[idx].can_id;
-
-    /* Snapshot for the fault-word check and the unwind decision below. A second
-       snapshot is taken AFTER the mech-zero/enable sequence for the waypoint
-       init, because those operations change the motor's reported angle. */
-    motor_t snap;
-    motor_get_snapshot(idx, &snap);
-
-    /* Clear the (whitelisted) latched cause + fault word. GOTO_ZERO also enables
-       the motor, so send the CAN fault-clear first when the motor's own fault was
-       latched, or it refuses the enable. */
-    if (snap.fault_word != 0u) {
-        can_clear_fault(cid, CAN_MASTER_ID);
-        HAL_Delay(5u);
-    }
-    motor_set_fault_word(idx, 0u);
-    motors_rt[idx].fault_word = 0u;         /* mirror the clear */
-    motors_rt[idx].cause      = CAUSE_NONE;
-
-    /* Unwind a motor pinned at the ±4π position-report limit BEFORE trying to
-       creep it home. Such a motor can't be controlled — commands saturate at
-       the edge and the 16-bit feedback wraps. A motor wound by whole turns sits
-       at the same physical shaft angle as home, so resetting its mechanical zero
-       in place loses nothing and brings the frame back near 0. (|offset| ≳ 3π
-       targets the ±4π case only; a ±2π winding is still safely controllable.) */
-    {
-        float off = snap.pos - wrap_pi(snap.pos);
-        if (off > 9.0f || off < -9.0f) {
-            can_set_mech_zero(cid, CAN_MASTER_ID);
-            HAL_Delay(5u);
-        }
-    }
-
-    /* Set MIT mode — same settle strategy as motor_runtime_arm */
-    uint32_t ts = HAL_GetTick();
-    can_rx_flag = 0;
-    can_change_motor_mode(cid, CAN_MASTER_ID, MIT_MODE);
-    while (can_rx_flag == 0 && (HAL_GetTick() - ts) < 10u) {}
-    HAL_Delay(10u);
-
-    /* Enable */
-    ts = HAL_GetTick();
-    can_rx_flag = 0;
-    can_enable_motor(cid, CAN_MASTER_ID);
-    while (can_rx_flag == 0 && (HAL_GetTick() - ts) < 10u) {}
-    HAL_Delay(10u);
-
-    /* Initialise waypoint at current position so the rate-limited ramp starts
-       correctly. Re-snapshot here: the mech-zero/enable above may have changed
-       the reported angle. Wrap to the home frame so zeroing creeps the short way
-       toward 0 instead of unwinding a full turn from a wrapped power-up reading. */
-    motor_t snap_after;
-    motor_get_snapshot(idx, &snap_after);
-    {
-        float wrapped = wrap_pi(snap_after.pos);
-        motors_rt[idx].pos        = wrapped;
-        motors_rt[idx].pos_offset = snap_after.pos - wrapped;
-    }
-    motors_rt[idx].hold_pos = motors_rt[idx].pos;
-    motors_rt[idx].hold_vel = 0.0f;
-
-    /* Arm the progress/stall watchdog: best distance = the start distance, timer
-       = now. It trips only if |pos| fails to close on home for
-       MOTOR_ZERO_STALL_MS, so a slow (leash-paced) but converging creep never
-       false-fires — unlike an absolute deadline. */
-    motors_rt[idx].zero_best_abs    = fabsf(motors_rt[idx].hold_pos);
-    motors_rt[idx].zero_progress_ms = HAL_GetTick();
-    motors_rt[idx].zero_settle      = 0u;
-
-    /* First command: hold current position before the update loop starts stepping */
-    send_mit(idx, 0.0f, motors_rt[idx].hold_pos, 0.0f,
-             MOTOR_ZERO_KP, MOTOR_ZERO_KD);
-
-    motors_rt[idx].state        = MOTOR_ZEROING;
-    motors_rt[idx].watchdog_ms  = HAL_GetTick();
-    return HAL_OK;
 }
 
 void motor_runtime_refresh_watchdog(uint8_t idx)
@@ -493,65 +444,32 @@ void motor_runtime_refresh_watchdog(uint8_t idx)
     }
 }
 
-void motor_runtime_apply_mit(uint8_t idx, float pos, float vel)
-{
-    if (idx >= N_MOTORS) return;
-
-    MotorRuntime *r = &motors_rt[idx];
-    /* Streamed MIT setpoints are only honoured while the motor is armed. */
-    if (r->state != MOTOR_ARMED_HOLD && r->state != MOTOR_ARMED_MIT) return;
-
-    /* Enforce the per-motor soft angle limits here on the slave: the host may
-       command past them (e.g. a ±90° sine), but the motor must stop at its
-       limit. Clamp the position, and use a ONE-SIDED velocity clamp: only
-       cancel feedforward velocity that drives further INTO the limit. Velocity
-       that moves the joint back toward range is preserved, so leaving the limit
-       is smooth — no discontinuous jump in the kd term at the peak. */
-    float lo = r->cfg->soft_min;
-    float hi = r->cfg->soft_max;
-    uint8_t clamp = 0u;
-    if (pos > hi) {
-        pos = hi;
-        clamp |= SPI_CMDFLAG_CLAMPED_POS;
-        if (vel > 0.0f) { vel = 0.0f; clamp |= SPI_CMDFLAG_CLAMPED_TAU; }
-    } else if (pos < lo) {
-        pos = lo;
-        clamp |= SPI_CMDFLAG_CLAMPED_POS;
-        if (vel < 0.0f) { vel = 0.0f; clamp |= SPI_CMDFLAG_CLAMPED_TAU; }
-    }
-
-    /* Record clamp result for this tick's cmd_flags. CLAMPED_TAU marks the
-       velocity feedforward (the kd torque term) being cancelled at the limit. */
-    r->last_apply_clamp = clamp;
-    r->got_fresh_cmd    = 1u;
-
-    r->hold_pos = pos;
-    r->hold_vel = vel;
-    r->state    = MOTOR_ARMED_MIT;
-}
-
-void motor_runtime_pack_tele(MotorState *out, uint8_t idx)
+void motor_runtime_sample(tele_motor_t *out, uint8_t idx)
 {
     if (idx >= N_MOTORS || out == NULL) return;
-    /* Reads ONLY motors_rt[], populated from the single per-tick snapshot in
-       motor_runtime_update() — so telemetry reflects exactly the state the
-       control logic acted on, and there's no second read of the live motors[]. */
     const MotorRuntime *r = &motors_rt[idx];
 
-    out->pos_raw     = f_to_u16(r->pos, MOTOR_P_MIN, MOTOR_P_MAX);
-    out->vel_raw     = f_to_u16(r->vel, MOTOR_V_MIN, MOTOR_V_MAX);
-    out->tau_raw     = f_to_u16(r->tau, MOTOR_T_MIN, MOTOR_T_MAX);
-    out->temp_c      = (uint8_t)(r->temp < 0.0f ? 0u : (uint8_t)r->temp);
-    out->state       = SPI_STATE_PACK(r->state, r->cause);
+    uint8_t sat = 0u;
+    out->pos = proto_f_to_i16(r->pos, PROTO_POS_SCALE, &sat);
+    out->vel = proto_f_to_i16(r->vel, PROTO_VEL_SCALE, &sat);
+    out->tau = proto_f_to_i16(r->tau, PROTO_TAU_SCALE, &sat);
+    out->temp_c = (r->temp < 0.0f) ? 0u : (uint8_t)r->temp;
+    out->state  = r->state;
+    out->cause  = r->cause;
+    out->motor_mode  = r->motor_mode;
     out->motor_fault = r->motor_fault;
-    out->cmd_flags   = r->cmd_flags;
-    out->fault_word  = r->fault_word;
 
-    /* fb_age: ms since THIS motor's last Type-2 feedback (from the cached
-       snapshot stamp), saturating at 255. */
-    uint32_t age     = HAL_GetTick() - r->last_fb_ms;
-    out->fb_age      = (age > 255u) ? 255u : (uint8_t)age;
-    out->reserved_v2 = 0u;
+    uint8_t flags = r->cmd_flags_latched;
+    if (r->req_rejected)    flags |= TELE_FLAG_REQUEST_REJECTED;
+    if (r->to_zero_arrived) flags |= TELE_FLAG_TO_ZERO_ARRIVED;
+    if (sat)                flags |= TELE_FLAG_SATURATED;
+    out->flags = flags;
+
+    uint32_t age = HAL_GetTick() - r->last_fb_ms;
+    out->fb_age_ms = (age > 255u) ? 255u : (uint8_t)age;
+    out->fault_word       = r->fault_word;
+    out->last_applied_seq = r->cmd_track.last_applied;
+    out->reserved         = 0u;
 }
 
 uint8_t motor_runtime_motors_alive(void)

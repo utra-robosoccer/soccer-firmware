@@ -8,7 +8,7 @@
 #ifndef INC_MOTOR_CHAIN_H_
 #define INC_MOTOR_CHAIN_H_
 
-#include <robostride.h>
+#include "motor_types.h"    /* motor_t domain model (not the whole CAN driver) */
 #include <stdint.h>
 #include <stdio.h>
 #include "stm32f4xx_hal.h"
@@ -53,22 +53,5 @@ void motor_set_fault_word(uint8_t idx, uint32_t val);
 /* Bind motors[i].id / master_id from motor_configs[] before the CAN bus starts,
    so the RX ISR's id lookup can match incoming feedback. Call once at init. */
 void motor_chain_bind_ids(void);
-
-HAL_StatusTypeDef motor_chain_init(void);
-HAL_StatusTypeDef motor_chain_init_dbg(UART_HandleTypeDef *huart);
-
-HAL_StatusTypeDef motor_chain_go_zeropos(void);
-HAL_StatusTypeDef motor_chain_go_zeropos_dbg(UART_HandleTypeDef *huart);
-
-HAL_StatusTypeDef motor_set_spd(uint8_t target_id, float spd, float pd);
-HAL_StatusTypeDef motor_set_spd_dbg(uint8_t target_id, float spd, float pd, UART_HandleTypeDef *huart);
-
-HAL_StatusTypeDef motor_set_mit(uint8_t target_id, float torq, float pos, float spd, float kp, float kd);
-HAL_StatusTypeDef motor_set_mit_dbg(uint8_t target_id, float torq, float pos, float spd, float kp, float kd, UART_HandleTypeDef *huart);
-
-HAL_StatusTypeDef motor_check_angle(motor_t *motor, float pos, float spd, float pd);
-HAL_StatusTypeDef motor_check_angle_dbg(motor_t *motor, float pos, float spd, float pd, UART_HandleTypeDef *huart);
-
-
 
 #endif /* INC_MOTOR_CHAIN_H_ */

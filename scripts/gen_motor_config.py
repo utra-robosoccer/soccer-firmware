@@ -22,7 +22,7 @@ Two modes:
       ALL slaves in the system:
         - firmware/common/include/system_config.h  (master: NUM_SLAVES,
           per-slave motor counts + CAN-id LUTs, global transport bounds)
-        - tools/motor_config_gen.py                (host: per-slave SLAVES[]
+        - host/master_link/motor_config_gen.py      (host: per-slave SLAVES[]
           plus a flattened view for the dashboard / test_client)
 
 Usage:
@@ -37,6 +37,7 @@ alongside the source. Re-run after editing a YAML, then rebuild.
 """
 
 import glob
+import hashlib
 import os
 import sys
 
@@ -44,21 +45,114 @@ import yaml
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
-# Goto-zero motion parameters (motion tuning, not per-motor identity).
+# TO_ZERO motion parameters (motion tuning, not per-motor identity). Tick-based
+# constants are DERIVED from the configured rates below, not hard-coded here.
 GOTO_ZERO = {
     "MOTOR_ZERO_TOL": "0.05f",   # rad (~3 deg) — arrival position threshold
     "MOTOR_ZERO_RATE": "0.3f",   # rad/s        — constant approach speed
     "MOTOR_ZERO_KP": "4.0f",     # position gain while zeroing
     "MOTOR_ZERO_KD": "1.0f",
-    # Hardening (see docs/command.md — MOTOR_ZEROING). Do not raise the gains
-    # above to fight gravity: steady-state error under load is tau_g/Kp by design;
-    # zeroing must be run unloaded/supported.
-    "MOTOR_ZERO_LEASH": "0.15f",       # rad   — max waypoint lead over pos; caps blocked-joint force to ~Kp*leash
-    "MOTOR_ZERO_SETTLE_TICKS": "10u",  # loop ticks in-tolerance (ramp done + |pos|<TOL) before arrival (~50 ms @ 5 ms loop)
-    "MOTOR_ZERO_DAMP_KD": "3.0f",      # Kd of the damping command on zero timeout (Kp=0, tau=0)
-    "MOTOR_ZERO_STALL_MS": "1500u",    # ms with no progress toward home before CAUSE_ZERO_TIMEOUT (catches a real stall)
-    "MOTOR_ZERO_PROGRESS_EPS": "0.01f",# rad   — |pos| must improve by this to count as progress (above position noise)
+    "MOTOR_ZERO_LEASH": "0.15f",       # rad   — max waypoint lead over pos
+    "MOTOR_ZERO_DAMP_KD": "3.0f",      # Kd of the damping command on zero timeout
+    "MOTOR_ZERO_PROGRESS_EPS": "0.01f",# rad   — |pos| improvement counted as progress
+    "MOTOR_WOUND_OFFSET_MAX": "9.0f",  # rad — |pos_offset| above this at HOLD-arm → refuse + CAUSE_WOUND
 }
+
+# ── Rates & timeouts (system-wide; override per-setup in configs/<setup>/system.yaml) ──
+# Rates in Hz; timeouts/debounces in ms. Tick-based firmware constants (loop
+# periods, settle-tick count, enable-monitor frame count) are DERIVED from these,
+# so changing a rate keeps the real-world durations fixed.
+RATE_DEFAULTS = {
+    "master_poll_hz":  200,   # SPI poll / command delivery
+    "telemetry_hz":    200,   # MSG_ROBOT_TELE emission
+    "slave_tick_hz":   200,   # slave control tick (motor_runtime_update)
+    "host_cmd_hz":      50,   # expected host command rate (run_policy --rate default)
+    "master_spi_prescaler": 16,  # APB2(72MHz)/div SPI clock: 64→1.125MHz ... 8→9MHz.
+    # All of 64/32/16/8 are 2-min clean on the bench (short wiring); 16 = 4.5MHz is two
+    # steps of margin below the fastest tested (div 8), and the slave SPI resync recovers
+    # isolated glitches — re-validate on the robot harness via the CRC/resync counters.
+}
+TIMING_MS_DEFAULTS = {
+    "motor_watchdog_ms":   200,   # master-link (SPI) watchdog → IDLE
+    "can_fb_timeout_ms":   100,   # per-motor Type-2 staleness → CAUSE_CAN_TIMEOUT
+    "zero_stall_ms":      1500,   # no TO_ZERO progress → CAUSE_ZERO_TIMEOUT
+    "zero_settle_ms":       50,   # in-tolerance dwell before TO_ZERO arrival
+    "enable_mon_ms":        15,   # not-NORMAL dwell while armed → CAUSE_NOT_ENABLED
+    # Dead-man watchdogs (task 6).
+    "master_lost_grace_ms":  50,  # slave: hold position (v/tau=0) this long after exchanges stop
+    "master_lost_damp_ms":  300,  # DAMPED dwell before IDLE (slave master-loss AND master host-death)
+}
+
+
+def load_system(setup_dir):
+    """Load configs/<setup>/system.yaml if present, else defaults. Returns
+    (rates, timeouts_ms) with every key filled from the defaults."""
+    rates = dict(RATE_DEFAULTS)
+    timeouts = dict(TIMING_MS_DEFAULTS)
+    path = os.path.join(setup_dir, "system.yaml")
+    if os.path.isfile(path):
+        doc = load(path) or {}
+        rates.update(doc.get("rates", {}) or {})
+        timeouts.update(doc.get("timeouts_ms", {}) or {})
+    return rates, timeouts
+
+
+def timing_block(rates, timeouts):
+    """Render the generated timing/rate #define block (shared via motor_config.h).
+    Derives tick periods and tick/frame counts from the rates so the real-world
+    durations stay fixed when a rate changes."""
+    poll_ms = max(1, round(1000.0 / rates["master_poll_hz"]))
+    tele_ms = max(1, round(1000.0 / rates["telemetry_hz"]))
+    tick_ms = max(1, round(1000.0 / rates["slave_tick_hz"]))
+    settle_ticks = max(1, round(timeouts["zero_settle_ms"] / tick_ms))
+    mon_k        = max(1, round(timeouts["enable_mon_ms"] / tick_ms))
+    # Host-death (master side): 3 host-command periods, floored at 25 ms, in master cycles.
+    host_lost_ms     = max(25, round(3.0 * 1000.0 / rates["host_cmd_hz"]))
+    host_lost_cyc    = max(1, round(host_lost_ms * rates["master_poll_hz"] / 1000.0))
+    host_damp_cyc    = max(1, round(timeouts["master_lost_damp_ms"] * rates["master_poll_hz"] / 1000.0))
+    # Slave TX-arm deadline: how long after an exchange the slave waits for the motor replies
+    # before arming the DMA for the next exchange (so the fresh reply rides it). 0.6 cycle —
+    # after the ≤2 ms reply window, comfortably before the next NSS.
+    tx_arm_deadline_us = max(1, round(0.6 * 1000000.0 / rates["master_poll_hz"]))
+    return f"""\
+/* Configured rates (Hz) — reported in MasterStatus and the .bin header. */
+#define MASTER_POLL_HZ  {rates['master_poll_hz']}u
+#define TELEMETRY_HZ    {rates['telemetry_hz']}u
+#define SLAVE_TICK_HZ   {rates['slave_tick_hz']}u
+#define HOST_CMD_HZ     {rates['host_cmd_hz']}u
+
+/* One master poll cycle (µs). The slave derives its forward/fallback service
+   thresholds from this, so they scale with the poll rate (incl. 400 Hz). */
+#define MASTER_CYCLE_US  {round(1000000.0 / rates['master_poll_hz'])}u
+
+/* Master SPI1 clock divider off APB2 (72 MHz): MX_SPI1_Init maps it to the
+   SPI_BAUDRATEPRESCALER_* enum. Valid: 2,4,8,16,32,64,128,256. */
+#define MASTER_SPI_PRESCALER_DIV  {rates['master_spi_prescaler']}u
+
+/* Derived loop periods (ms) — do not hand-edit; change the rate instead. */
+#define MASTER_POLL_PERIOD_MS  {poll_ms}u
+#define MASTER_TELE_PERIOD_MS  {tele_ms}u
+#define MOTOR_LOOP_PERIOD_MS   {tick_ms}u
+#define MOTOR_LOOP_DT_S        ((float)MOTOR_LOOP_PERIOD_MS * 0.001f)
+
+/* Timeouts/debounces (ms) and tick/frame counts derived from the slave tick. */
+#define MOTOR_WATCHDOG_MS        {timeouts['motor_watchdog_ms']}u
+#define MOTOR_CAN_FB_TIMEOUT_MS  {timeouts['can_fb_timeout_ms']}u
+#define MOTOR_ZERO_STALL_MS      {timeouts['zero_stall_ms']}u
+#define MOTOR_ZERO_SETTLE_TICKS  {settle_ticks}u   /* {timeouts['zero_settle_ms']} ms / {tick_ms} ms tick */
+#define MOTOR_ENABLE_MON_K       {mon_k}u   /* {timeouts['enable_mon_ms']} ms / {tick_ms} ms tick */
+
+/* Dead-man watchdogs (task 6). Master host-death is counted in master cycles; the slave
+   master-loss ramp is in ms (HAL_GetTick). */
+#define HOST_CMD_TIMEOUT_MS      {host_lost_ms}u   /* 3 host periods, 25 ms floor */
+#define HOST_LOST_CYCLES         {host_lost_cyc}u   /* host-death trigger (master cycles) */
+#define HOST_LOST_DAMP_CYCLES    {host_damp_cyc}u   /* master DAMPED dwell before IDLE (cycles) */
+#define MASTER_LOST_GRACE_MS     {timeouts['master_lost_grace_ms']}u   /* slave hold (v/tau=0) after exchanges stop */
+#define MASTER_LOST_DAMP_MS      {timeouts['master_lost_damp_ms']}u   /* slave DAMPED dwell before IDLE */
+
+/* Slave SPI TX-arm deadline (µs after an exchange): wait for motor replies, then arm the
+   next exchange's DMA so the fresh reply rides it (removes the one-exchange telemetry lag). */
+#define TX_ARM_DEADLINE_US       {tx_arm_deadline_us}u"""
 
 
 def _f(x):
@@ -87,6 +181,20 @@ def validate(cfg):
         raise ValueError(f"duplicate can_id in motors: {can_ids}")
 
 
+# Per-model Kp/Kd CAN ranges. RS00/01/02/05 use Kp 0–500 / Kd 0–5; the larger
+# RS03/04/06 use Kp 0–5000 / Kd 0–100 (RobStride Type-1 tables). A model in the yaml
+# `models:` block may give kp_min/kp_max/kd_min/kd_max explicitly; otherwise this
+# per-model default applies — NOT a single global, which would mis-scale a mixed chain.
+_LARGE_GAIN_MODELS = ("RS03", "RS04", "RS06")
+
+def _gain(model_name, model_dict, key):
+    if key in model_dict:
+        return model_dict[key]
+    large = model_name in _LARGE_GAIN_MODELS
+    return {"kp_min": 0.0, "kp_max": 5000.0 if large else 500.0,
+            "kd_min": 0.0, "kd_max": 100.0 if large else 5.0}[key]
+
+
 def _transport_bounds(cfgs):
     """Global SPI transport encoding bounds across all given configs: widest
     model velocity/torque so every motor's value fits losslessly, plus the
@@ -102,7 +210,7 @@ def _transport_bounds(cfgs):
 #  --slave : per-slave C header (motor_config.h)
 # ─────────────────────────────────────────────────────────────────────────────
 
-def gen_header(cfg, src_name):
+def gen_header(cfg, src_name, rates, timeouts):
     motors = cfg["motors"]
     models = cfg["models"]
     shared = cfg["shared_ranges"]
@@ -118,8 +226,12 @@ def gen_header(cfg, src_name):
                               for i, name in enumerate(model_names))
 
     range_entries = ",\n".join(
-        f"    [MOTOR_MODEL_{name}] = {{ {_f(models[name]['v_min'])}, {_f(models[name]['v_max'])}, "
-        f"{_f(models[name]['t_min'])}, {_f(models[name]['t_max'])} }}"
+        (lambda md: (
+            f"    [MOTOR_MODEL_{name}] = {{ {_f(md['v_min'])}, {_f(md['v_max'])}, "
+            f"{_f(md['t_min'])}, {_f(md['t_max'])}, "
+            f"{_f(_gain(name, md, 'kp_min'))}, {_f(_gain(name, md, 'kp_max'))}, "
+            f"{_f(_gain(name, md, 'kd_min'))}, {_f(_gain(name, md, 'kd_max'))} }}"
+        ))(models[name])
         for name in model_names
     )
 
@@ -141,6 +253,7 @@ def gen_header(cfg, src_name):
     cfg_block = ",\n".join(cfg_entries)
 
     gz = "\n".join(f"#define {k:<14} {v}" for k, v in GOTO_ZERO.items())
+    timing = timing_block(rates, timeouts)
 
     return f"""\
 /* AUTO-GENERATED — DO NOT EDIT.
@@ -167,21 +280,29 @@ extern "C" {{
 #define MOTOR_T_MIN  {_f(-t_max)}
 #define MOTOR_T_MAX  {_f(t_max)}
 
-/* Goto-zero motion parameters */
+/* TO_ZERO motion parameters */
 {gz}
+
+/* Timing, rates & derived tick counts (system-wide) */
+{timing}
 
 /* Motor models present on the bus */
 typedef enum {{
 {enum_entries}
 }} MotorModel;
 
-/* Per-model CAN "operation control mode" (Type 1) velocity/torque ranges.
- * Position, Kp and Kd are identical across models and stay global. */
+/* Per-model CAN "operation control mode" (Type 1) ranges — velocity, torque AND
+ * Kp/Kd (RS00/02 use Kp 0–500, Kd 0–5; RS03/04/06 use Kp 0–5000, Kd 0–100).
+ * From slaveN.yaml `models:`. Only position is shared (MOTOR_P_MIN/MAX). */
 typedef struct {{
     float v_min;
     float v_max;
     float t_min;
     float t_max;
+    float kp_min;
+    float kp_max;
+    float kd_min;
+    float kd_max;
 }} MotorCanRange;
 
 static const MotorCanRange motor_can_ranges[] = {{
@@ -227,12 +348,13 @@ static inline const MotorCanRange *motor_can_range_by_id(uint8_t can_id)
 #  --system : master C header (system_config.h)
 # ─────────────────────────────────────────────────────────────────────────────
 
-def gen_system_header(cfgs, names):
+def gen_system_header(cfgs, names, rates, timeouts):
     n_slaves = len(cfgs)
     counts = [len(cfg["motors"]) for cfg in cfgs]
     max_per = max(counts)
     total = sum(counts)
     p_min, p_max, v_max, t_max = _transport_bounds(cfgs)
+    timing = timing_block(rates, timeouts)
 
     counts_c = ", ".join(f"{c}u" for c in counts)
 
@@ -271,6 +393,9 @@ extern "C" {{
 #define MOTOR_T_MIN  {_f(-t_max)}
 #define MOTOR_T_MAX  {_f(t_max)}
 
+/* Timing, rates & derived tick counts (system-wide; mirror of motor_config.h). */
+{timing}
+
 /* Number of active motors on each slave (chain order). */
 static const uint8_t slave_motor_counts[NUM_SLAVES] = {{ {counts_c} }};
 
@@ -290,8 +415,9 @@ static const uint8_t slave_motor_ids[NUM_SLAVES][MAX_MOTORS_PER_SLAVE] = {{
 #  --system : host Python constants (motor_config_gen.py)
 # ─────────────────────────────────────────────────────────────────────────────
 
-def gen_python(cfgs, names):
+def gen_python(cfgs, names, cfg_name="", cfg_hash="", rates=None):
     n_slaves = len(cfgs)
+    rates = rates or RATE_DEFAULTS
 
     # Per-slave grouped structure.
     slave_blocks = []
@@ -339,6 +465,11 @@ def gen_python(cfgs, names):
 # Regenerate: python3 scripts/gen_motor_config.py --system {src_list}
 """Motor configuration constants for host tools (generated, multi-slave)."""
 
+# Active setup name + sha256 over its slave YAMLs (sorted by filename). The runner
+# recomputes the hash from configs/<CONFIG_NAME>/ and warns if this file is stale.
+CONFIG_NAME = {cfg_name!r}
+CONFIG_HASH = {cfg_hash!r}
+
 N_SLAVES = {n_slaves}
 
 # Per-slave structure, in slave order. Each motor dict's "idx" is LOCAL to its
@@ -379,6 +510,16 @@ MOTOR_SOFT_MAX = [m["soft_max"] for m in MOTORS]
 
 # Motor counts per slave, in slave order.
 SLAVE_MOTOR_COUNTS = [len(s["motors"]) for s in SLAVES]
+
+# ── Configured rates (Hz) — mirror the firmware motor_config.h; recorded in the
+# .bin header and used as the run_policy --rate default (HOST_CMD_HZ). ──────────
+MASTER_POLL_HZ = {rates['master_poll_hz']}
+TELEMETRY_HZ   = {rates['telemetry_hz']}
+SLAVE_TICK_HZ  = {rates['slave_tick_hz']}
+HOST_CMD_HZ    = {rates['host_cmd_hz']}
+
+RATES = dict(master_poll_hz=MASTER_POLL_HZ, telemetry_hz=TELEMETRY_HZ,
+             slave_tick_hz=SLAVE_TICK_HZ, host_cmd_hz=HOST_CMD_HZ)
 '''
 
 
@@ -457,10 +598,22 @@ def do_slave(src):
     src_name = _configs_rel(src)
     cfg = load(src)
     validate(cfg)
+    rates, timeouts = load_system(os.path.dirname(src))
     header_path = os.path.join(REPO_ROOT, "firmware/common/include/motor_config.h")
     with open(header_path, "w") as fh:
-        fh.write(gen_header(cfg, src_name))
-    print(f"Generated {os.path.relpath(header_path, REPO_ROOT)}  (slave: {src_name}, N_MOTORS={len(cfg['motors'])})")
+        fh.write(gen_header(cfg, src_name, rates, timeouts))
+    print(f"Generated {os.path.relpath(header_path, REPO_ROOT)}  (slave: {src_name}, "
+          f"N_MOTORS={len(cfg['motors'])}, tick={rates['slave_tick_hz']}Hz)")
+
+
+def config_hash(paths):
+    """sha256 over the given YAML files' contents, sorted by filename. The runtime
+    staleness check (host/master_link/config_meta.py) recomputes this identically."""
+    h = hashlib.sha256()
+    for p in sorted(paths, key=os.path.basename):
+        with open(p, "rb") as fh:
+            h.update(fh.read())
+    return h.hexdigest()
 
 
 def do_system(srcs):
@@ -472,12 +625,16 @@ def do_system(srcs):
         validate(cfg)
         cfgs.append(cfg)
 
+    cfg_name = os.path.dirname(names[0]) or os.path.splitext(os.path.basename(names[0]))[0]
+    cfg_hash = config_hash(srcs)
+    rates, _timeouts = load_system(os.path.dirname(srcs[0]))
+
     sys_path = os.path.join(REPO_ROOT, "firmware/common/include/system_config.h")
-    py_path = os.path.join(REPO_ROOT, "tools/motor_config_gen.py")
+    py_path = os.path.join(REPO_ROOT, "host/master_link/motor_config_gen.py")
     with open(sys_path, "w") as fh:
-        fh.write(gen_system_header(cfgs, names))
+        fh.write(gen_system_header(cfgs, names, rates, _timeouts))
     with open(py_path, "w") as fh:
-        fh.write(gen_python(cfgs, names))
+        fh.write(gen_python(cfgs, names, cfg_name, cfg_hash, rates))
     counts = [len(c["motors"]) for c in cfgs]
     print(f"Generated {os.path.relpath(sys_path, REPO_ROOT)}  (NUM_SLAVES={len(cfgs)}, counts={counts})")
     print(f"Generated {os.path.relpath(py_path, REPO_ROOT)}")

@@ -1,0 +1,92 @@
+# Motor chain configuration for SLAVE-1 (2-slave setup 2s_10m, chain 1).
+#
+# Mirror of chain 0: two RS02 followed by three RS00, on SLAVE-1's own CAN bus
+# with node ids 6..10. motor_idx is the array index (0-based, LOCAL to this
+# slave); can_id is the RobStride node id on this bus. joint_name continues the
+# global motor numbering (motor5..motor9) for the 10-motor robot.
+#
+# Single source of truth for SLAVE-1. Both the firmware
+# (firmware/common/include/motor_config.h) and the host tools
+# (host/master_link/motor_config_gen.py) are GENERATED from this file:
+#
+#     python3 scripts/gen_motor_config.py --slave  slave1
+#     python3 scripts/gen_motor_config.py --system        # all slaves of active setup
+#
+# Edit this file, regenerate, then rebuild firmware. Do not hand-edit generated files.
+
+slave: slave1
+
+# Per-model CAN "operation control mode" (Communication Type 1) ranges, taken
+# from the RobStride user manuals (Type 1 tables). Identical to slave0.
+shared_ranges:
+  p_min: -12.57   # rad  (-4*pi)
+  p_max:  12.57   # rad  (+4*pi)
+  kp_min:  0.0
+  kp_max:  500.0
+  kd_min:  0.0
+  kd_max:  5.0
+
+models:
+  RS00:
+    v_min: -33.0   # rad/s
+    v_max:  33.0
+    t_min: -14.0   # Nm
+    t_max:  14.0
+  RS02:
+    v_min: -44.0   # rad/s
+    v_max:  44.0
+    t_min: -17.0   # Nm
+    t_max:  17.0
+
+# Chain 1: two RS02 followed by three RS00, can_id 6..10.
+motors:
+  - idx: 0
+    can_id: 6
+    model: RS02
+    joint_name: motor5
+    soft_min: -0.79   # ~45 deg
+    soft_max:  0.79
+    max_vel:   10.0
+    max_tau:   0.8    # Nm — torque trip: exceed and the motor drops to IDLE
+    default_kp: 15.0
+    default_kd:  1.0
+  - idx: 1
+    can_id: 7
+    model: RS02
+    joint_name: motor6
+    soft_min: -1.05   # ~60 deg
+    soft_max:  1.05
+    max_vel:   10.0
+    max_tau:   0.8    # Nm — torque trip: exceed and the motor drops to IDLE
+    default_kp: 15.0
+    default_kd:  1.0
+  - idx: 2
+    can_id: 8
+    model: RS00
+    joint_name: motor7
+    soft_min: -1.31   # ~75 deg
+    soft_max:  1.31
+    max_vel:   10.0
+    max_tau:   0.8    # Nm — torque trip: exceed and the motor drops to IDLE
+    default_kp: 15.0
+    default_kd:  1.0
+  - idx: 3
+    can_id: 9
+    model: RS00
+    joint_name: motor8
+    soft_min: -1.31   # ~75 deg
+    soft_max:  1.31
+    max_vel:   10.0
+    max_tau:   0.8    # Nm — torque trip: exceed and the motor drops to IDLE
+    default_kp: 15.0
+    default_kd:  1.0
+  - idx: 4
+    can_id: 10
+    model: RS00
+    joint_name: motor9
+    soft_min: -1.31   # ~75 deg
+    soft_max:  1.31
+    max_vel:   10.0
+    max_tau:   0.8    # Nm — torque trip: exceed and the motor drops to IDLE
+    default_kp: 15.0
+    default_kd:  1.0
