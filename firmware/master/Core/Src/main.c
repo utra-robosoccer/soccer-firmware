@@ -24,6 +24,7 @@
 /* USER CODE BEGIN Includes */
 #include "spi_master.h"
 #include "usb_tx.h"
+#include "imu_service.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -106,6 +107,8 @@ int main(void)
   MX_USB_DEVICE_Init();
   /* USER CODE BEGIN 2 */
 
+  /* Keep the motor master operational if the optional IMU is unavailable. */
+  (void)ImuService_Init(&hi2c1);
   MotorMaster_Init(&hspi1, &huart4);
   usb_printf("USB Test/r/n");
   HAL_GPIO_WritePin(GREEN_LED_GPIO_Port, GREEN_LED_Pin, GPIO_PIN_SET);
