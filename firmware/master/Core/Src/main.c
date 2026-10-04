@@ -25,6 +25,7 @@
 #include "spi_master.h"
 #include "usb_tx.h"
 #include "master_cycle.h"
+#include "imu_service.h"   /* optional BMI088 IMU on I2C1 (merged from the IMU PR) */
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -123,6 +124,10 @@ int main(void)
   MX_USB_DEVICE_Init();
   /* USER CODE BEGIN 2 */
 
+  /* Optional BMI088 IMU on I2C1. Runs its blocking init (soft-reset + ~420 ms of
+     HAL_Delay) here, BEFORE the TIM2 cycle starts, so it never steals cycle time;
+     if the IMU is absent the init fails fast (I2C timeouts) and the master runs on. */
+  (void)ImuService_Init(&hi2c1);
   MotorMaster_Init(&hspi1, &huart4);
   HAL_GPIO_WritePin(GREEN_LED_GPIO_Port, GREEN_LED_Pin, GPIO_PIN_SET);
   HAL_Delay(3000);

@@ -1,5 +1,6 @@
 #include "spi_master.h"
 #include "master_cycle.h"
+#include "imu_service.h"   /* optional BMI088 IMU on I2C1 (merged from the IMU PR) */
 #include <stdio.h>
 #include <stdarg.h>
 #include <string.h>
@@ -570,6 +571,7 @@ static void usb_tx_emit_test_frames(void)
 void MotorMaster_ProcessLoop(void)
 {
     static uint16_t cycles_since_status = 0;
+    static uint32_t next_imu_poll_ms   = 0;
 
     /* Drain the USB RX ring (scan + dispatch host frames) and pump the TX ring
        every iteration — both single-producer here in the main loop. */
@@ -608,5 +610,18 @@ void MotorMaster_ProcessLoop(void)
             for (uint8_t s = 0; s < NUM_SLAVES; s++) emit_slave_status(s, now_ms);
         }
         }
+    }
+
+    /* Sample the BMI088 at 100 Hz (IMU PR). Placed AFTER the cycle block and gated on its
+       own HAL_GetTick deadline, so it runs in the idle spin between TIM2 cycles rather than
+       inside a cycle's service — it never delays the SPI exchange or telemetry emit.
+       NOTE: ImuService_Poll does two BLOCKING I2C1 reads (~1.6 ms typical at 100 kHz; up to
+       ~6 ms worst case if a present IMU NAKs/times out). A missing IMU → no-op. If the IMU
+       read ever lands right after a cycle it can push that main-loop pass toward the 5 ms
+       budget; see the merge notes (candidate: 400 kHz I2C or I2C DMA/interrupt). */
+    uint32_t now_ms = HAL_GetTick();
+    if ((int32_t)(now_ms - next_imu_poll_ms) >= 0) {
+        next_imu_poll_ms = now_ms + IMU_SERVICE_POLL_PERIOD_MS;
+        (void)ImuService_Poll();
     }
 }
