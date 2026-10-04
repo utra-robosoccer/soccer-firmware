@@ -21,12 +21,14 @@ from policies.listen_policy import ListenPolicy
 from policies.man_1s_1m_policy import Man1s1mPolicy
 from policies.bench_sine import BenchSinePolicy
 from policies.legs_sine import LegsSinePolicy
+from policies.legs_walk import LegsWalkPolicy
 
 POLICIES = {
     "listen": ListenPolicy,
     "man_1s_1m": Man1s1mPolicy,
     "bench_sine": BenchSinePolicy,
     "legs_sine": LegsSinePolicy,
+    "legs_walk": LegsWalkPolicy,
 }
 
 
@@ -53,6 +55,8 @@ def main(argv=None):
     ap.add_argument("--port", default=None, help="serial port (default: auto-detect master)")
     ap.add_argument("--rate", type=float, default=50.0, help="control loop rate Hz (default 50)")
     ap.add_argument("--log-dir", default="logs", help="log directory (default: logs/)")
+    ap.add_argument("--mirror-signals", action="store_true",
+                    help="mirror telemetry signals to stdout (for debugging)")
     # Only the selected policy registers its own CLI args (e.g. --amp/--freq/--motors/--dur).
     if pcls_pre is not None and hasattr(pcls_pre, "add_args"):
         pcls_pre.add_args(ap)
