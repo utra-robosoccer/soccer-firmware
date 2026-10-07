@@ -183,7 +183,7 @@ typedef struct PROTO_PACKED {
     uint16_t     can_tx_errors;   /* CAN TX errors seen by the slave            */
     uint8_t      spi_tx_arm_fails;/* slave TX-arm (HAL DMA) failures, then retried (wraps) */
     tele_motor_t motors[MAX_MOTORS_PER_CHAIN];
-} tele_chain_t;                   /* 12 + 21·5 = 117 bytes */
+} tele_chain_t;                   /* 12 + 21·5 = 118 bytes */
 
 typedef struct PROTO_PACKED {
     uint16_t     cycle_id;         /* this telemetry's master cycle (increments/cycle) */
@@ -200,7 +200,7 @@ typedef struct PROTO_PACKED {
     uint8_t      n_chains;
     uint8_t      robot_state;      /* RobotState                                */
     tele_chain_t chains[MAX_CHAINS];
-} tele_robot_t;                    /* 20 + 117·4 = 488 bytes */
+} tele_robot_t;                    /* 20 + 118·4 = 492 bytes */
 
 /* ── status (unchanged cadence, 20 Hz) ───────────────────────────────────── */
 typedef struct PROTO_PACKED {
