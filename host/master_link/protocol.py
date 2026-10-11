@@ -78,6 +78,7 @@ TELE_FLAG_SATURATED        = 1 << 2
 TELE_FLAG_CLAMPED_POS      = 1 << 3
 TELE_FLAG_CLAMPED_TAU      = 1 << 4
 TELE_FLAG_CMD_STALE        = 1 << 5
+TELE_FLAG_CLAMPED_GAIN     = 1 << 6   # wire kp/kd clamped to the model's range
 
 # ── fixed-point scales (mirror protocol.h exactly) ────────────────────────────
 POS_SCALE = 10000.0   # rad   → i16 (home-frame ±π)
@@ -210,6 +211,8 @@ class TeleMotor:
     def clamped_tau(self) -> bool: return bool(self.flags & TELE_FLAG_CLAMPED_TAU)
     @property
     def cmd_stale(self) -> bool: return bool(self.flags & TELE_FLAG_CMD_STALE)
+    @property
+    def clamped_gain(self) -> bool: return bool(self.flags & TELE_FLAG_CLAMPED_GAIN)
 
 
 # ── command pack ──────────────────────────────────────────────────────────────

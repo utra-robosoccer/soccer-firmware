@@ -85,6 +85,7 @@ typedef enum {
 #define TELE_FLAG_CLAMPED_POS      (1u << 3u)  /* commanded pos hit a soft limit   */
 #define TELE_FLAG_CLAMPED_TAU      (1u << 4u)  /* vel feedforward cancelled at limit */
 #define TELE_FLAG_CMD_STALE        (1u << 5u)  /* executing a held/watchdog setpoint */
+#define TELE_FLAG_CLAMPED_GAIN     (1u << 6u)  /* wire kp/kd clamped to the model's range */
 
 /* ── wire header: 16 bytes ───────────────────────────────────────────────── */
 #ifdef __GNUC__

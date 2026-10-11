@@ -66,16 +66,31 @@ static uint8_t pack_faults(const motor_t *m)
 /* Soft-limit clamp on a commanded (pos, vel, tau_ff). One-sided about the shaft's ACTUAL
    position (soft_clamp_mit): a joint parked outside [lo,hi] can be held or driven back,
    never further out — so arming/commanding it never fights the shaft into an overtorque.
-   Outward feedforward (vel AND tau_ff) past a clamped position is cancelled, and |tau_ff|
-   is bounded to cfg->max_tau (the overtorque trip threshold). Returns TELE_FLAG_* bits. */
+   Outward feedforward (vel AND tau_ff) past a clamped position is cancelled, |vel| is
+   bounded to cfg->max_vel, and |tau_ff| to cfg->max_tau (the overtorque trip threshold).
+   Returns TELE_FLAG_* bits. */
 static uint8_t apply_soft_clamp(const MotorRuntime *r, float *pos, float *vel, float *tau_ff)
 {
     uint8_t c = soft_clamp_mit(pos, vel, tau_ff, r->pos,
-                               r->cfg->soft_min, r->cfg->soft_max, r->cfg->max_tau);
+                               r->cfg->soft_min, r->cfg->soft_max,
+                               r->cfg->max_vel, r->cfg->max_tau);
     uint8_t flags = 0u;
     if (c & SOFT_CLAMPED_POS) flags |= TELE_FLAG_CLAMPED_POS;
     if (c & SOFT_CLAMPED_FF)  flags |= TELE_FLAG_CLAMPED_TAU;
     return flags;
+}
+
+/* Clamp wire-sourced gains to this motor's per-model CAN encode range. The CAN encoder
+   (can_mit_control_set) would saturate them silently; clamping here keeps the runtime
+   state consistent with what is actually sent and reports it (TELE_FLAG_CLAMPED_GAIN).
+   Config-default gains (USE_CONFIG_GAINS) bypass this — they are validated at generation. */
+static uint8_t clamp_gains(uint8_t can_id, float *kp, float *kd)
+{
+    const MotorCanRange *rg = motor_can_range_by_id(can_id);
+    uint8_t c = 0u;
+    c |= soft_clamp_range(kp, rg ? rg->kp_min : KP_MIN, rg ? rg->kp_max : KP_MAX);
+    c |= soft_clamp_range(kd, rg ? rg->kd_min : KD_MIN, rg ? rg->kd_max : KD_MAX);
+    return c ? (uint8_t)TELE_FLAG_CLAMPED_GAIN : 0u;
 }
 
 /* Discover one motor: ping and wait up to 300 ms for a response. */
@@ -246,12 +261,14 @@ void motor_runtime_apply_cmd(uint8_t idx, const cmd_motor_t *m, uint16_t cmd_seq
         r->last_apply_clamp = apply_soft_clamp(r, &r->hold_pos, &r->hold_vel, &r->cmd_tau_ff);
         r->cmd_kp = use_cfg ? r->cfg->default_kp : proto_u16_to_f(m->kp, PROTO_KP_SCALE);
         r->cmd_kd = use_cfg ? r->cfg->default_kd : proto_u16_to_f(m->kd, PROTO_KD_SCALE);
+        if (!use_cfg) r->last_apply_clamp |= clamp_gains(cid, &r->cmd_kp, &r->cmd_kd);
         r->target_cmd_seq  = cmd_seq;
         r->got_fresh_cmd   = 1u;
         r->to_zero_arrived = 0u;
     } else if (d.next_state == LIFE_DAMPED) {
         r->cmd_kp     = 0.0f;            /* backdrive-safe: no position hold */
         r->cmd_kd     = use_cfg ? r->cfg->default_kd : proto_u16_to_f(m->kd, PROTO_KD_SCALE);
+        if (!use_cfg) (void)clamp_gains(cid, &r->cmd_kp, &r->cmd_kd);
         r->hold_vel   = 0.0f;
         r->cmd_tau_ff = 0.0f;
         r->to_zero_arrived = 0u;

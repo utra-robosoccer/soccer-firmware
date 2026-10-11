@@ -181,7 +181,7 @@ dropped), `cmd_crc_errors` (relayed from the slave), `seq_gaps` (master-observed
 | `MotorFaultCause` | NONE 0, OVERTORQUE 1, CAN_TIMEOUT 2, WATCHDOG 3*, MOTOR_FAULT 4, ZERO_TIMEOUT 5, NOT_ENABLED 6, WOUND 7, MASTER_LOST 8 |
 | `RobotState` | INIT 0, READY 1, DEGRADED 2, HOST_LOST 3 |
 | `CMD_FLAG_*` | VALID b0, USE_CONFIG_GAINS b1, FAULT_RESET b2 |
-| `TELE_FLAG_*` | REQUEST_REJECTED b0, TO_ZERO_ARRIVED b1, SATURATED b2, CLAMPED_POS b3, CLAMPED_TAU b4, CMD_STALE b5 |
+| `TELE_FLAG_*` | REQUEST_REJECTED b0, TO_ZERO_ARRIVED b1, SATURATED b2, CLAMPED_POS b3, CLAMPED_TAU b4, CMD_STALE b5, CLAMPED_GAIN b6 |
 
 \* `CAUSE_WATCHDOG` (3) is defined but **no longer raised** — the master-loss ramp uses
 `CAUSE_MASTER_LOST` (8) instead (see §7, §8).
@@ -303,8 +303,12 @@ dropped), `cmd_crc_errors` (relayed from the slave), `seq_gaps` (master-observed
 - **Soft-limit one-sided clamp (`soft_limit.h`):** `soft_clamp_mit` extends `[lo,hi]` to include the
   shaft's actual position, so a joint parked outside its range can hold / return but not be driven
   further out (avoids a clamp-induced overtorque at arm). It also cancels outward feedforward
-  (`vel`, `tau_ff`) past a clamped position and bounds `|tau_ff|` to `cfg->max_tau` (the overtorque
-  trip threshold). Sets `CLAMPED_POS`/`CLAMPED_TAU`.
+  (`vel`, `tau_ff`) past a clamped position and bounds `|vel|` to `cfg->max_vel` and `|tau_ff|` to
+  `cfg->max_tau` (the overtorque trip threshold). Sets `CLAMPED_POS`/`CLAMPED_TAU`. Wire-sourced
+  kp/kd are clamped to the per-model CAN encode range (`clamp_gains` → `CLAMPED_GAIN`) instead of
+  being silently saturated by the encoder; config-default gains bypass the clamp. Per-joint gain
+  caps tighter than the encode range need the soccer-software model exporter to carry them in
+  `firmware_config.yaml` (follow-up).
 - **Master-loss watchdog (`master_watchdog.h`):** see §7c.
 - **Timebase:** DWT cycle counter (84 MHz); `ms_since(now,t)` is a signed subtraction so a
   `watchdog_ms`/`armed_ms` set during the ~23 ms arm can't underflow into a spurious trip.
