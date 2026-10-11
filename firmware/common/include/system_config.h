@@ -1,6 +1,6 @@
 /* AUTO-GENERATED — DO NOT EDIT.
- * Sources: robot_legs/slave0.yaml, robot_legs/slave1.yaml
- * Regenerate: python3 scripts/gen_motor_config.py --system configs/robot_legs/slave0.yaml configs/robot_legs/slave1.yaml
+ * Sources: configs/2s_10m/firmware_config.yaml
+ * Regenerate: SOCCER_SETUP=2s_10m python3 scripts/gen_motor_config.py --system
  */
 #ifndef SYSTEM_CONFIG_H
 #define SYSTEM_CONFIG_H
@@ -18,17 +18,17 @@ extern "C" {
 /* SPI transport encoding bounds (global, widest model across all slaves). */
 #define MOTOR_P_MIN  -12.57f
 #define MOTOR_P_MAX  12.57f
-#define MOTOR_V_MIN  -50.0f
-#define MOTOR_V_MAX  50.0f
-#define MOTOR_T_MIN  -60.0f
-#define MOTOR_T_MAX  60.0f
+#define MOTOR_V_MIN  -44.0f
+#define MOTOR_V_MAX  44.0f
+#define MOTOR_T_MIN  -17.0f
+#define MOTOR_T_MAX  17.0f
 
 /* Timing, rates & derived tick counts (system-wide; mirror of motor_config.h). */
 /* Configured rates (Hz) — reported in MasterStatus and the .bin header. */
 #define MASTER_POLL_HZ  200u
 #define TELEMETRY_HZ    200u
 #define SLAVE_TICK_HZ   200u
-#define HOST_CMD_HZ     50u
+#define HOST_CMD_HZ     200u
 
 /* One master poll cycle (µs). The slave derives its forward/fallback service
    thresholds from this, so they scale with the poll rate (incl. 400 Hz). */
@@ -53,8 +53,8 @@ extern "C" {
 
 /* Dead-man watchdogs (task 6). Master host-death is counted in master cycles; the slave
    master-loss ramp is in ms (HAL_GetTick). */
-#define HOST_CMD_TIMEOUT_MS      60u   /* 3 host periods, 25 ms floor */
-#define HOST_LOST_CYCLES         12u   /* host-death trigger (master cycles) */
+#define HOST_CMD_TIMEOUT_MS      25u   /* 3 host periods, 25 ms floor */
+#define HOST_LOST_CYCLES         5u   /* host-death trigger (master cycles) */
 #define HOST_LOST_DAMP_CYCLES    60u   /* master DAMPED dwell before IDLE (cycles) */
 #define MASTER_LOST_GRACE_MS     50u   /* slave hold (v/tau=0) after exchanges stop */
 #define MASTER_LOST_DAMP_MS      300u   /* slave DAMPED dwell before IDLE */

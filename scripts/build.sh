@@ -131,13 +131,19 @@ if [ -n "$CONFIG_SLAVE" ]; then
         printf "error: no active setup; write configs/active (e.g. 'echo bench > configs/active') or pass --setup <name>\n" >&2
         exit 1
     fi
-    CONFIG_YAML="$REPO_ROOT/configs/$SETUP/${CONFIG_SLAVE}.yaml"
-    if [ ! -f "$CONFIG_YAML" ]; then
-        printf "error: config '%s' not found for setup '%s' (looked for %s)\n" "$CONFIG_SLAVE" "$SETUP" "$CONFIG_YAML" >&2
+    FW_CONFIG="$REPO_ROOT/configs/$SETUP/firmware_config.yaml"
+    LEGACY_YAML="$REPO_ROOT/configs/$SETUP/${CONFIG_SLAVE}.yaml"
+    if [ -f "$FW_CONFIG" ]; then
+        # Single-file artifact (preferred): select the slave section by bare name.
+        printf "Config: setup '%s' — regenerating motor_config.h from firmware_config.yaml (section %s)\n" "$SETUP" "$CONFIG_SLAVE"
+        SOCCER_SETUP="$SETUP" python3 "$REPO_ROOT/scripts/gen_motor_config.py" --slave "$CONFIG_SLAVE" || exit 1
+    elif [ -f "$LEGACY_YAML" ]; then
+        printf "Config: setup '%s' — regenerating motor_config.h from configs/%s/%s.yaml\n" "$SETUP" "$SETUP" "$CONFIG_SLAVE"
+        python3 "$REPO_ROOT/scripts/gen_motor_config.py" --slave "$LEGACY_YAML" || exit 1
+    else
+        printf "error: no firmware_config.yaml or %s.yaml for setup '%s' (in configs/%s/)\n" "$CONFIG_SLAVE" "$SETUP" "$SETUP" >&2
         exit 1
     fi
-    printf "Config: setup '%s' — regenerating motor_config.h from configs/%s/%s.yaml\n" "$SETUP" "$SETUP" "$CONFIG_SLAVE"
-    python3 "$REPO_ROOT/scripts/gen_motor_config.py" --slave "$CONFIG_YAML" || exit 1
 fi
 
 # ── run headless build ───────────────────────────────────────────────────────
