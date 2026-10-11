@@ -22,6 +22,7 @@ typedef struct {
     float              hold_vel;      /* velocity feedforward                     */
     float              cmd_kp;        /* gains for the active armed mode          */
     float              cmd_kd;
+    float              cmd_tau_ff;    /* torque feedforward (MIT only), clamped to ±max_tau */
     float              pos_offset;    /* raw - wrapped (the 2*pi multiple adopted) */
     uint8_t            motor_fault;   /* packed Type-2 fault bits                 */
     uint32_t           fault_word;    /* telemetry mirror of the latched 0x3022   */

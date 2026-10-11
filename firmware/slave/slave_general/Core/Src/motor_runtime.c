@@ -63,20 +63,19 @@ static uint8_t pack_faults(const motor_t *m)
     return f;
 }
 
-/* Soft-limit clamp on a commanded (pos, vel). One-sided about the shaft's ACTUAL position
-   (soft_clamp_pos): a joint parked outside [lo,hi] can be held or driven back, never further
-   out — so arming/commanding it never fights the shaft into an overtorque. Returns clamp
-   flag bits; also cancels feedforward velocity driving further out. */
-static uint8_t apply_soft_clamp(const MotorRuntime *r, float *pos, float *vel)
+/* Soft-limit clamp on a commanded (pos, vel, tau_ff). One-sided about the shaft's ACTUAL
+   position (soft_clamp_mit): a joint parked outside [lo,hi] can be held or driven back,
+   never further out — so arming/commanding it never fights the shaft into an overtorque.
+   Outward feedforward (vel AND tau_ff) past a clamped position is cancelled, and |tau_ff|
+   is bounded to cfg->max_tau (the overtorque trip threshold). Returns TELE_FLAG_* bits. */
+static uint8_t apply_soft_clamp(const MotorRuntime *r, float *pos, float *vel, float *tau_ff)
 {
-    float before = *pos;
-    uint8_t clamp = 0u;
-    if (soft_clamp_pos(pos, r->pos, r->cfg->soft_min, r->cfg->soft_max)) {
-        clamp |= TELE_FLAG_CLAMPED_POS;
-        if (before > *pos && *vel > 0.0f)      { *vel = 0.0f; clamp |= TELE_FLAG_CLAMPED_TAU; }
-        else if (before < *pos && *vel < 0.0f) { *vel = 0.0f; clamp |= TELE_FLAG_CLAMPED_TAU; }
-    }
-    return clamp;
+    uint8_t c = soft_clamp_mit(pos, vel, tau_ff, r->pos,
+                               r->cfg->soft_min, r->cfg->soft_max, r->cfg->max_tau);
+    uint8_t flags = 0u;
+    if (c & SOFT_CLAMPED_POS) flags |= TELE_FLAG_CLAMPED_POS;
+    if (c & SOFT_CLAMPED_FF)  flags |= TELE_FLAG_CLAMPED_TAU;
+    return flags;
 }
 
 /* Discover one motor: ping and wait up to 300 ms for a response. */
@@ -131,6 +130,7 @@ static void arm_enable(uint8_t idx)
     r->pos_offset = snap.pos - wrapped;
     r->hold_pos   = wrapped;
     r->hold_vel   = 0.0f;
+    r->cmd_tau_ff = 0.0f;
     r->cmd_kp     = r->cfg->default_kp;
     r->cmd_kd     = r->cfg->default_kd;
 
@@ -214,15 +214,17 @@ void motor_runtime_apply_cmd(uint8_t idx, const cmd_motor_t *m, uint16_t cmd_seq
         arm_enable(idx);                 /* enable + capture (handshake, once) */
     }
     if (d.capture_hold) {                /* re-hold without re-enabling */
-        r->hold_pos = r->pos;
-        r->hold_vel = 0.0f;
-        r->cmd_kp   = r->cfg->default_kp;
-        r->cmd_kd   = r->cfg->default_kd;
+        r->hold_pos   = r->pos;
+        r->hold_vel   = 0.0f;
+        r->cmd_tau_ff = 0.0f;
+        r->cmd_kp     = r->cfg->default_kp;
+        r->cmd_kd     = r->cfg->default_kd;
         r->to_zero_arrived = 0u;
     }
     if (d.enter_to_zero) {               /* init creep on entry */
         r->hold_pos         = r->pos;
         r->hold_vel         = 0.0f;
+        r->cmd_tau_ff       = 0.0f;
         r->zero_best_abs    = fabsf(r->pos);
         r->zero_progress_ms = HAL_GetTick();
         r->zero_settle      = 0u;
@@ -238,18 +240,20 @@ void motor_runtime_apply_cmd(uint8_t idx, const cmd_motor_t *m, uint16_t cmd_seq
 
     uint8_t use_cfg = (m->flags & CMD_FLAG_USE_CONFIG_GAINS) != 0u;
     if (d.next_state == LIFE_MIT) {
-        r->hold_pos = proto_i16_to_f(m->pos, PROTO_POS_SCALE);
-        r->hold_vel = proto_i16_to_f(m->vel, PROTO_VEL_SCALE);
-        r->last_apply_clamp = apply_soft_clamp(r, &r->hold_pos, &r->hold_vel);
+        r->hold_pos   = proto_i16_to_f(m->pos, PROTO_POS_SCALE);
+        r->hold_vel   = proto_i16_to_f(m->vel, PROTO_VEL_SCALE);
+        r->cmd_tau_ff = proto_i16_to_f(m->tau_ff, PROTO_TAU_SCALE);
+        r->last_apply_clamp = apply_soft_clamp(r, &r->hold_pos, &r->hold_vel, &r->cmd_tau_ff);
         r->cmd_kp = use_cfg ? r->cfg->default_kp : proto_u16_to_f(m->kp, PROTO_KP_SCALE);
         r->cmd_kd = use_cfg ? r->cfg->default_kd : proto_u16_to_f(m->kd, PROTO_KD_SCALE);
         r->target_cmd_seq  = cmd_seq;
         r->got_fresh_cmd   = 1u;
         r->to_zero_arrived = 0u;
     } else if (d.next_state == LIFE_DAMPED) {
-        r->cmd_kp   = 0.0f;              /* backdrive-safe: no position hold */
-        r->cmd_kd   = use_cfg ? r->cfg->default_kd : proto_u16_to_f(m->kd, PROTO_KD_SCALE);
-        r->hold_vel = 0.0f;
+        r->cmd_kp     = 0.0f;            /* backdrive-safe: no position hold */
+        r->cmd_kd     = use_cfg ? r->cfg->default_kd : proto_u16_to_f(m->kd, PROTO_KD_SCALE);
+        r->hold_vel   = 0.0f;
+        r->cmd_tau_ff = 0.0f;
         r->to_zero_arrived = 0u;
     }
 
@@ -365,9 +369,10 @@ void motor_runtime_update(uint32_t now_ms, uint8_t cmd_fresh)
             case LIFE_HOLD:
             case LIFE_MIT:
                 /* With a fresh command every cycle, HOLD and MIT both drive the current
-                   targets; master-loss is handled by the ramp above, not here. */
-                send_mit(i, 0.0f, motors_rt[i].hold_pos, motors_rt[i].hold_vel,
-                         motors_rt[i].cmd_kp, motors_rt[i].cmd_kd);
+                   targets; master-loss is handled by the ramp above, not here. cmd_tau_ff
+                   is nonzero only in MIT (arm/re-hold/damped/to-zero all reset it). */
+                send_mit(i, motors_rt[i].cmd_tau_ff, motors_rt[i].hold_pos,
+                         motors_rt[i].hold_vel, motors_rt[i].cmd_kp, motors_rt[i].cmd_kd);
                 break;
 
             case LIFE_DAMPED:

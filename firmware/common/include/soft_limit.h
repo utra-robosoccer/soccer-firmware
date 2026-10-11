@@ -26,6 +26,35 @@ static inline uint8_t soft_clamp_pos(float *pos, float actual, float lo, float h
     return 0u;
 }
 
+/* Clamp bits returned by soft_clamp_mit (pure; the caller maps them to TELE_FLAG_*). */
+#define SOFT_CLAMPED_POS 0x01u
+#define SOFT_CLAMPED_FF  0x02u
+
+/* Full MIT-command clamp: the one-sided position clamp above, plus cancellation of any
+ * feedforward (vel, tau_ff) that would drive further OUT past a clamped position, plus a
+ * magnitude bound on tau_ff of ±tau_lim. tau_lim is the overtorque trip threshold
+ * (cfg->max_tau), so the commanded feedforward alone can never exceed what the torque
+ * guard allows. Returns SOFT_CLAMPED_* bits. */
+static inline uint8_t soft_clamp_mit(float *pos, float *vel, float *tau_ff,
+                                     float actual, float lo, float hi, float tau_lim)
+{
+    float before = *pos;
+    uint8_t clamp = 0u;
+    if (soft_clamp_pos(pos, actual, lo, hi)) {
+        clamp |= SOFT_CLAMPED_POS;
+        if (before > *pos) {   /* clamped from above: outward = positive */
+            if (*vel    > 0.0f) { *vel    = 0.0f; clamp |= SOFT_CLAMPED_FF; }
+            if (*tau_ff > 0.0f) { *tau_ff = 0.0f; clamp |= SOFT_CLAMPED_FF; }
+        } else {               /* clamped from below: outward = negative */
+            if (*vel    < 0.0f) { *vel    = 0.0f; clamp |= SOFT_CLAMPED_FF; }
+            if (*tau_ff < 0.0f) { *tau_ff = 0.0f; clamp |= SOFT_CLAMPED_FF; }
+        }
+    }
+    if      (*tau_ff >  tau_lim) { *tau_ff =  tau_lim; clamp |= SOFT_CLAMPED_FF; }
+    else if (*tau_ff < -tau_lim) { *tau_ff = -tau_lim; clamp |= SOFT_CLAMPED_FF; }
+    return clamp;
+}
+
 #ifdef __cplusplus
 }
 #endif

@@ -300,9 +300,11 @@ dropped), `cmd_crc_errors` (relayed from the slave), `seq_gaps` (master-observed
   (`cmd_seq_on_mit_frame`); the next fresh Type-2 closes it crediting `last_applied`
   (`cmd_seq_on_reply`); any non-MIT frame closes it without crediting; arm/re-hold/to-zero/disable
   reset it (`reset_cmd_seq` from the mode SM). Host comparison is wrap-aware (`seq_ge`, RFC-1982).
-- **Soft-limit one-sided clamp (`soft_limit.h`):** `soft_clamp_pos` extends `[lo,hi]` to include the
+- **Soft-limit one-sided clamp (`soft_limit.h`):** `soft_clamp_mit` extends `[lo,hi]` to include the
   shaft's actual position, so a joint parked outside its range can hold / return but not be driven
-  further out (avoids a clamp-induced overtorque at arm). Sets `CLAMPED_POS`/`CLAMPED_TAU`.
+  further out (avoids a clamp-induced overtorque at arm). It also cancels outward feedforward
+  (`vel`, `tau_ff`) past a clamped position and bounds `|tau_ff|` to `cfg->max_tau` (the overtorque
+  trip threshold). Sets `CLAMPED_POS`/`CLAMPED_TAU`.
 - **Master-loss watchdog (`master_watchdog.h`):** see §7c.
 - **Timebase:** DWT cycle counter (84 MHz); `ms_since(now,t)` is a signed subtraction so a
   `watchdog_ms`/`armed_ms` set during the ~23 ms arm can't underflow into a spurious trip.
@@ -452,8 +454,10 @@ requested mode is re-applied every cycle.
 Key rules:
 - **HOLD is the only arm-from-IDLE and the only enable.** On entry: `arm_enable` (handshake), capture
   the home-frame position (`hold_pos`), load config gains.
-- **MIT** stores fixed-point targets and `target_cmd_seq`; `apply_soft_clamp` applies the one-sided
-  soft-limit clamp. **DAMPED** = Kp 0 + config Kd. **TO_ZERO** creeps to home 0, sets
+- **MIT** stores fixed-point targets (`pos`, `vel`, `tau_ff`) and `target_cmd_seq`;
+  `apply_soft_clamp` applies the one-sided soft-limit clamp and the `tau_ff` bound. `tau_ff` is
+  passed to the motor in MIT only — arm / re-hold / DAMPED / TO_ZERO and the watchdog ramps all
+  reset it to 0. **DAMPED** = Kp 0 + config Kd. **TO_ZERO** creeps to home 0, sets
   `TO_ZERO_ARRIVED`, stalls → `CAUSE_ZERO_TIMEOUT`.
 - **Wound rejection:** IDLE→HOLD with `|offset| > MOTOR_WOUND_OFFSET_MAX` → FAULT/`CAUSE_WOUND`.
 - **Faults latch:** armed requests rejected until an IDLE request or `FAULT_RESET` clears, then the
