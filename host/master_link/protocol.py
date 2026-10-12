@@ -39,7 +39,7 @@ MSG_NAMES = {
 MAX_MOTORS_PER_CHAIN = 5
 MAX_CHAINS           = 4
 
-# ── per-motor lifecycle (tele_motor_t.state) ──────────────────────────────────
+# ── per-motor lifecycle (tele_motor_t.drive_state) ──────────────────────────────────
 (LIFE_BOOT, LIFE_DISCOVERING, LIFE_IDLE, LIFE_HOLD, LIFE_MIT, LIFE_DAMPED,
  LIFE_TO_ZERO, LIFE_FAULT) = range(8)
 LIFECYCLE_NAMES = {
@@ -51,10 +51,10 @@ LIFECYCLE_NAMES = {
 (REQ_IDLE, REQ_HOLD, REQ_MIT, REQ_DAMPED, REQ_TO_ZERO) = range(5)
 MODE_REQ_NAMES = {0: "IDLE", 1: "HOLD", 2: "MIT", 3: "DAMPED", 4: "TO_ZERO"}
 
-# ── RS motor run_mode reported in Type-2 (tele_motor_t.motor_mode) ────────────
+# ── RS motor run_mode reported in Type-2 (tele_motor_t.rs_mode) ────────────
 MOTOR_MODE_NAMES = {0: "RESET", 1: "CAL", 2: "NORMAL"}
 
-# ── fault cause (tele_motor_t.cause, latched) ─────────────────────────────────
+# ── fault cause (tele_motor_t.drive_fault, latched) ─────────────────────────────────
 (CAUSE_NONE, CAUSE_OVERTORQUE, CAUSE_CAN_TIMEOUT, CAUSE_WATCHDOG,
  CAUSE_MOTOR_FAULT, CAUSE_ZERO_TIMEOUT, CAUSE_NOT_ENABLED, CAUSE_WOUND,
  CAUSE_MASTER_LOST) = range(9)
@@ -108,7 +108,7 @@ SZ_CMD_CHAIN      = 2 + SZ_CMD_MOTOR * MAX_MOTORS_PER_CHAIN          # 62
 FMT_CMD_ROBOT_HDR = "<HHBB"       # cycle_id,cmd_seq,n_chains,reserved
 SZ_CMD_ROBOT      = 6 + SZ_CMD_CHAIN * MAX_CHAINS                    # 254 (6 + 62*4)
 
-FMT_TELE_MOTOR    = "<hhhBBBBBBBIHH"  # pos,vel,tau,temp,state,cause,mode,fault,flags,fb_age,fault_word,last_applied_seq,reserved → 21
+FMT_TELE_MOTOR    = "<hhhBBBBBBBIHH"  # pos,vel,tau,temp,drive_state,drive_fault,rs_mode,rs_fault_bits,flags,fb_age,rs_fault_word,last_applied_seq,reserved → 21
 SZ_TELE_MOTOR     = struct.calcsize(FMT_TELE_MOTOR)
 FMT_TELE_CHAIN_HDR = "<BBBBIHHB"  # chain_id,n_motors,spi_seq_echo,spi_resyncs,slave_time_us,
                                   # cmd_crc_errors,can_tx_errors,spi_tx_arm_fails
@@ -168,13 +168,13 @@ class TeleMotor:
     vel_raw: int
     tau_raw: int
     temp_c: int
-    state: int
-    cause: int
-    motor_mode: int
-    motor_fault: int
+    drive_state: int
+    drive_fault: int
+    rs_mode: int
+    rs_fault_bits: int
     flags: int
     fb_age_ms: int
-    fault_word: int
+    rs_fault_word: int
     last_applied_seq: int
     reserved: int
 
@@ -191,13 +191,11 @@ class TeleMotor:
     @property
     def temp(self) -> float: return float(self.temp_c)
     @property
-    def lifecycle(self) -> int: return self.state
+    def drive_state_name(self) -> str: return LIFECYCLE_NAMES.get(self.drive_state, f"?{self.drive_state}")
     @property
-    def lifecycle_name(self) -> str: return LIFECYCLE_NAMES.get(self.state, f"?{self.state}")
+    def drive_fault_name(self) -> str: return CAUSE_NAMES.get(self.drive_fault, f"?{self.drive_fault}")
     @property
-    def cause_name(self) -> str: return CAUSE_NAMES.get(self.cause, f"?{self.cause}")
-    @property
-    def motor_mode_name(self) -> str: return MOTOR_MODE_NAMES.get(self.motor_mode, f"?{self.motor_mode}")
+    def rs_mode_name(self) -> str: return MOTOR_MODE_NAMES.get(self.rs_mode, f"?{self.rs_mode}")
 
     @property
     def request_rejected(self) -> bool: return bool(self.flags & TELE_FLAG_REQUEST_REJECTED)
@@ -286,14 +284,14 @@ def parse_robot_cmd(p: bytes) -> dict:
 
 # ── telemetry pack (mirror of the firmware builder; for tests/simulation) ─────
 def pack_tele_motor(pos_raw: int, vel_raw: int, tau_raw: int, temp_c: int,
-                    state: int, cause: int, motor_mode: int, motor_fault: int,
-                    flags: int, fb_age_ms: int, fault_word: int,
+                    drive_state: int, drive_fault: int, rs_mode: int, rs_fault_bits: int,
+                    flags: int, fb_age_ms: int, rs_fault_word: int,
                     last_applied_seq: int, reserved: int = 0) -> bytes:
     """Pack one tele_motor_t (21 B) from RAW wire values (ints, already scaled)."""
     return struct.pack(FMT_TELE_MOTOR, pos_raw, vel_raw, tau_raw, temp_c & 0xFF,
-                       state & 0xFF, cause & 0xFF, motor_mode & 0xFF,
-                       motor_fault & 0xFF, flags & 0xFF, fb_age_ms & 0xFF,
-                       fault_word & 0xFFFFFFFF, last_applied_seq & 0xFFFF,
+                       drive_state & 0xFF, drive_fault & 0xFF, rs_mode & 0xFF,
+                       rs_fault_bits & 0xFF, flags & 0xFF, fb_age_ms & 0xFF,
+                       rs_fault_word & 0xFFFFFFFF, last_applied_seq & 0xFFFF,
                        reserved & 0xFFFF)
 
 

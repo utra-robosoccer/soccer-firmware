@@ -63,13 +63,13 @@ int main(void)
     tm->vel         = proto_f_to_i16(-1.25f, PROTO_VEL_SCALE, NULL);  /* -125 */
     tm->tau         = proto_f_to_i16(0.3f,   PROTO_TAU_SCALE, NULL);  /* 30   */
     tm->temp_c      = 42u;
-    tm->state       = LIFE_MIT;
-    tm->cause       = CAUSE_NONE;
-    tm->motor_mode  = 2u;
-    tm->motor_fault = 0x0Au;
-    tm->flags       = TELE_FLAG_TO_ZERO_ARRIVED;
-    tm->fb_age_ms   = 250u;
-    tm->fault_word  = 0xDEADBEEFu;
+    tm->drive_state   = LIFE_MIT;
+    tm->drive_fault   = CAUSE_NONE;
+    tm->rs_mode       = 2u;
+    tm->rs_fault_bits = 0x0Au;
+    tm->flags         = TELE_FLAG_TO_ZERO_ARRIVED;
+    tm->fb_age_ms     = 250u;
+    tm->rs_fault_word = 0xDEADBEEFu;
     tm->last_applied_seq = 0x1234u;
     tm->reserved    = 0u;
     print_hex("ROBOTTELE", (const uint8_t *)&t, (unsigned)sizeof(t));

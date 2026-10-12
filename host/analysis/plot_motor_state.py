@@ -111,7 +111,7 @@ def _load_state(folder):
         if t is None:
             continue
         state[r["motor"]].append((t, _f(r["pos"]), _f(r["vel"]), _f(r["tau"]),
-                                  int(_f(r["cause"]) or 0), int(_f(r.get("state")) or 0)))
+                                  int(_f(r["drive_fault"]) or 0), int(_f(r.get("drive_state")) or 0)))
     return state, offset, ("master_ts_ms" if use_master else "host_ts")
 
 

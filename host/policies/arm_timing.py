@@ -79,8 +79,8 @@ class ArmTimingPolicy(Policy):
         print(f"  {'motor':>6}  {'arm time':>9}  {'final state':>11}  cause")
         for k in self._motors:
             snap = self._snap(state, k)
-            sname = snap.state_name if snap else "no-tele"
-            cause = snap.cause_name if snap else "-"
+            sname = snap.drive_state_name if snap else "no-tele"
+            cause = snap.drive_fault_name if snap else "-"
             t_h = self._t_hold.get(k)
             if t_h is not None and self._t_req is not None:
                 ms = (t_h - self._t_req) / 1e6
@@ -111,15 +111,15 @@ class ArmTimingPolicy(Policy):
             self._t_req = t_ns
             for k in self._motors:
                 snap = self._snap(state, k)
-                self._baseline[k] = snap.state if snap else None
-                if snap is not None and snap.state != LIFE_IDLE:
+                self._baseline[k] = snap.drive_state if snap else None
+                if snap is not None and snap.drive_state != LIFE_IDLE:
                     print(f"arm_timing: s{k[0]}.m{k[1]} not IDLE at HOLD start "
-                          f"({LIFECYCLE_NAMES.get(snap.state, snap.state)}) — "
+                          f"({LIFECYCLE_NAMES.get(snap.drive_state, snap.drive_state)}) — "
                           f"its number will not be a clean IDLE→HOLD measurement")
 
         for k in self._motors:
             snap = self._snap(state, k)
-            if k not in self._t_hold and snap is not None and snap.state == LIFE_HOLD:
+            if k not in self._t_hold and snap is not None and snap.drive_state == LIFE_HOLD:
                 self._t_hold[k] = t_ns
             cmds.append(MotorCommand(k[0], k[1], mode=MODE_HOLD,
                                      use_config_gains=True))

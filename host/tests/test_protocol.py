@@ -65,10 +65,11 @@ class TeleRoundTrip(unittest.TestCase):
         pr, _ = P.enc_i16(0.5, P.POS_SCALE)
         vr, _ = P.enc_i16(-1.25, P.VEL_SCALE)
         tr, _ = P.enc_i16(0.3, P.TAU_SCALE)
-        motor = dict(pos_raw=pr, vel_raw=vr, tau_raw=tr, temp_c=42, state=P.LIFE_MIT,
-                     cause=P.CAUSE_NONE, motor_mode=2, motor_fault=0x0A,
+        motor = dict(pos_raw=pr, vel_raw=vr, tau_raw=tr, temp_c=42,
+                     drive_state=P.LIFE_MIT,
+                     drive_fault=P.CAUSE_NONE, rs_mode=2, rs_fault_bits=0x0A,
                      flags=P.TELE_FLAG_TO_ZERO_ARRIVED, fb_age_ms=250,
-                     fault_word=0xDEADBEEF, last_applied_seq=0x1234)
+                     rs_fault_word=0xDEADBEEF, last_applied_seq=0x1234)
         chains = [dict(chain_id=0, spi_seq_echo=0x2A, slave_time_us=7777,
                        cmd_crc_errors=3, can_tx_errors=1, spi_tx_arm_fails=4, motors=[motor])]
         b = P.pack_robot_tele(9, 123456, 42, 41, P.ROBOT_STATE_NAMES and 1, chains,
@@ -84,8 +85,8 @@ class TeleRoundTrip(unittest.TestCase):
         mo = ch["motors"][0]
         self.assertAlmostEqual(mo.pos, 0.5, places=3)
         self.assertAlmostEqual(mo.vel, -1.25, places=2)
-        self.assertEqual(mo.lifecycle_name, "MIT")
-        self.assertEqual(mo.motor_mode_name, "NORMAL")
+        self.assertEqual(mo.drive_state_name, "MIT")
+        self.assertEqual(mo.rs_mode_name, "NORMAL")
         self.assertEqual(mo.last_applied_seq, 0x1234)
         self.assertTrue(mo.to_zero_arrived)
 
@@ -164,10 +165,11 @@ class CrossLanguageFixture(unittest.TestCase):
         pr, _ = P.enc_i16(0.5, P.POS_SCALE)
         vr, _ = P.enc_i16(-1.25, P.VEL_SCALE)
         tr, _ = P.enc_i16(0.3, P.TAU_SCALE)
-        motor = dict(pos_raw=pr, vel_raw=vr, tau_raw=tr, temp_c=42, state=P.LIFE_MIT,
-                     cause=P.CAUSE_NONE, motor_mode=2, motor_fault=0x0A,
+        motor = dict(pos_raw=pr, vel_raw=vr, tau_raw=tr, temp_c=42,
+                     drive_state=P.LIFE_MIT,
+                     drive_fault=P.CAUSE_NONE, rs_mode=2, rs_fault_bits=0x0A,
                      flags=P.TELE_FLAG_TO_ZERO_ARRIVED, fb_age_ms=250,
-                     fault_word=0xDEADBEEF, last_applied_seq=0x1234)
+                     rs_fault_word=0xDEADBEEF, last_applied_seq=0x1234)
         tchains = [dict(chain_id=0, spi_seq_echo=0x2A, slave_time_us=7777,
                         cmd_crc_errors=3, can_tx_errors=1, spi_tx_arm_fails=4, motors=[motor])]
         py_tele = P.pack_robot_tele(9, 123456, 42, 41, 1, tchains,

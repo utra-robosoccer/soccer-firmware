@@ -23,9 +23,9 @@ def _rows(path):
 
 
 def _tele_frame(state=3, last_applied_seq=7):
-    motor = dict(pos_raw=5000, vel_raw=-125, tau_raw=30, temp_c=42, state=state,
-                 cause=0, motor_mode=2, motor_fault=0, flags=0, fb_age_ms=5,
-                 fault_word=0, last_applied_seq=last_applied_seq)
+    motor = dict(pos_raw=5000, vel_raw=-125, tau_raw=30, temp_c=42, drive_state=state,
+                 drive_fault=0, rs_mode=2, rs_fault_bits=0, flags=0, fb_age_ms=5,
+                 rs_fault_word=0, last_applied_seq=last_applied_seq)
     chains = [dict(chain_id=0, spi_seq_echo=0, slave_time_us=0,
                    cmd_crc_errors=0, can_tx_errors=0, motors=[motor])]
     payload = P.pack_robot_tele(1, 1000, last_applied_seq, 0, 1, chains)
@@ -85,7 +85,7 @@ class ConvertLog(unittest.TestCase):
             self.assertEqual(f, convert_log.MOTOR_STATE_FIELDS)
             self.assertEqual(len(rows), 1)
             self.assertEqual(rows[0]["slave"], "0")
-            self.assertEqual(rows[0]["state_name"], "HOLD")
+            self.assertEqual(rows[0]["drive_state_name"], "HOLD")
             self.assertEqual(rows[0]["last_applied_seq"], "7")
             self.assertNotEqual(rows[0]["master_ts_ms"], "")
 

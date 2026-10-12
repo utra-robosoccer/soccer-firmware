@@ -73,7 +73,7 @@ MODE_MIT     = P.REQ_MIT
 MODE_DAMPED  = P.REQ_DAMPED
 MODE_TO_ZERO = P.REQ_TO_ZERO
 
-# Armed lifecycles (tele_motor_t.state): HOLD/MIT/DAMPED/TO_ZERO.
+# Armed lifecycles (tele_motor_t.drive_state): HOLD/MIT/DAMPED/TO_ZERO.
 _ARMED_STATES = (P.LIFE_HOLD, P.LIFE_MIT, P.LIFE_DAMPED, P.LIFE_TO_ZERO)
 
 
@@ -98,16 +98,16 @@ class MotorSnap:
     slave: int
     local: int
     gidx: int | None
-    state: int          # MotorLifecycle (LIFE_*)
-    cause: int          # MotorFaultCause
+    drive_state: int    # MotorLifecycle (LIFE_*)
+    drive_fault: int    # MotorFaultCause
     pos: float
     vel: float
     tau: float
     temp: float
-    motor_mode: int     # RS Type-2 run mode (0 reset/1 cal/2 normal)
-    motor_fault: int
+    rs_mode: int        # RS Type-2 run mode (0 reset/1 cal/2 normal)
+    rs_fault_bits: int
     flags: int          # TELE_FLAG_*
-    fault_word: int
+    rs_fault_word: int
     fb_age: int
     last_applied_seq: int
     master_ts_ms: int   # MsgHeader.ts_ms (master tick at emit)
@@ -120,9 +120,9 @@ class MotorSnap:
     @property
     def saturated(self) -> bool: return bool(self.flags & P.TELE_FLAG_SATURATED)
     @property
-    def state_name(self) -> str: return P.LIFECYCLE_NAMES.get(self.state, f"?{self.state}")
+    def drive_state_name(self) -> str: return P.LIFECYCLE_NAMES.get(self.drive_state, f"?{self.drive_state}")
     @property
-    def cause_name(self) -> str: return P.CAUSE_NAMES.get(self.cause, f"?{self.cause}")
+    def drive_fault_name(self) -> str: return P.CAUSE_NAMES.get(self.drive_fault, f"?{self.drive_fault}")
 
 
 @dataclass(frozen=True)
@@ -136,7 +136,7 @@ class LinkState:
 
     def armed_motors(self):
         """(slave, local) of motors currently in an armed lifecycle."""
-        return [k for k, m in self.motors.items() if m.state in _ARMED_STATES]
+        return [k for k, m in self.motors.items() if m.drive_state in _ARMED_STATES]
 
 
 class MasterLink:
@@ -266,10 +266,11 @@ class MasterLink:
                         key = (sid, local)
                         self._motors[key] = MotorSnap(
                             slave=sid, local=local, gidx=self._gidx.get(key),
-                            state=mo.state, cause=mo.cause, pos=mo.pos, vel=mo.vel,
-                            tau=mo.tau, temp=mo.temp, motor_mode=mo.motor_mode,
-                            motor_fault=mo.motor_fault, flags=mo.flags,
-                            fault_word=mo.fault_word, fb_age=mo.fb_age_ms,
+                            drive_state=mo.drive_state, drive_fault=mo.drive_fault,
+                            pos=mo.pos, vel=mo.vel,
+                            tau=mo.tau, temp=mo.temp, rs_mode=mo.rs_mode,
+                            rs_fault_bits=mo.rs_fault_bits, flags=mo.flags,
+                            rs_fault_word=mo.rs_fault_word, fb_age=mo.fb_age_ms,
                             last_applied_seq=mo.last_applied_seq,
                             master_ts_ms=ts_ms, recv_ns=recv_ns)
                         det = self._live.get(key)

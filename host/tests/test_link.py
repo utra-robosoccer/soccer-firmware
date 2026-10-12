@@ -57,9 +57,9 @@ class FakeSerial:
 
 def _tele_payload(state=3, last_applied_seq=0, pos_raw=5000):
     """One-chain, one-motor tele_robot_t payload (motor at (0,0))."""
-    motor = dict(pos_raw=pos_raw, vel_raw=0, tau_raw=0, temp_c=42, state=state,
-                 cause=0, motor_mode=2, motor_fault=0, flags=0, fb_age_ms=5,
-                 fault_word=0, last_applied_seq=last_applied_seq)
+    motor = dict(pos_raw=pos_raw, vel_raw=0, tau_raw=0, temp_c=42, drive_state=state,
+                 drive_fault=0, rs_mode=2, rs_fault_bits=0, flags=0, fb_age_ms=5,
+                 rs_fault_word=0, last_applied_seq=last_applied_seq)
     chains = [dict(chain_id=0, spi_seq_echo=0, slave_time_us=0,
                    cmd_crc_errors=0, can_tx_errors=0, motors=[motor])]
     return P.pack_robot_tele(1, 0, 0, 0, 1, chains)
@@ -134,7 +134,7 @@ class MasterLinkFakeSerial(unittest.TestCase):
                 self.assertTrue(_wait(lambda: lk.stats["version_frames"] == 1))
 
                 st = lk.latest_state()
-                self.assertEqual(st.motors[(0, 0)].state, 3)
+                self.assertEqual(st.motors[(0, 0)].drive_state, 3)
                 self.assertEqual(st.motors[(0, 0)].gidx, 0)
                 self.assertEqual(st.master["rx_frames"], 99)
             finally:

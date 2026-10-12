@@ -520,10 +520,10 @@ void motor_runtime_sample(tele_motor_t *out, uint8_t idx)
     out->vel = proto_f_to_i16(r->vel, PROTO_VEL_SCALE, &sat);
     out->tau = proto_f_to_i16(r->tau, PROTO_TAU_SCALE, &sat);
     out->temp_c = (r->temp < 0.0f) ? 0u : (uint8_t)r->temp;
-    out->state  = r->state;
-    out->cause  = r->cause;
-    out->motor_mode  = r->motor_mode;
-    out->motor_fault = r->motor_fault;
+    out->drive_state   = r->state;
+    out->drive_fault   = r->cause;
+    out->rs_mode       = r->motor_mode;
+    out->rs_fault_bits = r->motor_fault;
 
     uint8_t flags = r->cmd_flags_latched;
     if (r->req_rejected)    flags |= TELE_FLAG_REQUEST_REJECTED;
@@ -533,7 +533,7 @@ void motor_runtime_sample(tele_motor_t *out, uint8_t idx)
 
     uint32_t age = HAL_GetTick() - r->last_fb_ms;
     out->fb_age_ms = (age > 255u) ? 255u : (uint8_t)age;
-    out->fault_word       = r->fault_word;
+    out->rs_fault_word    = r->fault_word;
     out->last_applied_seq = r->cmd_track.last_applied;
     out->reserved         = 0u;
 }

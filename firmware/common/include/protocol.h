@@ -34,7 +34,7 @@ typedef enum {
     ROBOT_HOST_LOST = 3u,  /* master's host-death watchdog tripped (driving DAMPED→IDLE) */
 } RobotState;
 
-/* ── per-motor lifecycle state (tele_motor_t.state, full u8) ─────────────────
+/* ── per-motor lifecycle state (tele_motor_t.drive_state, full u8) ───────────
  * The 5 commandable modes (IDLE/HOLD/MIT/DAMPED/TO_ZERO) plus the boot/discover
  * and fault states. See the mode-request state machine (motor_runtime). */
 typedef enum {
@@ -163,13 +163,13 @@ typedef struct PROTO_PACKED {
     int16_t  vel;             /* rad/s × PROTO_VEL_SCALE                         */
     int16_t  tau;             /* N·m   × PROTO_TAU_SCALE (measured)             */
     uint8_t  temp_c;          /* integer °C                                     */
-    uint8_t  state;           /* MotorLifecycle                                 */
-    uint8_t  cause;           /* MotorFaultCause (latched)                      */
-    uint8_t  motor_mode;      /* RS run_mode reported in Type-2 (0/1/2)         */
-    uint8_t  motor_fault;     /* packed Type-2 fault bits                       */
+    uint8_t  drive_state;     /* MotorLifecycle                                 */
+    uint8_t  drive_fault;     /* MotorFaultCause (latched)                      */
+    uint8_t  rs_mode;         /* RS run_mode reported in Type-2 (0/1/2)         */
+    uint8_t  rs_fault_bits;   /* packed Type-2 fault bits                       */
     uint8_t  flags;           /* TELE_FLAG_*                                    */
     uint8_t  fb_age_ms;       /* ms since last Type-2, saturating 255           */
-    uint32_t fault_word;      /* 0x3022 latched; 0 clear; 0xFFFFFFFF read-fail  */
+    uint32_t rs_fault_word;   /* 0x3022 latched; 0 clear; 0xFFFFFFFF read-fail  */
     uint16_t last_applied_seq;/* host cmd_seq last confirmed applied (0 = none) */
     uint16_t reserved;        /* growth slot (0)                                */
 } tele_motor_t;               /* 21 bytes */
@@ -279,7 +279,7 @@ _Static_assert(sizeof(tele_robot_t) == 20u + 118u * MAX_CHAINS, "tele_robot_t si
 _Static_assert(sizeof(MasterStatus) == 30u,                     "MasterStatus must be 30 bytes");
 _Static_assert(sizeof(SlaveStatus)  == 18u,                     "SlaveStatus must be 18 bytes");
 _Static_assert(LIFE_FAULT  <= 255u,                             "MotorLifecycle fits u8");
-_Static_assert(CAUSE_WOUND <= 255u,                             "MotorFaultCause fits u8");
+_Static_assert(CAUSE_MASTER_LOST <= 255u,                       "MotorFaultCause fits u8");
 #endif
 
 /* ── CRC16-CCITT ─────────────────────────────────────────────────────────── */

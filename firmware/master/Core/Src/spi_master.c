@@ -197,7 +197,7 @@ static uint8_t any_motor_armed(void)
         uint8_t nm = (latest_tele[s].n_motors > MAX_MOTORS_PER_SLAVE)
                      ? MAX_MOTORS_PER_SLAVE : latest_tele[s].n_motors;
         for (uint8_t i = 0; i < nm; i++) {
-            uint8_t st = latest_tele[s].motors[i].state;
+            uint8_t st = latest_tele[s].motors[i].drive_state;
             if (st == LIFE_HOLD || st == LIFE_MIT || st == LIFE_DAMPED || st == LIFE_TO_ZERO)
                 return 1u;
         }
@@ -530,7 +530,7 @@ static void poll_one_slave(uint8_t s)
         uint8_t nm = (tele.n_motors > MAX_MOTORS_PER_SLAVE) ? MAX_MOTORS_PER_SLAVE
                                                             : tele.n_motors;
         for (uint8_t i = 0; i < nm; i++) {
-            uint8_t st8 = tele.motors[i].state;
+            uint8_t st8 = tele.motors[i].drive_state;
             if (st8 != LIFE_BOOT && st8 != LIFE_DISCOVERING)
                 alive_mask |= (uint8_t)(1u << i);
         }
