@@ -131,19 +131,22 @@ static void discover(uint8_t idx)
    action per cycle by motor_runtime_update's LIFE_IDLE path, and arm_finish enters HOLD.
    The caller (apply_cmd) has already cleared the wound guard via the state machine and
    guarded against restarts (arm_sm_active). Never writes mechanical zero. */
-static void arm_begin(uint8_t idx)
+static void arm_begin(uint8_t idx, uint8_t had_fault)
 {
     MotorRuntime *r = &motors_rt[idx];
     motor_t snap;
     motor_get_snapshot(idx, &snap);
 
     /* Reset the latched fault mirrors now; the CLEAR phase sends the CAN fault clear
-       (the RS refuses enable otherwise). */
+       (the RS refuses enable otherwise). `had_fault` comes from the caller's pre-reset
+       state — apply_cmd zeroes the driver fault_word before this runs, so the snapshot
+       alone can no longer tell that a fault was latched. */
     motor_set_fault_word(idx, 0u);
     r->fault_word = 0u;
     r->cause      = CAUSE_NONE;
 
-    arm_sm_begin(&r->arm_phase, &r->arm_wait, (uint8_t)(snap.fault_word != 0u));
+    arm_sm_begin(&r->arm_phase, &r->arm_wait,
+                 (uint8_t)(had_fault || snap.fault_word != 0u));
 }
 
 /* Handshake complete: capture the home-frame hold point from the freshest mirrored
@@ -215,6 +218,8 @@ void motor_runtime_apply_cmd(uint8_t idx, const cmd_motor_t *m, uint16_t cmd_seq
         can_disable_motor(cid, CAN_MASTER_ID);
     }
 
+    uint8_t was_fault = (uint8_t)(r->state == LIFE_FAULT);
+
     ModeDecision d = mode_sm_step(r->state, m->mode_req,
                                   (uint8_t)((m->flags & CMD_FLAG_VALID) != 0u),
                                   (uint8_t)((m->flags & CMD_FLAG_FAULT_RESET) != 0u),
@@ -229,12 +234,21 @@ void motor_runtime_apply_cmd(uint8_t idx, const cmd_motor_t *m, uint16_t cmd_seq
     }
     if (d.set_cause_wound) r->cause = CAUSE_WOUND;
     if (d.do_disable) {
-        can_disable_motor(cid, CAN_MASTER_ID);
+        /* Leaving FAULT: the RS driver's own latched fault must be cleared on the wire
+           or it refuses the next enable. Type-4 Byte0=1 both stops and clears, so it
+           replaces the plain disable here. */
+        if (was_fault) can_clear_fault(cid, CAN_MASTER_ID);
+        else           can_disable_motor(cid, CAN_MASTER_ID);
         r->hold_vel        = 0.0f;
         r->to_zero_arrived = 0u;
+    } else if (d.clear_fault && !d.do_arm) {
+        /* fault_reset that neither disables nor arms (e.g. IDLE+reset when mode_sm has
+           already stepped the state to IDLE, or a rejected request after the reset):
+           still send the wire-level clear. The arm path sends its own in SEND_CLEAR. */
+        can_clear_fault(cid, CAN_MASTER_ID);
     }
     if (d.do_arm && !arm_sm_active(r->arm_phase)) {
-        arm_begin(idx);                  /* start the async handshake (once) */
+        arm_begin(idx, was_fault);       /* start the async handshake (once) */
     }
     if (d.capture_hold) {                /* re-hold without re-enabling */
         r->hold_pos   = r->pos;
