@@ -33,7 +33,7 @@ docs an older `architecture.md` claimed to replace — `protocol.md`, `telemetry
 | **forward-on-command** | the slave services on receipt of each valid exchange, not on its own timer |
 | **cmd_seq** | `uint16` host command sequence, one per host tick (≥1, 0 = `CMD_SEQ_NONE`); echoed back as `last_applied_seq` |
 | **spi_seq** | `uint8` per-slave SPI link-health counter, echoed as `spi_seq_echo` — distinct from `cmd_seq` |
-| **arm (motor)** | enable a motor: the blocking CAN handshake on IDLE→HOLD (`arm_enable`, ~23 ms) |
+| **arm (motor)** | enable a motor: the async CAN handshake on IDLE→HOLD (`arm_sm.h`, ~11–13 cycles, non-blocking) |
 | **arm (SPI TX)** | load the slave's next telemetry frame into the TX DMA (`spi_arm_tx`) — unrelated to motor arming |
 | **mailbox (master)** | the double-buffered per-slave command store (`pend_*` → swap → `host_chain[]`) |
 | **late-arm** | the slave delays the SPI-TX arm to a TIM3 deadline so the fresh CAN reply rides the next exchange |
@@ -290,8 +290,9 @@ dropped), `cmd_crc_errors` (relayed from the slave), `seq_gaps` (master-observed
 ### 3d. Slave internals
 - **Main loop (`main.c`):** on `data_receive_flag`, copy the command under a brief IRQ mask
   (`cmd_local`), CRC-check (`spi_proto_parse_cmd`); on a fresh `SPI_OP_ROBOT_CMD` refresh every
-  motor's watchdog, `motor_runtime_apply_cmd` per motor, then **re-capture `now`/DWT** (arming can
-  block ~23 ms) and `motor_runtime_update` (forward service). The fallback tick services only when
+  motor's watchdog, `motor_runtime_apply_cmd` per motor, then **re-capture `now`/DWT** (cheap
+  insurance — apply no longer blocks since the arm went async) and `motor_runtime_update`
+  (forward service). The fallback tick services only when
   exchanges have stopped (`slave_service_due`, `slave_service.h`).
 - **Feedback (`motor_runtime_on_feedback`):** on each CAN feedback (`can_feedback_count` change)
   mirror the Type-2 into `motors_rt`, step the enable monitor, and pair `cmd_seq` **now** (so the
@@ -311,7 +312,7 @@ dropped), `cmd_crc_errors` (relayed from the slave), `seq_gaps` (master-observed
   `firmware_config.yaml` (follow-up).
 - **Master-loss watchdog (`master_watchdog.h`):** see §7c.
 - **Timebase:** DWT cycle counter (84 MHz); `ms_since(now,t)` is a signed subtraction so a
-  `watchdog_ms`/`armed_ms` set during the ~23 ms arm can't underflow into a spurious trip.
+  `watchdog_ms`/`armed_ms` stamped later in the same cycle can't underflow into a spurious trip.
 
 ### 3e. Slave ↔ motor (CAN, RobStride)
 - **Bus:** classic CAN 2.0, 1 Mbps (`Prescaler 2, BS1 16TQ, BS2 4TQ, SJW 1TQ` → 21 TQ, ~81 % sample
@@ -328,9 +329,13 @@ dropped), `cmd_crc_errors` (relayed from the slave), `seq_gaps` (master-observed
   `HAL_CAN_AddTxMessage`. With 5 motors, 2 sends/cycle find all 3 busy and spin — ~280 µs of wasted
   slave CPU per cycle. **The bus serializes frames regardless of mailbox count**, so this is a CPU
   cost, not a latency one (see §4, §11).
-- **Arm handshake (`arm_enable`, ~23 ms, blocking, once per IDLE→HOLD):** optional fault-clear
-  (`HAL_Delay(5)`) → write MIT run-mode + ≤10 ms ACK wait + `HAL_Delay(10)` → enable + ≤10 ms ACK
-  wait + `HAL_Delay(10)` → first MIT. Never writes mechanical zero.
+- **Arm handshake (ASYNC, `arm_sm.h`, once per IDLE→HOLD):** non-blocking phase machine stepped
+  one CAN action per cycle from `motor_runtime_update`'s IDLE path: optional fault-clear (wait
+  ~5 ms) → write MIT run-mode (wait ~20 ms) → enable (wait ~20 ms) → capture hold + first MIT
+  (`arm_finish` → HOLD). The motor stays IDLE on the wire until completion; HOLD re-requests are
+  idempotent, an IDLE request or master loss mid-handshake cancels. All motors arm concurrently
+  (one frame per motor per cycle — the IDLE-poll budget): **~11–13 cycles ≈ 55–65 ms total
+  regardless of motor count**, no loop stall. Never writes mechanical zero.
 - **`wrap_pi` / `pos_offset` and the boot-angle finding:** `pos` on the wire is the home-frame angle
   wrapped to [−π,π]; `pos_offset` holds the whole-turn remainder so a power-cycle single-turn reading
   can't command a long-way rotation. A shaft wound beyond `MOTOR_WOUND_OFFSET_MAX` (9.0 rad) is
@@ -456,7 +461,8 @@ requested mode is re-applied every cycle.
 | BOOT/DISCOVERING | IDLE | reject | reject | reject | reject |
 
 Key rules:
-- **HOLD is the only arm-from-IDLE and the only enable.** On entry: `arm_enable` (handshake), capture
+- **HOLD is the only arm-from-IDLE and the only enable.** On entry: `arm_begin` starts the async
+  handshake (the motor stays IDLE on the wire until `arm_finish` enters HOLD), then capture
   the home-frame position (`hold_pos`), load config gains.
 - **MIT** stores fixed-point targets (`pos`, `vel`, `tau_ff`) and `target_cmd_seq`;
   `apply_soft_clamp` applies the one-sided soft-limit clamp and the `tau_ff` bound. `tau_ff` is
@@ -467,7 +473,7 @@ Key rules:
 - **Faults latch:** armed requests rejected until an IDLE request or `FAULT_RESET` clears, then the
   same request is re-evaluated from IDLE.
 - **`last_applied_seq` resets to 0** on any of arm / re-hold / to-zero / disable (`reset_cmd_seq`).
-- The **arm handshake** (`arm_enable`) and the **enable monitor** interact: after enabling, the
+- The **arm handshake** (`arm_sm.h`) and the **enable monitor** interact: after enabling, the
   monitor (§8) watches for `RS_MODE_NORMAL`; K not-NORMAL fresh frames → `CAUSE_NOT_ENABLED`.
 - Telemetry per state: `state` = the lifecycle; `cause` set on FAULT; `TELE_FLAG_REQUEST_REJECTED` on
   an illegal request; `CMD_STALE` while running a held/watchdog setpoint.
@@ -581,7 +587,7 @@ is compile-time on all three sides — there is **no in-band N check**.
 | connect | — | — | open port, `reset_input_buffer` |
 | live-detect | emits telemetry | services on exchange | `wait_until_live` (2 s) on master-ts advance |
 | rate check | reports `master_poll_hz` in status | — | refuse if `master_poll_hz` ≠ config |
-| arming | forwards HOLD | IDLE→HOLD per motor, `arm_enable` ~23 ms each (**~116 ms for 5 at once**) | policy requests HOLD |
+| arming | forwards HOLD | IDLE→HOLD per motor, async `arm_sm` phases (**~55–65 ms total, all motors concurrently, no stall**) | policy requests HOLD |
 | streaming | poll → telemetry each cycle | forward-on-command MIT | step on telemetry, send commands |
 | shutdown | — | — | Ctrl-C → disable armed motors, flush log, print summary |
 
@@ -591,7 +597,7 @@ is compile-time on all three sides — there is **no in-band N check**.
 
 | issue | impact |
 |---|---|
-| **Blocking arm handshake** | `arm_enable` blocks the slave ~23 ms/motor; arming 5 at once stalls the loop **~116 ms**. It does not trip MASTER_LOST (the post-arm service is cmd-fresh), but it is a visible stall. |
+| **Blocking arm handshake** | **FIXED (this branch)** — the arm is async (`arm_sm.h`); the loop never stalls. Remaining nit: the fixed phase waits are worst-case-sized (~55–65 ms to armed); a feedback-ACK early advance could roughly halve that. |
 | **Early all-replied TX arm — tracking bug** | the attempted early arm skipped `last_applied` values (~24 % superseded), most likely a per-cycle "replied this cycle" tracking bug (crediting the previous frame's reply), not timing. Reverted; deadline-only is used. Fix before enabling it for 400 Hz. |
 | **CAN TX busy-wait** | `can_tx` spins ~280 µs of slave CPU per cycle waiting for a free mailbox (5 motors). CPU waste only (bus-serialized anyway); fix with an interrupt-driven TX queue. |
 | **400 Hz deadline margin** | last reply max 1490 µs vs a 1.5 ms deadline → ~10 µs margin. Needs a tuned deadline / fixed early-arm / split CAN buses (§4). |
@@ -612,7 +618,11 @@ is compile-time on all three sides — there is **no in-band N check**.
   per cycle.
 - Trade-offs: more state; arming takes more cycles; must stay safe with absent motors.
 - Dependencies: enable monitor (exists); the drive-state machine below.
-- Status / notes:
+- Status / notes: **DONE (this branch)** — pure phase machine `arm_sm.h` (CLEAR→MODE→ENABLE→
+  FINISH, fixed waits = the blocking sequence's worst case), stepped from `motor_runtime_update`'s
+  IDLE path; `arm_begin`/`arm_finish` replace the blocking `arm_enable`. No stagger needed: all
+  motors arm concurrently at one frame/motor/cycle (~11–13 cycles total). NORMAL confirmation
+  stays with the enable monitor after HOLD entry. Tested: `test_arm_sm.c` (+ host wrapper).
 
 **Drive state / control mode split (CiA-402-style)**
 - Problem: the single mode machine conflates lifecycle and control mode.
