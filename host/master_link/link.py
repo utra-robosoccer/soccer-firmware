@@ -410,14 +410,22 @@ class MasterLink:
             with self._lock:
                 cycle_id = self._cycle_id
 
-        # Group by slave → chains, motors ordered by local index.
+        # Group by slave → chains. Each command is placed AT ITS LOCAL SLOT (the
+        # slave applies motors[i] to motor i); un-commanded slots on an addressed
+        # slave are zero-filled, i.e. DISABLE with no tuple — a cmd_robot_t
+        # addresses whole slaves, and motors a policy does not drive stay off.
         by_slave: dict = {}
         for c in cmds:
-            by_slave.setdefault(c.slave, []).append(c)
+            by_slave.setdefault(c.slave, {})[c.local] = c
         chains = []
         for sid in sorted(by_slave):
+            slots = by_slave[sid]
             motors = []
-            for c in sorted(by_slave[sid], key=lambda m: m.local):
+            for local in range(max(slots) + 1):
+                c = slots.get(local)
+                if c is None:
+                    motors.append(dict(drive_req=P.DRV_REQ_DISABLE, flags=0))
+                    continue
                 flags = P.CMD_FLAG_VALID if c.valid else 0
                 if c.use_config_gains:
                     flags |= P.CMD_FLAG_USE_CONFIG_GAINS

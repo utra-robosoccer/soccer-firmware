@@ -212,8 +212,11 @@ void motor_runtime_apply_cmd(uint8_t idx, const cmd_motor_t *m, uint16_t cmd_seq
     if (d.clear_fault) r->fault = DRVF_NONE;
     if (d.latch_fault != DRVF_NONE && r->fault == DRVF_NONE) r->fault = d.latch_fault;
     if (d.begin_enable) {
-        arm_sm_begin(&r->arm_phase, &r->arm_wait, 0u);  /* no CLEAR phase: CLEARING
-                                                           owns fault clears in v9 */
+        /* Always open with the Type-4 Byte0=1 clear: benign on a healthy disabled
+           motor, and some units refuse the enable without it even when their
+           fault reports are clean. (Latched DRIVE faults still go through
+           CLEARING — this is the wire-level belt-and-braces before an enable.) */
+        arm_sm_begin(&r->arm_phase, &r->arm_wait, 1u);
         r->have_tuple     = 0u;
         r->enable_sent_ms = 0u;
     }
@@ -313,29 +316,29 @@ void motor_runtime_update(uint32_t now_ms, uint8_t cmd_fresh)
             fault_detected(i, DRVF_MOTOR_REPORTED, now_ms);
         }
 
-        /* ── master loss: no fresh ROBOT_CMD this cycle. ENABLING has nothing to
-           ramp → immediate fault; ENABLED gets the hold grace (a brief SPI hiccup
-           recovers transparently), then the autonomous stop ramp → FAULT. STOPPING
-           and CLEARING run to completion on their own clocks. ─────────────────── */
-        if (!cmd_fresh) {
-            if (r->state == DRV_ENABLING) {
+        /* ── master loss: no fresh ROBOT_CMD this cycle. Both ENABLING and ENABLED
+           get the hold grace (a brief SPI hiccup or missed exchange recovers
+           transparently — v8 behaved the same); past the grace, ENABLED enters the
+           autonomous stop ramp and ENABLING aborts, both → FAULT(MASTER_LOST).
+           STOPPING and CLEARING run to completion on their own clocks. ─────────── */
+        if (!cmd_fresh &&
+            (r->state == DRV_ENABLING || r->state == DRV_ENABLED)) {
+            uint32_t since = (uint32_t)ms_since(now_ms, r->watchdog_ms);
+            if (master_loss_phase(since, MASTER_LOST_GRACE_MS, MASTER_LOST_DAMP_MS)
+                    != MASTER_HOLD_GRACE) {
                 fault_detected(i, DRVF_MASTER_LOST, now_ms);
             } else if (r->state == DRV_ENABLED) {
-                uint32_t since = (uint32_t)ms_since(now_ms, r->watchdog_ms);
-                if (master_loss_phase(since, MASTER_LOST_GRACE_MS, MASTER_LOST_DAMP_MS)
-                        == MASTER_HOLD_GRACE) {
-                    /* Hold the last setpoint with v_des/tau_ff zeroed; a limp motor
-                       (no tuple yet) just keeps the zero-gain poll below. */
-                    if (r->have_tuple) {
-                        send_mit(i, 0.0f, r->hold_pos, 0.0f, r->cmd_kp, r->cmd_kd);
-                    } else {
-                        can_mit_control_set(cid, 0.0f, r->pos + r->pos_offset,
-                                            0.0f, 0.0f, 0.0f);
-                    }
-                    continue;   /* grace frame sent; skip the normal service */
+                /* Grace: hold the last setpoint with v_des/tau_ff zeroed; a limp
+                   motor (no tuple yet) just keeps the zero-gain poll. */
+                if (r->have_tuple) {
+                    send_mit(i, 0.0f, r->hold_pos, 0.0f, r->cmd_kp, r->cmd_kd);
+                } else {
+                    can_mit_control_set(cid, 0.0f, r->pos + r->pos_offset,
+                                        0.0f, 0.0f, 0.0f);
                 }
-                fault_detected(i, DRVF_MASTER_LOST, now_ms);  /* → STOPPING ramp */
+                continue;       /* grace frame sent; skip the normal service */
             }
+            /* ENABLING in grace: the handshake is autonomous — keep servicing. */
         }
 
         /* ── per-state service: one CAN frame per motor per cycle + drive_sm tick. */
@@ -356,7 +359,12 @@ void motor_runtime_update(uint32_t now_ms, uint8_t cmd_fresh)
                 }
                 /* ARM_ACT_COMPLETE: sends exhausted; Run confirmation decides. */
             } else {
-                can_read_motor_state(cid);   /* poll for the Run confirmation */
+                /* Poll with the zero-gain Type-1 (no torque), not a Type-2 read:
+                   some units report a stale run_mode in replies to reads but the
+                   true one in replies to MIT frames (the v8 enable monitor relied
+                   on exactly that). Same poll ENABLED uses while limp. */
+                can_mit_control_set(cid, 0.0f, r->pos + r->pos_offset,
+                                    0.0f, 0.0f, 0.0f);
             }
             in.run_seen = (uint8_t)(r->enable_sent_ms != 0u &&
                                     r->motor_mode == RS_MODE_NORMAL &&
