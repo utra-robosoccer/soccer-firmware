@@ -58,7 +58,6 @@ extern "C" {
    master-loss ramp is in ms (HAL_GetTick). */
 #define HOST_CMD_TIMEOUT_MS      25u   /* 3 host periods, 25 ms floor */
 #define HOST_LOST_CYCLES         5u   /* host-death trigger (master cycles) */
-#define HOST_LOST_DAMP_CYCLES    60u   /* master DAMPED dwell before IDLE (cycles) */
 #define MASTER_LOST_GRACE_MS     50u   /* slave hold (v/tau=0) after exchanges stop */
 #define MASTER_LOST_DAMP_MS      300u   /* stop-ramp damp dwell (STOPPING) */
 

@@ -588,8 +588,7 @@ void MotorMaster_ProcessLoop(void)
         /* Host-death dead-man: if the host went quiet for too long while armed, override
            what we send the slaves (forced STOP), latched until a RESET-bearing command. */
         g_host_action = host_watchdog_step(&g_host_wd, g_cycles_since_fresh, any_motor_armed(),
-                                           g_fresh_fault_reset, HOST_LOST_CYCLES,
-                                           HOST_LOST_DAMP_CYCLES);
+                                           g_fresh_fault_reset, HOST_LOST_CYCLES);
         for (uint8_t s = 0; s < NUM_SLAVES; s++) {
             poll_one_slave(s);
         }

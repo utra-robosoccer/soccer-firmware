@@ -110,7 +110,6 @@ def timing_block(rates, timeouts):
     # Host-death (master side): 3 host-command periods, floored at 25 ms, in master cycles.
     host_lost_ms     = max(25, round(3.0 * 1000.0 / rates["host_cmd_hz"]))
     host_lost_cyc    = max(1, round(host_lost_ms * rates["master_poll_hz"] / 1000.0))
-    host_damp_cyc    = max(1, round(timeouts["master_lost_damp_ms"] * rates["master_poll_hz"] / 1000.0))
     # Slave TX-arm deadline: how long after an exchange the slave waits for the motor replies
     # before arming the DMA for the next exchange (so the fresh reply rides it). 0.6 cycle —
     # after the ≤2 ms reply window, comfortably before the next NSS.
@@ -147,7 +146,6 @@ def timing_block(rates, timeouts):
    master-loss ramp is in ms (HAL_GetTick). */
 #define HOST_CMD_TIMEOUT_MS      {host_lost_ms}u   /* 3 host periods, 25 ms floor */
 #define HOST_LOST_CYCLES         {host_lost_cyc}u   /* host-death trigger (master cycles) */
-#define HOST_LOST_DAMP_CYCLES    {host_damp_cyc}u   /* master DAMPED dwell before IDLE (cycles) */
 #define MASTER_LOST_GRACE_MS     {timeouts['master_lost_grace_ms']}u   /* slave hold (v/tau=0) after exchanges stop */
 #define MASTER_LOST_DAMP_MS      {timeouts['master_lost_damp_ms']}u   /* stop-ramp damp dwell (STOPPING) */
 
