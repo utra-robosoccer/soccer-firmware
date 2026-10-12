@@ -190,8 +190,23 @@ reference flow (host tools and ros2_control alike):
 
 ## 9. Bench status (2026-10-12)
 
-Single-motor enable validated: DISABLED→ENABLED in 40 ms, RESET→CLEARING→DISABLED
-recovery clean. Concurrent 5-motor enable reached 4/5 at 40–45 ms before the bench 48 V
-motor bus dropped (all motors on both chains went silent; needs a physical power check).
-Outstanding acceptance: the full fault-injection checklist, 5-motor concurrency rerun,
-and slave1 reflash (it runs v8 and has no attached probe).
+Validated on the 5-motor chain: concurrent enable 5/5 at 50–80 ms, repeatable (single
+motor 40–50 ms; v8 async arm was 60 ms, v8 blocking 125 ms); MIT streaming regression
+clean (latency median 2 cycles answered→confirmed, 0 unresolved, 0 dropped steps);
+master killed mid-stream → autonomous ramp → FAULT(MASTER_LOST) latched on every
+streaming motor, then full RESET→CLEARING→DISABLED→ENABLED recovery; first-fault-wins
+held throughout.
+
+Two handshake robustness findings (both fixed):
+- One-shot CAN TX (no retransmission) means a handshake frame sent mid-burst can lose
+  arbitration to a Type-2 reply elicited by an earlier frame of the same burst — at the
+  same phase every cycle, which starved one motor's enable deterministically (perfect
+  poll replies, enable never taking). ENABLING motors are now serviced at the HEAD of
+  the per-cycle burst (idle bus → the frame always wins), and the handshake re-sends
+  mode-write/enable alternately every cycle while waiting for the Run confirmation
+  instead of sending each once.
+
+Outstanding acceptance: physical fault injections (unplug mid-stream → CAN_TIMEOUT and
+the runtime ABSENT→DISABLED ping recovery, forced overtorque → STOPPING ramp, supply
+sag → MOTOR_REPORTED), boot-rest vendor-bit data across several power-ups, and slave1
+reflash before it rejoins (it runs v8; SPI has no version check).

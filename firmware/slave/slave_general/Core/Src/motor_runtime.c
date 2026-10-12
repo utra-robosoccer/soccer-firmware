@@ -285,7 +285,21 @@ void motor_runtime_on_feedback(uint32_t now_ms)
 
 void motor_runtime_update(uint32_t now_ms, uint8_t cmd_fresh)
 {
-    for (uint8_t i = 0; i < N_MOTORS; i++) {
+    /* Service ENABLING motors FIRST. CAN TX is one-shot (no retransmission), and a
+       handshake frame sent mid-burst can lose arbitration to a Type-2 reply elicited
+       by an earlier frame of the same burst (replies have a lower ext-ID than Type-3
+       enables) — the loser is silently dropped, at the same phase every cycle, which
+       starved one bench motor's enable indefinitely. At the head of the burst the bus
+       is idle, so the handshake frame always wins. */
+    uint8_t order[N_MOTORS];
+    uint8_t n = 0;
+    for (uint8_t i = 0; i < N_MOTORS; i++)
+        if (motors_rt[i].state == DRV_ENABLING) order[n++] = i;
+    for (uint8_t i = 0; i < N_MOTORS; i++)
+        if (motors_rt[i].state != DRV_ENABLING) order[n++] = i;
+
+    for (uint8_t k = 0; k < N_MOTORS; k++) {
+        uint8_t i = order[k];
         MotorRuntime *r = &motors_rt[i];
         uint8_t cid = motor_configs[i].can_id;
 
@@ -359,12 +373,20 @@ void motor_runtime_update(uint32_t now_ms, uint8_t cmd_fresh)
                 }
                 /* ARM_ACT_COMPLETE: sends exhausted; Run confirmation decides. */
             } else {
-                /* Poll with the zero-gain Type-1 (no torque), not a Type-2 read:
-                   some units report a stale run_mode in replies to reads but the
-                   true one in replies to MIT frames (the v8 enable monitor relied
-                   on exactly that). Same poll ENABLED uses while limp. */
-                can_mit_control_set(cid, 0.0f, r->pos + r->pos_offset,
-                                    0.0f, 0.0f, 0.0f);
+                /* Waiting on the Run confirmation: RE-SEND the handshake, don't
+                   just poll. Slave CAN TX is one-shot (no retransmission), so a
+                   single lost mode-write or enable would otherwise sink the whole
+                   handshake on a marginal drop — the sends are level-triggered
+                   and idempotent, and both elicit the confirming Type-2 reply.
+                   Alternate so a lost mode write is also repaired. */
+                /* arm_wait is free once arm_sm is idle — reuse it as the toggle. */
+                r->arm_wait ^= 1u;
+                if (r->arm_wait & 1u) {
+                    can_enable_motor(cid, CAN_MASTER_ID);
+                    r->enable_sent_ms = now_ms;
+                } else {
+                    can_change_motor_mode(cid, CAN_MASTER_ID, MIT_MODE);
+                }
             }
             in.run_seen = (uint8_t)(r->enable_sent_ms != 0u &&
                                     r->motor_mode == RS_MODE_NORMAL &&
