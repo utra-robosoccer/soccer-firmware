@@ -330,10 +330,9 @@ int main(void)
             motor_runtime_apply_cmd(_i, &chain.motors[_i], hdr.cmd_seq);
           }
         }
-        /* apply_cmd → arm_enable can BLOCK ~25 ms (CAN enable handshake + settle delays),
-           so refresh the time base before servicing. Otherwise the watchdog/fault checks
-           run against the pre-arm `now` while watchdog_ms was just set to a later tick, and
-           (now - watchdog_ms) underflows u32 → a spurious WATCHDOG trip right after arming. */
+        /* The arm handshake is async now (arm_sm.h) so apply_cmd no longer blocks; the
+           time-base refresh stays as cheap insurance that watchdog/fault checks never
+           run against a `now` captured before a slow apply. */
         now     = HAL_GetTick();
         now_cyc = DWT->CYCCNT;
         /* Forward service: drive the applied command (cmd_fresh) or, on a NOP, hold/ramp.

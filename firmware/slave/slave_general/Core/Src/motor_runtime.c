@@ -5,6 +5,7 @@
 #include "mode_sm.h"
 #include "../../../../common/include/master_watchdog.h"   /* master-loss ramp (task 6) */
 #include "../../../../common/include/soft_limit.h"         /* one-sided soft-limit clamp */
+#include "../../../../common/include/arm_sm.h"              /* async-arm phase machine */
 #include <math.h>
 #include <string.h>
 
@@ -120,58 +121,53 @@ static void discover(uint8_t idx)
     motors_rt[idx].cause = CAUSE_NONE;
 }
 
-/* Run the CAN enable handshake and capture the home-frame hold position. The ONLY
-   place the motor is enabled. Never writes mechanical zero. The caller (apply_cmd)
-   has already cleared the wound guard via the state machine; this just enables. */
-static void arm_enable(uint8_t idx)
+/* Async-arm pacing (cycles). Sized to the proven blocking sequence's WORST case:
+   ACK wait (≤10 ms) + 10 ms settle after each of mode-write and enable, 5 ms after a
+   fault clear. Cheap to tighten later with feedback-ACK-based early advance. */
+#define ARM_CLEAR_WAIT_CYCLES  ((uint8_t)((5u  * SLAVE_TICK_HZ + 999u) / 1000u))
+#define ARM_SETTLE_WAIT_CYCLES ((uint8_t)((20u * SLAVE_TICK_HZ + 999u) / 1000u))
+
+/* Start the NON-BLOCKING CAN enable handshake (arm_sm.h); the phases are serviced one
+   action per cycle by motor_runtime_update's LIFE_IDLE path, and arm_finish enters HOLD.
+   The caller (apply_cmd) has already cleared the wound guard via the state machine and
+   guarded against restarts (arm_sm_active). Never writes mechanical zero. */
+static void arm_begin(uint8_t idx)
 {
     MotorRuntime *r = &motors_rt[idx];
-    uint8_t cid = motor_configs[idx].can_id;
-
     motor_t snap;
     motor_get_snapshot(idx, &snap);
-    float wrapped = wrap_pi(snap.pos);
 
-    /* Clear a latched motor fault first (the RS refuses enable otherwise). */
-    if (snap.fault_word != 0u) {
-        can_clear_fault(cid, CAN_MASTER_ID);
-        HAL_Delay(5u);
-    }
+    /* Reset the latched fault mirrors now; the CLEAR phase sends the CAN fault clear
+       (the RS refuses enable otherwise). */
     motor_set_fault_word(idx, 0u);
     r->fault_word = 0u;
     r->cause      = CAUSE_NONE;
 
-    r->pos        = wrapped;
-    r->pos_offset = snap.pos - wrapped;
-    r->hold_pos   = wrapped;
+    arm_sm_begin(&r->arm_phase, &r->arm_wait, (uint8_t)(snap.fault_word != 0u));
+}
+
+/* Handshake complete: capture the home-frame hold point from the freshest mirrored
+   feedback (motor_runtime_on_feedback keeps r->pos/pos_offset current throughout the
+   handshake — the mode/enable ACKs are Type-2 frames) and enter HOLD. */
+static void arm_finish(uint8_t idx, uint32_t now_ms)
+{
+    MotorRuntime *r = &motors_rt[idx];
+
+    r->hold_pos   = r->pos;
     r->hold_vel   = 0.0f;
     r->cmd_tau_ff = 0.0f;
     r->cmd_kp     = r->cfg->default_kp;
     r->cmd_kd     = r->cfg->default_kd;
 
-    /* Enable handshake: mode + enable, each with an ACK wait + 10 ms settle. */
-    uint32_t ts = HAL_GetTick();
-    can_rx_flag = 0;
-    can_change_motor_mode(cid, CAN_MASTER_ID, MIT_MODE);
-    while (can_rx_flag == 0 && (HAL_GetTick() - ts) < 10u) {}
-    HAL_Delay(10u);
-
-    ts = HAL_GetTick();
-    can_rx_flag = 0;
-    can_enable_motor(cid, CAN_MASTER_ID);
-    while (can_rx_flag == 0 && (HAL_GetTick() - ts) < 10u) {}
-    HAL_Delay(10u);
-
-    send_mit(idx, 0.0f, r->hold_pos, 0.0f, r->cmd_kp, r->cmd_kd);
-
-    /* cmd_seq re-baseline (target_cmd_seq = NONE, last_applied → 0) is done centrally in
-       apply_cmd from ModeDecision.reset_cmd_seq, which covers this arm plus re-hold /
-       goto-zero / disable. */
+    /* cmd_seq re-baseline (target_cmd_seq = NONE, last_applied → 0) was done centrally
+       in apply_cmd from ModeDecision.reset_cmd_seq when the arm was requested. */
     enable_monitor_reset(idx);
     r->to_zero_arrived = 0u;
-    r->watchdog_ms = HAL_GetTick();
-    r->armed_ms    = HAL_GetTick();   /* CAN-timeout grace: a just-disabled motor has a
-                                         stale last_fb; don't trip until it can reply. */
+    r->watchdog_ms = now_ms;
+    r->armed_ms    = now_ms;   /* CAN-timeout grace: a just-disabled motor has a
+                                  stale last_fb; don't trip until it can reply. */
+    r->state       = LIFE_HOLD;
+    send_mit(idx, 0.0f, r->hold_pos, 0.0f, r->cmd_kp, r->cmd_kd);
 }
 
 /* ── public API ──────────────────────────────────────────────────────────── */
@@ -197,14 +193,26 @@ void motor_runtime_apply_cmd(uint8_t idx, const cmd_motor_t *m, uint16_t cmd_seq
     uint8_t cid = motor_configs[idx].can_id;
 
     /* Wound guard is consulted only on an IDLE→HOLD arm; compute it from a fresh
-       snapshot in that case so the pure SM can decide. */
+       snapshot in that case so the pure SM can decide. Checked only when STARTING a
+       handshake — a level-triggered HOLD re-request during an in-progress async arm
+       must not re-evaluate it (the shaft cannot wind mid-arm; re-tripping would strand
+       the phase machine in FAULT). */
     uint8_t wound = 0u;
-    if (m->mode_req == REQ_HOLD && r->state == LIFE_IDLE) {
+    if (m->mode_req == REQ_HOLD && r->state == LIFE_IDLE && !arm_sm_active(r->arm_phase)) {
         if (!r->alive) { r->req_rejected = 1u; return; }
         motor_t snap;
         motor_get_snapshot(idx, &snap);
         float off = snap.pos - wrap_pi(snap.pos);
         wound = (off > MOTOR_WOUND_OFFSET_MAX || off < -MOTOR_WOUND_OFFSET_MAX) ? 1u : 0u;
+    }
+
+    /* An IDLE request mid-handshake cancels the async arm. Disable is safe at any
+       phase (a not-yet-enabled motor ignores it). Other non-HOLD requests are rejected
+       by the SM below (state is still IDLE) and leave the handshake running — a host
+       that races ahead to MIT gets HOLD on completion, then its MIT is accepted. */
+    if (arm_sm_active(r->arm_phase) && m->mode_req == REQ_IDLE) {
+        arm_sm_cancel(&r->arm_phase, &r->arm_wait);
+        can_disable_motor(cid, CAN_MASTER_ID);
     }
 
     ModeDecision d = mode_sm_step(r->state, m->mode_req,
@@ -225,8 +233,8 @@ void motor_runtime_apply_cmd(uint8_t idx, const cmd_motor_t *m, uint16_t cmd_seq
         r->hold_vel        = 0.0f;
         r->to_zero_arrived = 0u;
     }
-    if (d.do_arm) {
-        arm_enable(idx);                 /* enable + capture (handshake, once) */
+    if (d.do_arm && !arm_sm_active(r->arm_phase)) {
+        arm_begin(idx);                  /* start the async handshake (once) */
     }
     if (d.capture_hold) {                /* re-hold without re-enabling */
         r->hold_pos   = r->pos;
@@ -274,7 +282,9 @@ void motor_runtime_apply_cmd(uint8_t idx, const cmd_motor_t *m, uint16_t cmd_seq
         r->to_zero_arrived = 0u;
     }
 
-    r->state = d.next_state;
+    /* The arm decision's next_state is HOLD, but the async handshake has only just
+       started — the motor stays IDLE on the wire until arm_finish enters HOLD. */
+    r->state = d.do_arm ? (uint8_t)LIFE_IDLE : d.next_state;
 }
 
 /* Wrap/stale-safe elapsed-time test. If `t` was stamped after `now` was captured (e.g. a
@@ -350,6 +360,15 @@ void motor_runtime_update(uint32_t now_ms, uint8_t cmd_fresh)
             fault_to(i, CAUSE_OVERTORQUE);
         }
 
+        /* Master-loss mid-handshake: the level-triggered HOLD stream stopped, so cancel
+           the async arm. The motor is not driving yet — no ramp needed, just make sure
+           it is disabled (safe at any phase) and stay IDLE. */
+        if (!cmd_fresh && arm_sm_active(motors_rt[i].arm_phase)) {
+            arm_sm_cancel(&motors_rt[i].arm_phase, &motors_rt[i].arm_wait);
+            can_disable_motor(cid, CAN_MASTER_ID);
+            motors_rt[i].cause = CAUSE_MASTER_LOST;
+        }
+
         /* Master-loss ramp (task 6): a cycle with NO fresh ROBOT_CMD (the fallback tick)
            means SPI exchanges stopped — master reset/dead. A still-armed joint ramps down
            by time since the last command (watchdog_ms, refreshed ONLY by ROBOT_CMD): hold
@@ -380,7 +399,18 @@ void motor_runtime_update(uint32_t now_ms, uint8_t cmd_fresh)
             }
         } else switch (motors_rt[i].state) {
             case LIFE_IDLE:
-                can_read_motor_state(cid);
+                /* An in-progress async arm owns this motor's one-frame cycle budget:
+                   step the phase machine instead of the state poll. */
+                if (arm_sm_active(motors_rt[i].arm_phase)) {
+                    uint8_t act = arm_sm_step(&motors_rt[i].arm_phase, &motors_rt[i].arm_wait,
+                                              ARM_CLEAR_WAIT_CYCLES, ARM_SETTLE_WAIT_CYCLES);
+                    if      (act == ARM_ACT_SEND_CLEAR)  can_clear_fault(cid, CAN_MASTER_ID);
+                    else if (act == ARM_ACT_SEND_MODE)   can_change_motor_mode(cid, CAN_MASTER_ID, MIT_MODE);
+                    else if (act == ARM_ACT_SEND_ENABLE) can_enable_motor(cid, CAN_MASTER_ID);
+                    else if (act == ARM_ACT_COMPLETE)    arm_finish(i, now_ms);
+                } else {
+                    can_read_motor_state(cid);
+                }
                 break;
 
             case LIFE_HOLD:

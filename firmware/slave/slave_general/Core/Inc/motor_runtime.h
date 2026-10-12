@@ -46,6 +46,8 @@ typedef struct {
     uint32_t           mon_prev_fb_count;
     uint16_t           target_cmd_seq;   /* host cmd_seq of the current MIT target */
     CmdSeqTrack        cmd_track;        /* reply-window pairing → last_applied_seq */
+    uint8_t            arm_phase;        /* async arm: ARM_PHASE_* (arm_sm.h)       */
+    uint8_t            arm_wait;         /* async arm: cycles left before next phase */
 } MotorRuntime;
 
 extern MotorRuntime motors_rt[N_MOTORS];
@@ -69,7 +71,10 @@ void motor_runtime_update(uint32_t now_ms, uint8_t cmd_fresh);
    the SPI header (stamped onto MIT targets for the last_applied echo). Honoured
    only for CMD_FLAG_VALID slots; an illegal transition leaves the state unchanged
    and sets the request_rejected telemetry flag. HOLD is the only arm-from-IDLE
-   transition, and it is the ONLY place the motor is enabled. */
+   transition; it STARTS the non-blocking enable handshake (arm_sm.h), which
+   motor_runtime_update services one CAN action per cycle — the motor stays IDLE on
+   the wire until the handshake completes into HOLD. Re-requests are idempotent; an
+   IDLE request or master loss mid-handshake cancels it. */
 void motor_runtime_apply_cmd(uint8_t idx, const cmd_motor_t *m, uint16_t cmd_seq);
 
 /* Refresh the master-link watchdog (any valid SPI frame proves the link alive). */
