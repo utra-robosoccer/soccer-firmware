@@ -73,10 +73,54 @@ typedef enum {
                                 slave ramped HOLD-grace → DAMPED → IDLE              */
 } MotorFaultCause;
 
+/* ═══ protocol v9 — drive-state × streamed-tuple split (docs/protocol_v9.md) ═══
+ * The three enums below replace MotorLifecycle / MotorModeReq / MotorFaultCause
+ * when the v9 runtime (drive_sm) lands; the v8 enums above remain only until the
+ * slave runtime is swapped over, then they are deleted. */
+
+/* Host→slave per-motor drive request (cmd_motor_t drive request byte).
+ * Level-triggered: safe to repeat every cycle; a repeat in the target or transit
+ * state is a no-op. The MIT tuple travels independently under CMD_FLAG_VALID —
+ * there is no MIT request; in ENABLED every valid tuple is simply applied. */
+typedef enum {
+    DRV_REQ_DISABLE = 0u,  /* Type-4 stop now                                   */
+    DRV_REQ_ENABLE  = 1u,  /* DISABLED → ENABLING → ENABLED; rejected elsewhere */
+    DRV_REQ_STOP    = 2u,  /* ENABLED → STOPPING (ramp) → DISABLED              */
+    DRV_REQ_RESET   = 3u,  /* FAULT → CLEARING → DISABLED; never enables        */
+} DriveReq;
+
+/* Per-motor drive state (tele_motor_t.drive_state under v9). */
+typedef enum {
+    DRV_BOOT        = 0u,
+    DRV_DISCOVERING = 1u,
+    DRV_ABSENT      = 2u,  /* no feedback; pinged ~100 ms; reply → DISABLED     */
+    DRV_DISABLED    = 3u,  /* motor off, polled every cycle                     */
+    DRV_ENABLING    = 4u,  /* async handshake; rs_mode==Run confirms → ENABLED  */
+    DRV_ENABLED     = 5u,  /* limp until the first VALID tuple; then applies it */
+    DRV_STOPPING    = 6u,  /* ramped stop; requested → DISABLED, fault → FAULT  */
+    DRV_CLEARING    = 7u,  /* RESET sent the Type-4 clear; judging the reply    */
+    DRV_FAULT       = 8u,  /* latched — see drive_fault; only RESET leaves      */
+} DriveState;
+
+/* Why a motor is faulted (tele_motor_t.drive_fault under v9). Latched at fault
+ * DETECTION (first fault wins); cleared on CLEARING entry so a re-latch reports
+ * the current fault. */
+typedef enum {
+    DRVF_NONE           = 0u,
+    DRVF_CAN_TIMEOUT    = 1u,  /* Type-2 feedback went stale (comms-broken)      */
+    DRVF_MASTER_LOST    = 2u,  /* SPI command stream died → autonomous stop ramp */
+    DRVF_ENABLE_FAILED  = 3u,  /* ENABLING saw no rs_mode==Run in time           */
+    DRVF_NOT_ENABLED    = 4u,  /* enable monitor: enabled motor reports not-Run  */
+    DRVF_OVERTORQUE     = 5u,  /* |tau| exceeded per-motor max_tau               */
+    DRVF_MOTOR_REPORTED = 6u,  /* RS vendor fault bits / Cali mode               */
+    DRVF_WOUND          = 7u,  /* ENABLE refused: shaft wound beyond safe range  */
+} DriveFault;
+
 /* ── cmd_motor_t.flags ───────────────────────────────────────────────────── */
 #define CMD_FLAG_VALID            (1u << 0u)  /* this slot carries a live command  */
 #define CMD_FLAG_USE_CONFIG_GAINS (1u << 1u)  /* ignore wire kp/kd, use config defaults */
-#define CMD_FLAG_FAULT_RESET      (1u << 2u)  /* clear a latched fault this cycle   */
+#define CMD_FLAG_FAULT_RESET      (1u << 2u)  /* v8 only — deleted by the v9 runtime
+                                                 swap (RESET is a drive request)   */
 
 /* ── tele_motor_t.flags ──────────────────────────────────────────────────── */
 #define TELE_FLAG_REQUEST_REJECTED (1u << 0u)  /* last mode request was illegal   */
@@ -96,7 +140,7 @@ typedef enum {
 
 /* Wire-contract version. Carried in MsgHeader.ver_flags low byte; both ends drop
  * and count any frame whose version != this. High byte reserved (0). */
-#define PROTO_VERSION 8u
+#define PROTO_VERSION 9u
 
 /* cmd_seq sentinel: 0 = "no host command applied yet" (tele_motor_t.last_applied_seq
  * for pre-arm / idle). The host starts cmd_seq at 1 and skips 0 on wrap. */
@@ -280,6 +324,9 @@ _Static_assert(sizeof(MasterStatus) == 30u,                     "MasterStatus mu
 _Static_assert(sizeof(SlaveStatus)  == 18u,                     "SlaveStatus must be 18 bytes");
 _Static_assert(LIFE_FAULT  <= 255u,                             "MotorLifecycle fits u8");
 _Static_assert(CAUSE_MASTER_LOST <= 255u,                       "MotorFaultCause fits u8");
+_Static_assert(DRV_FAULT   <= 255u,                             "DriveState fits u8");
+_Static_assert(DRVF_WOUND  <= 255u,                             "DriveFault fits u8");
+_Static_assert(DRV_REQ_RESET <= 255u,                           "DriveReq fits u8");
 #endif
 
 /* ── CRC16-CCITT ─────────────────────────────────────────────────────────── */

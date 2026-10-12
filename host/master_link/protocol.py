@@ -66,6 +66,30 @@ CAUSE_NAMES = {
 (ROBOT_INIT, ROBOT_READY, ROBOT_DEGRADED, ROBOT_HOST_LOST) = range(4)
 ROBOT_STATE_NAMES = {0: "INIT", 1: "READY", 2: "DEGRADED", 3: "HOST_LOST"}
 
+# ═══ protocol v9 — drive-state × streamed-tuple split (docs/protocol_v9.md) ═══
+# These replace LIFE_*/REQ_*/CAUSE_* when the v9 runtime (drive_sm) lands; the
+# v8 constants above remain only until the slave runtime is swapped over.
+
+# ── host→slave drive request (cmd_motor_t drive request byte, v9) ─────────────
+(DRV_REQ_DISABLE, DRV_REQ_ENABLE, DRV_REQ_STOP, DRV_REQ_RESET) = range(4)
+DRIVE_REQ_NAMES = {0: "DISABLE", 1: "ENABLE", 2: "STOP", 3: "RESET"}
+
+# ── per-motor drive state (tele_motor_t.drive_state, v9) ──────────────────────
+(DRV_BOOT, DRV_DISCOVERING, DRV_ABSENT, DRV_DISABLED, DRV_ENABLING,
+ DRV_ENABLED, DRV_STOPPING, DRV_CLEARING, DRV_FAULT) = range(9)
+DRIVE_STATE_NAMES = {
+    0: "BOOT", 1: "DISCOVERING", 2: "ABSENT", 3: "DISABLED", 4: "ENABLING",
+    5: "ENABLED", 6: "STOPPING", 7: "CLEARING", 8: "FAULT",
+}
+
+# ── drive fault (tele_motor_t.drive_fault, v9; latched at detection) ──────────
+(DRVF_NONE, DRVF_CAN_TIMEOUT, DRVF_MASTER_LOST, DRVF_ENABLE_FAILED,
+ DRVF_NOT_ENABLED, DRVF_OVERTORQUE, DRVF_MOTOR_REPORTED, DRVF_WOUND) = range(8)
+DRIVE_FAULT_NAMES = {
+    0: "NONE", 1: "CAN_TIMEOUT", 2: "MASTER_LOST", 3: "ENABLE_FAILED",
+    4: "NOT_ENABLED", 5: "OVERTORQUE", 6: "MOTOR_REPORTED", 7: "WOUND",
+}
+
 # ── cmd_motor_t.flags ─────────────────────────────────────────────────────────
 CMD_FLAG_VALID            = 1 << 0
 CMD_FLAG_USE_CONFIG_GAINS = 1 << 1
@@ -88,7 +112,7 @@ KP_SCALE  = 10.0      # Kp    → u16
 KD_SCALE  = 100.0     # Kd    → u16
 
 # ── wire-contract version ─────────────────────────────────────────────────────
-PROTO_VERSION = 8   # v8: tele_chain_t += spi_tx_arm_fails (slave TX-arm DMA failures).
+PROTO_VERSION = 9   # v9: drive-state × streamed-tuple split (docs/protocol_v9.md).
                     # v7: dead-man watchdogs — ROBOT_HOST_LOST + CAUSE_MASTER_LOST, slave
                     #     watchdog no longer refreshed by NOP keepalives (behavior change).
                     # v6: tele_robot_t cmd_seq_active + cmd_on_time/late/missing/duplicate.
