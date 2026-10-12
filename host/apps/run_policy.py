@@ -22,6 +22,7 @@ from policies.man_1s_1m_policy import Man1s1mPolicy
 from policies.bench_sine import BenchSinePolicy
 from policies.legs_sine import LegsSinePolicy
 from policies.legs_walk import LegsWalkPolicy
+from policies.arm_timing import ArmTimingPolicy
 
 POLICIES = {
     "listen": ListenPolicy,
@@ -29,6 +30,7 @@ POLICIES = {
     "bench_sine": BenchSinePolicy,
     "legs_sine": LegsSinePolicy,
     "legs_walk": LegsWalkPolicy,
+    "arm_timing": ArmTimingPolicy,
 }
 
 
