@@ -16,7 +16,7 @@ import time
 
 from master_link import config_meta
 from master_link import motor_config_gen as mc
-from master_link.link import MasterLink, MotorCommand, MODE_IDLE
+from master_link.link import MasterLink, MotorCommand, REQ_DISABLE
 from policies.listen_policy import ListenPolicy
 from policies.man_1s_1m_policy import Man1s1mPolicy
 from policies.bench_sine import BenchSinePolicy
@@ -200,7 +200,7 @@ def _shutdown(link, policy, stop_reason, rate, N, cycle_us, seq,
     try:
         armed = link.latest_state().armed_motors()
         if armed:
-            link.send_robot_cmd([MotorCommand(s, l, mode=MODE_IDLE) for (s, l) in armed])
+            link.send_robot_cmd([MotorCommand(s, l, req=REQ_DISABLE) for (s, l) in armed])
             print(f"disabled {len(armed)} armed motor(s): {armed}")
     except Exception:
         pass

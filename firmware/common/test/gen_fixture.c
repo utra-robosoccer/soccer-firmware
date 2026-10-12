@@ -29,7 +29,7 @@ int main(void)
     c.chains[0].chain_id = 0u;
     c.chains[0].n_motors = 1u;
     cmd_motor_t *m = &c.chains[0].motors[0];
-    m->mode_req = REQ_MIT;
+    m->drive_req = DRV_REQ_ENABLE;
     m->pos    = proto_f_to_i16(0.5f,   PROTO_POS_SCALE, NULL);   /* 5000  */
     m->vel    = proto_f_to_i16(-1.25f, PROTO_VEL_SCALE, NULL);   /* -125  */
     m->kp     = proto_f_to_u16(15.0f,  PROTO_KP_SCALE, NULL);    /* 150   */
@@ -63,11 +63,11 @@ int main(void)
     tm->vel         = proto_f_to_i16(-1.25f, PROTO_VEL_SCALE, NULL);  /* -125 */
     tm->tau         = proto_f_to_i16(0.3f,   PROTO_TAU_SCALE, NULL);  /* 30   */
     tm->temp_c      = 42u;
-    tm->drive_state   = LIFE_MIT;
-    tm->drive_fault   = CAUSE_NONE;
+    tm->drive_state   = DRV_ENABLED;
+    tm->drive_fault   = DRVF_NONE;
     tm->rs_mode       = 2u;
     tm->rs_fault_bits = 0x0Au;
-    tm->flags         = TELE_FLAG_TO_ZERO_ARRIVED;
+    tm->flags         = TELE_FLAG_SATURATED;
     tm->fb_age_ms     = 250u;
     tm->rs_fault_word = 0xDEADBEEFu;
     tm->last_applied_seq = 0x1234u;

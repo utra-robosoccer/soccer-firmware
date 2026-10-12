@@ -34,9 +34,9 @@ MOTOR_STATE_FIELDS = ["host_ts", "master_ts_ms", "motor", "slave", "local",
                       "drive_state", "drive_state_name", "drive_fault", "drive_fault_name",
                       "rs_mode", "rs_mode_name", "rs_fault_bits", "flags",
                       "rs_fault_word", "fb_age", "pos", "vel", "tau", "temp",
-                      "last_applied_seq", "request_rejected", "to_zero_arrived",
+                      "last_applied_seq", "request_rejected",
                       "saturated"]
-MOTOR_CMD_FIELDS = ["host_ts", "motor", "slave", "local", "mode", "mode_name",
+MOTOR_CMD_FIELDS = ["host_ts", "motor", "slave", "local", "drive_req", "drive_req_name",
                     "pos", "vel", "kp", "kd", "tau_ff", "cmd_seq", "cycle_id", "flags"]
 STATUS_FIELDS = ["host_ts", "type", "robot_state", "slave_alive", "uptime_ms",
                  "link_errors", "rx_frames", "master_poll_hz", "telemetry_hz",
@@ -132,7 +132,6 @@ def convert(path):
                             "pos": mo.pos, "vel": mo.vel, "tau": mo.tau, "temp": mo.temp,
                             "last_applied_seq": mo.last_applied_seq,
                             "request_rejected": int(mo.request_rejected),
-                            "to_zero_arrived": int(mo.to_zero_arrived),
                             "saturated": int(mo.saturated)})
             elif mt == P.MSG_MASTER_STATUS:
                 d = P.parse_master_status(inner)
@@ -161,9 +160,9 @@ def convert(path):
                         cmd_w.writerow({"host_ts": ht,
                                         "motor": _GIDX.get((sid, local)),
                                         "slave": sid, "local": local,
-                                        "mode": m["mode_req"],
-                                        "mode_name": P.MODE_REQ_NAMES.get(m["mode_req"],
-                                                                          str(m["mode_req"])),
+                                        "drive_req": m["drive_req"],
+                                        "drive_req_name": P.DRIVE_REQ_NAMES.get(
+                                            m["drive_req"], str(m["drive_req"])),
                                         "pos": m["pos"], "vel": m["vel"],
                                         "kp": m["kp"], "kd": m["kd"], "tau_ff": m["tau_ff"],
                                         "cmd_seq": d["cmd_seq"], "cycle_id": d["cycle_id"],

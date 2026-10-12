@@ -34,7 +34,7 @@ def _tele_frame(state=3, last_applied_seq=7):
 
 def _cmd_frame():
     chains = [{"chain_id": 0, "motors": [
-        {"mode_req": P.REQ_MIT, "pos": 1.5, "vel": -2.0, "kp": 15.0, "kd": 1.0,
+        {"drive_req": P.DRV_REQ_ENABLE, "pos": 1.5, "vel": -2.0, "kp": 15.0, "kd": 1.0,
          "tau_ff": 0.0, "flags": P.CMD_FLAG_VALID}]}]
     payload = P.pack_robot_cmd(1, 1, chains)
     return P.encode_frame(P.MSG_ROBOT_CMD, P.NODE_JETSON, P.NODE_MASTER, payload)
@@ -85,7 +85,7 @@ class ConvertLog(unittest.TestCase):
             self.assertEqual(f, convert_log.MOTOR_STATE_FIELDS)
             self.assertEqual(len(rows), 1)
             self.assertEqual(rows[0]["slave"], "0")
-            self.assertEqual(rows[0]["drive_state_name"], "HOLD")
+            self.assertEqual(rows[0]["drive_state_name"], "DISABLED")
             self.assertEqual(rows[0]["last_applied_seq"], "7")
             self.assertNotEqual(rows[0]["master_ts_ms"], "")
 
@@ -93,7 +93,7 @@ class ConvertLog(unittest.TestCase):
             f, rows = _rows(os.path.join(folder, "motor_cmd.csv"))
             self.assertEqual(f, convert_log.MOTOR_CMD_FIELDS)
             self.assertEqual(len(rows), 1)
-            self.assertEqual(rows[0]["mode_name"], "MIT")
+            self.assertEqual(rows[0]["drive_req_name"], "ENABLE")
             self.assertAlmostEqual(float(rows[0]["pos"]), 1.5, places=3)
             self.assertAlmostEqual(float(rows[0]["kp"]), 15.0, places=1)
             self.assertEqual(rows[0]["cmd_seq"], "1")

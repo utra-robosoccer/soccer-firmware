@@ -31,54 +31,12 @@ typedef enum {
     ROBOT_INIT      = 0u,
     ROBOT_READY     = 1u,
     ROBOT_DEGRADED  = 2u,
-    ROBOT_HOST_LOST = 3u,  /* master's host-death watchdog tripped (driving DAMPED→IDLE) */
+    ROBOT_HOST_LOST = 3u,  /* master's host-death watchdog tripped (forcing STOP) */
 } RobotState;
 
-/* ── per-motor lifecycle state (tele_motor_t.drive_state, full u8) ───────────
- * The 5 commandable modes (IDLE/HOLD/MIT/DAMPED/TO_ZERO) plus the boot/discover
- * and fault states. See the mode-request state machine (motor_runtime). */
-typedef enum {
-    LIFE_BOOT        = 0u,
-    LIFE_DISCOVERING = 1u,
-    LIFE_IDLE        = 2u,
-    LIFE_HOLD        = 3u,  /* armed, holding captured position                  */
-    LIFE_MIT         = 4u,  /* armed, streaming MIT setpoints                    */
-    LIFE_DAMPED      = 5u,  /* armed, Kp=0 + damping Kd (backdrive-safe)         */
-    LIFE_TO_ZERO     = 6u,  /* armed, creeping to home-frame 0 then holding      */
-    LIFE_FAULT       = 7u,  /* latched fault — see MotorFaultCause               */
-} MotorLifecycle;
+/* ═══ protocol v9 — drive-state × streamed-tuple split (docs/protocol_v9.md) ═══ */
 
-/* ── host→slave per-motor mode request (cmd_motor_t.mode_req) ──────────────── */
-typedef enum {
-    REQ_IDLE    = 0u,
-    REQ_HOLD    = 1u,  /* the only request that arms a motor from IDLE          */
-    REQ_MIT     = 2u,
-    REQ_DAMPED  = 3u,
-    REQ_TO_ZERO = 4u,
-} MotorModeReq;
-
-/* Why a motor is/last-was faulted. LATCHED on the trip; cleared only by an IDLE
- * request (then re-arm) or the fault_reset flag. */
-typedef enum {
-    CAUSE_NONE        = 0u,
-    CAUSE_OVERTORQUE  = 1u,  /* |tau| exceeded per-motor max_tau                 */
-    CAUSE_CAN_TIMEOUT = 2u,  /* this motor's Type-2 feedback went stale          */
-    CAUSE_WATCHDOG    = 3u,  /* master-link (SPI command) watchdog expired       */
-    CAUSE_MOTOR_FAULT = 4u,  /* RS motor's own Type-2 fault bits fired           */
-    CAUSE_ZERO_TIMEOUT= 5u,  /* TO_ZERO made no progress toward home (stall)     */
-    CAUSE_NOT_ENABLED = 6u,  /* armed motor reported not-running for K frames     */
-    CAUSE_WOUND       = 7u,  /* HOLD refused: shaft wound beyond the safe single-
-                                turn range (|offset| too large) — re-zero offline */
-    CAUSE_MASTER_LOST = 8u,  /* SPI command exchanges stopped (master reset/dead) →
-                                slave ramped HOLD-grace → DAMPED → IDLE              */
-} MotorFaultCause;
-
-/* ═══ protocol v9 — drive-state × streamed-tuple split (docs/protocol_v9.md) ═══
- * The three enums below replace MotorLifecycle / MotorModeReq / MotorFaultCause
- * when the v9 runtime (drive_sm) lands; the v8 enums above remain only until the
- * slave runtime is swapped over, then they are deleted. */
-
-/* Host→slave per-motor drive request (cmd_motor_t drive request byte).
+/* Host→slave per-motor drive request (cmd_motor_t.drive_req).
  * Level-triggered: safe to repeat every cycle; a repeat in the target or transit
  * state is a no-op. The MIT tuple travels independently under CMD_FLAG_VALID —
  * there is no MIT request; in ENABLED every valid tuple is simply applied. */
@@ -117,14 +75,14 @@ typedef enum {
 } DriveFault;
 
 /* ── cmd_motor_t.flags ───────────────────────────────────────────────────── */
-#define CMD_FLAG_VALID            (1u << 0u)  /* this slot carries a live command  */
+#define CMD_FLAG_VALID            (1u << 0u)  /* the MIT tuple in this slot is live;
+                                                 drive_req applies regardless      */
 #define CMD_FLAG_USE_CONFIG_GAINS (1u << 1u)  /* ignore wire kp/kd, use config defaults */
-#define CMD_FLAG_FAULT_RESET      (1u << 2u)  /* v8 only — deleted by the v9 runtime
-                                                 swap (RESET is a drive request)   */
+/* bit2 was CMD_FLAG_FAULT_RESET (v8); RESET is a drive request in v9 — reserved */
 
 /* ── tele_motor_t.flags ──────────────────────────────────────────────────── */
-#define TELE_FLAG_REQUEST_REJECTED (1u << 0u)  /* last mode request was illegal   */
-#define TELE_FLAG_TO_ZERO_ARRIVED  (1u << 1u)  /* TO_ZERO has settled at home     */
+#define TELE_FLAG_REQUEST_REJECTED (1u << 0u)  /* last drive request was illegal  */
+/* bit1 was TELE_FLAG_TO_ZERO_ARRIVED (v8); TO_ZERO is host-side in v9 — reserved */
 #define TELE_FLAG_SATURATED        (1u << 2u)  /* a fixed-point field saturated    */
 #define TELE_FLAG_CLAMPED_POS      (1u << 3u)  /* commanded pos hit a soft limit   */
 #define TELE_FLAG_CLAMPED_TAU      (1u << 4u)  /* vel feedforward cancelled at limit */
@@ -178,7 +136,7 @@ typedef struct PROTO_PACKED {
 
 /* ── command hierarchy (host → master → slave) ───────────────────────────── */
 typedef struct PROTO_PACKED {
-    uint8_t  mode_req;   /* MotorModeReq                                        */
+    uint8_t  drive_req;  /* DriveReq                                            */
     int16_t  pos;        /* rad   × PROTO_POS_SCALE (home-frame ±π)             */
     int16_t  vel;        /* rad/s × PROTO_VEL_SCALE                             */
     uint16_t kp;         /*        × PROTO_KP_SCALE                             */
@@ -322,8 +280,6 @@ _Static_assert(sizeof(tele_chain_t) == 118u,                    "tele_chain_t mu
 _Static_assert(sizeof(tele_robot_t) == 20u + 118u * MAX_CHAINS, "tele_robot_t size");
 _Static_assert(sizeof(MasterStatus) == 30u,                     "MasterStatus must be 30 bytes");
 _Static_assert(sizeof(SlaveStatus)  == 18u,                     "SlaveStatus must be 18 bytes");
-_Static_assert(LIFE_FAULT  <= 255u,                             "MotorLifecycle fits u8");
-_Static_assert(CAUSE_MASTER_LOST <= 255u,                       "MotorFaultCause fits u8");
 _Static_assert(DRV_FAULT   <= 255u,                             "DriveState fits u8");
 _Static_assert(DRVF_WOUND  <= 255u,                             "DriveFault fits u8");
 _Static_assert(DRV_REQ_RESET <= 255u,                           "DriveReq fits u8");

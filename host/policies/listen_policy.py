@@ -1,13 +1,13 @@
-"""ListenPolicy — requests IDLE for every motor each tick.
+"""ListenPolicy — requests DISABLE for every motor each tick.
 
-Under the level-triggered protocol a policy sends a mode request every tick;
-"listen" simply holds every motor in IDLE (no motion), so the link still logs
+Under the level-triggered protocol a policy sends a drive request every tick;
+"listen" simply keeps every motor DISABLED (no torque), so the link still logs
 telemetry while nothing is driven. Use for passive capture (moving a joint by
 hand) and as the reference for the Policy interface.
 """
 from master_link.motor_config_gen import MOTORS
 
-from .base import Policy, Action, MotorCommand, MODE_IDLE, LinkState
+from .base import Policy, Action, MotorCommand, REQ_DISABLE, LinkState
 
 
 class ListenPolicy(Policy):
@@ -17,5 +17,5 @@ class ListenPolicy(Policy):
         self._motors = [(m["slave"], m["idx"]) for m in MOTORS]
 
     def step(self, state: LinkState, t_ns: int) -> Action:
-        return Action(motors=[MotorCommand(s, l, mode=MODE_IDLE)
+        return Action(motors=[MotorCommand(s, l, req=REQ_DISABLE)
                               for (s, l) in self._motors])

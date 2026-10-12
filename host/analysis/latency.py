@@ -118,8 +118,8 @@ def analyze(path, host_rate=None, cycle_rate=None):
                 for ch in d["chains"]:
                     sid = ch["chain_id"]
                     for local, m in enumerate(ch["motors"]):
-                        if m["mode_req"] != P.REQ_MIT:
-                            continue   # only MIT targets get last_applied echoes
+                        if not (m["flags"] & P.CMD_FLAG_VALID):
+                            continue   # only VALID tuples get last_applied echoes
                         key = (sid, local)
                         tx_step.append((rec.ts_ns, m["pos"]))
                         cmd_by_motor.setdefault(key, []).append((rec.ts_ns, cmd_seq))

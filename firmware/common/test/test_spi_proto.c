@@ -28,7 +28,7 @@ static void fill_cmd_chain(cmd_chain_t *c)
     c->chain_id = (uint8_t)(lcg() & 0xFFu);
     c->n_motors = (uint8_t)(1u + (lcg() % MAX_MOTORS_PER_CHAIN));
     for (uint8_t i = 0; i < MAX_MOTORS_PER_CHAIN; i++) {
-        c->motors[i].mode_req = (uint8_t)(lcg() % 5u);
+        c->motors[i].drive_req = (uint8_t)(lcg() % 4u);
         c->motors[i].pos      = (int16_t)(lcg() & 0xFFFFu);
         c->motors[i].vel      = (int16_t)(lcg() & 0xFFFFu);
         c->motors[i].kp       = (uint16_t)(lcg() & 0xFFFFu);
@@ -52,7 +52,7 @@ static void fill_tele_chain(tele_chain_t *t)
         t->motors[i].vel              = (int16_t)(lcg() & 0xFFFFu);
         t->motors[i].tau              = (int16_t)(lcg() & 0xFFFFu);
         t->motors[i].temp_c           = (uint8_t)(lcg() & 0xFFu);
-        t->motors[i].drive_state      = (uint8_t)(lcg() % 8u);
+        t->motors[i].drive_state      = (uint8_t)(lcg() % 9u);
         t->motors[i].drive_fault      = (uint8_t)(lcg() % 8u);
         t->motors[i].rs_mode          = (uint8_t)(lcg() % 3u);
         t->motors[i].rs_fault_bits    = (uint8_t)(lcg() & 0xFFu);
@@ -130,7 +130,7 @@ static void test_golden(void)
     memset(&t, 0, sizeof(t));
     t.chain_id = 0x03u; t.n_motors = 1u; t.spi_seq_echo = 0x2Au;
     t.slave_time_us = 7777u; t.cmd_crc_errors = 3u; t.can_tx_errors = 1u;
-    t.motors[0].pos = 5000; t.motors[0].drive_state = LIFE_MIT; t.motors[0].rs_mode = 2u;
+    t.motors[0].pos = 5000; t.motors[0].drive_state = DRV_ENABLED; t.motors[0].rs_mode = 2u;
     t.motors[0].last_applied_seq = 0x1234u;
 
     uint8_t frame[SPI_TELE_FRAME_SIZE];

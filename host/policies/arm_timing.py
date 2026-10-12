@@ -1,30 +1,30 @@
-"""arm_timing — measure per-motor IDLE→HOLD (arm) latency from the host's viewpoint.
+"""arm_timing — measure per-motor DISABLED→ENABLED (enable) latency host-side.
 
 Phases (all timing on the MASTER clock, t_ns):
-  [0, idle_s)        send IDLE every tick (fault_reset for the first part) so every
-                     motor starts from a known disarmed state;
-  [idle_s, ...)      send HOLD every tick and record, per motor:
-                       t_req  = t_ns of the FIRST tick a HOLD was sent,
-                       t_hold = t_ns of the first telemetry showing state == HOLD;
-  all armed (or --arm-timeout) → short settle, print the table, stop cleanly
-  (run_policy's shutdown then disables the armed motors).
+  [0, idle_s/2)      send DISABLE every tick (known-off baseline);
+  [idle_s/2, idle_s) send RESET every tick (clears any latched fault);
+  [idle_s, ...)      send ENABLE + a VALID hold tuple (current position, config
+                     gains) every tick — the v9 reference flow — and record:
+                       t_req  = t_ns of the FIRST tick an ENABLE was sent,
+                       t_hold = t_ns of the first telemetry showing ENABLED;
+  all enabled (or --arm-timeout) → short settle, print the table, stop cleanly
+  (run_policy's shutdown then disables the motors).
 
 The number reported is the FULL pipeline as a policy experiences it: host tick →
-mailbox apply (n+1) → slave handshake → HOLD visible in telemetry. Resolution is one
-master cycle (5 ms @ 200 Hz). With the blocking arm all motors in a chain report at
-once after the ~116 ms stall; with the async arm (arm_sm.h) they complete concurrently
-in ~55–65 ms with telemetry flowing throughout.
+mailbox apply (n+1) → slave handshake → Run confirmation → ENABLED visible in
+telemetry. Resolution is one master cycle (5 ms @ 200 Hz). Streaming the tuple
+through ENABLING means the motor is never limp once ENABLED shows.
 
 Run:
     python3 host/apps/run_policy.py --policy arm_timing --rate 200
     python3 host/apps/run_policy.py --policy arm_timing --rate 200 --motors 0.0,0.1
 """
-from .base import Policy, Action, MotorCommand, LinkState, MODE_IDLE, MODE_HOLD
-from master_link.protocol import LIFE_HOLD, LIFE_IDLE, LIFECYCLE_NAMES
+from .base import (Policy, Action, MotorCommand, LinkState,
+                   REQ_DISABLE, REQ_ENABLE, REQ_RESET)
+from master_link.protocol import DRV_ENABLED, DRV_DISABLED, DRIVE_STATE_NAMES
 from master_link.motor_config_gen import MOTORS
 
-IDLE_SECONDS      = 0.5    # disarm/known-state window
-FAULT_RESET_S     = 0.2    # fault_reset accompanies IDLE for this first slice
+IDLE_SECONDS      = 0.5    # disable/reset known-state window
 ARM_TIMEOUT_S     = 3.0    # give up on a motor after this long in the HOLD phase
 SETTLE_SECONDS    = 0.5    # hold after the last motor armed, then stop
 
@@ -49,9 +49,10 @@ class ArmTimingPolicy(Policy):
         self._idle_s = float(idle_s)
         self._arm_timeout = float(arm_timeout)
         self._t0 = None          # ns, first step
-        self._t_req = None       # ns, first tick HOLD was sent (same for all motors)
-        self._t_hold = {}        # key -> ns of first HOLD sighting
-        self._baseline = {}      # key -> state observed at the end of the IDLE phase
+        self._t_req = None       # ns, first tick ENABLE was sent (same for all motors)
+        self._t_hold = {}        # key -> ns of first ENABLED sighting
+        self._hold_pos = {}      # key -> hold target captured once at ENABLE start
+        self._baseline = {}      # key -> state observed at the end of the known-off phase
         self._done_at = None     # ns when every motor was armed (or timed out)
         self._reported = False
 
@@ -76,7 +77,7 @@ class ArmTimingPolicy(Policy):
     def _report(self, state: LinkState):
         self._reported = True
         print("\narm_timing results (master-clock, resolution = 1 cycle):")
-        print(f"  {'motor':>6}  {'arm time':>9}  {'final state':>11}  cause")
+        print(f"  {'motor':>6}  {'arm time':>9}  {'final state':>11}  fault")
         for k in self._motors:
             snap = self._snap(state, k)
             sname = snap.drive_state_name if snap else "no-tele"
@@ -99,29 +100,33 @@ class ArmTimingPolicy(Policy):
         el = (t_ns - self._t0) / 1e9
         cmds = []
 
-        # Phase A: known disarmed state.
+        # Phase A: known disabled state (DISABLE, then RESET for latched faults).
         if el < self._idle_s:
+            req = REQ_DISABLE if el < self._idle_s / 2.0 else REQ_RESET
             for k in self._motors:
-                cmds.append(MotorCommand(k[0], k[1], mode=MODE_IDLE,
-                                         fault_reset=(el < FAULT_RESET_S)))
+                cmds.append(MotorCommand(k[0], k[1], req=req))
             return Action(motors=cmds)
 
-        # Phase B: HOLD every tick; time each motor's first HOLD sighting.
+        # Phase B: ENABLE + hold tuple every tick; time the first ENABLED sighting.
         if self._t_req is None:
             self._t_req = t_ns
             for k in self._motors:
                 snap = self._snap(state, k)
                 self._baseline[k] = snap.drive_state if snap else None
-                if snap is not None and snap.drive_state != LIFE_IDLE:
-                    print(f"arm_timing: s{k[0]}.m{k[1]} not IDLE at HOLD start "
-                          f"({LIFECYCLE_NAMES.get(snap.drive_state, snap.drive_state)}) — "
-                          f"its number will not be a clean IDLE→HOLD measurement")
+                # Capture the hold target ONCE — re-sampling each tick would let a
+                # loaded joint sag (the target would follow the measured position).
+                self._hold_pos[k] = snap.pos if snap else 0.0
+                if snap is not None and snap.drive_state != DRV_DISABLED:
+                    print(f"arm_timing: s{k[0]}.m{k[1]} not DISABLED at ENABLE start "
+                          f"({DRIVE_STATE_NAMES.get(snap.drive_state, snap.drive_state)}) — "
+                          f"its number will not be a clean DISABLED→ENABLED measurement")
 
         for k in self._motors:
             snap = self._snap(state, k)
-            if k not in self._t_hold and snap is not None and snap.drive_state == LIFE_HOLD:
+            if k not in self._t_hold and snap is not None and snap.drive_state == DRV_ENABLED:
                 self._t_hold[k] = t_ns
-            cmds.append(MotorCommand(k[0], k[1], mode=MODE_HOLD,
+            cmds.append(MotorCommand(k[0], k[1], req=REQ_ENABLE, valid=True,
+                                     pos=self._hold_pos.get(k, 0.0),
                                      use_config_gains=True))
 
         arm_el = (t_ns - self._t_req) / 1e9

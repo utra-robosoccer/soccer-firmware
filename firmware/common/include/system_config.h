@@ -45,11 +45,11 @@ extern "C" {
 #define MOTOR_LOOP_DT_S        ((float)MOTOR_LOOP_PERIOD_MS * 0.001f)
 
 /* Timeouts/debounces (ms) and tick/frame counts derived from the slave tick. */
-#define MOTOR_WATCHDOG_MS        200u
 #define MOTOR_CAN_FB_TIMEOUT_MS  100u
-#define MOTOR_ZERO_STALL_MS      1500u
-#define MOTOR_ZERO_SETTLE_TICKS  10u   /* 50 ms / 5 ms tick */
 #define MOTOR_ENABLE_MON_K       3u   /* 15 ms / 5 ms tick */
+#define MOTOR_ENABLE_TIMEOUT_MS  100u   /* ENABLING → DRVF_ENABLE_FAILED */
+#define MOTOR_CLEAR_TIMEOUT_MS   100u   /* CLEARING → ABSENT */
+#define MOTOR_ABSENT_PING_MS     100u   /* poll period while ABSENT */
 
 /* Dead-man watchdogs (task 6). Master host-death is counted in master cycles; the slave
    master-loss ramp is in ms (HAL_GetTick). */
@@ -57,7 +57,7 @@ extern "C" {
 #define HOST_LOST_CYCLES         5u   /* host-death trigger (master cycles) */
 #define HOST_LOST_DAMP_CYCLES    60u   /* master DAMPED dwell before IDLE (cycles) */
 #define MASTER_LOST_GRACE_MS     50u   /* slave hold (v/tau=0) after exchanges stop */
-#define MASTER_LOST_DAMP_MS      300u   /* slave DAMPED dwell before IDLE */
+#define MASTER_LOST_DAMP_MS      300u   /* stop-ramp damp dwell (STOPPING) */
 
 /* Slave SPI TX-arm deadline (µs after an exchange): wait for motor replies, then arm the
    next exchange's DMA so the fresh reply rides it (removes the one-exchange telemetry lag). */

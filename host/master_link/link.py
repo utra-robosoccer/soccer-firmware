@@ -67,30 +67,30 @@ class _LiveDetector:
 
 # ── command / state types (owned here; policies import them) ──────────────────
 # Mode-request constants mirror protocol.MotorModeReq (re-exported for policies).
-MODE_IDLE    = P.REQ_IDLE
-MODE_HOLD    = P.REQ_HOLD
-MODE_MIT     = P.REQ_MIT
-MODE_DAMPED  = P.REQ_DAMPED
-MODE_TO_ZERO = P.REQ_TO_ZERO
+REQ_DISABLE = P.DRV_REQ_DISABLE
+REQ_ENABLE  = P.DRV_REQ_ENABLE
+REQ_STOP    = P.DRV_REQ_STOP
+REQ_RESET   = P.DRV_REQ_RESET
 
-# Armed lifecycles (tele_motor_t.drive_state): HOLD/MIT/DAMPED/TO_ZERO.
-_ARMED_STATES = (P.LIFE_HOLD, P.LIFE_MIT, P.LIFE_DAMPED, P.LIFE_TO_ZERO)
+# Armed drive states (tele_motor_t.drive_state): the motor may produce torque.
+_ARMED_STATES = (P.DRV_ENABLING, P.DRV_ENABLED, P.DRV_STOPPING)
 
 
 @dataclass
 class MotorCommand:
-    """One motor's level-triggered mode request + targets for a tick. Built by a
-    policy and sent (with every other motor's) as one cmd_robot_t per tick."""
+    """One motor's level-triggered drive request + MIT tuple for a tick (protocol
+    v9). The request always applies; the tuple only under valid=True — an enabled
+    motor with no valid tuple yet is LIMP, so streaming starts with the ENABLE."""
     slave: int
     local: int
-    mode: int = P.REQ_IDLE            # MotorModeReq
+    req: int = P.DRV_REQ_DISABLE      # DriveReq
+    valid: bool = False               # the MIT tuple below is live
     pos: float = 0.0
     vel: float = 0.0
     kp: float = 0.0
     kd: float = 0.0
     tau_ff: float = 0.0
     use_config_gains: bool = True     # ignore wire kp/kd, use the slave's config
-    fault_reset: bool = False         # clear a latched fault this tick
 
 
 @dataclass(frozen=True)
@@ -98,7 +98,7 @@ class MotorSnap:
     slave: int
     local: int
     gidx: int | None
-    drive_state: int    # MotorLifecycle (LIFE_*)
+    drive_state: int    # DriveState (DRV_*)
     drive_fault: int    # MotorFaultCause
     pos: float
     vel: float
@@ -116,13 +116,11 @@ class MotorSnap:
     @property
     def request_rejected(self) -> bool: return bool(self.flags & P.TELE_FLAG_REQUEST_REJECTED)
     @property
-    def to_zero_arrived(self) -> bool: return bool(self.flags & P.TELE_FLAG_TO_ZERO_ARRIVED)
-    @property
     def saturated(self) -> bool: return bool(self.flags & P.TELE_FLAG_SATURATED)
     @property
-    def drive_state_name(self) -> str: return P.LIFECYCLE_NAMES.get(self.drive_state, f"?{self.drive_state}")
+    def drive_state_name(self) -> str: return P.DRIVE_STATE_NAMES.get(self.drive_state, f"?{self.drive_state}")
     @property
-    def drive_fault_name(self) -> str: return P.CAUSE_NAMES.get(self.drive_fault, f"?{self.drive_fault}")
+    def drive_fault_name(self) -> str: return P.DRIVE_FAULT_NAMES.get(self.drive_fault, f"?{self.drive_fault}")
 
 
 @dataclass(frozen=True)
@@ -420,12 +418,10 @@ class MasterLink:
         for sid in sorted(by_slave):
             motors = []
             for c in sorted(by_slave[sid], key=lambda m: m.local):
-                flags = P.CMD_FLAG_VALID
+                flags = P.CMD_FLAG_VALID if c.valid else 0
                 if c.use_config_gains:
                     flags |= P.CMD_FLAG_USE_CONFIG_GAINS
-                if c.fault_reset:
-                    flags |= P.CMD_FLAG_FAULT_RESET
-                motors.append(dict(mode_req=c.mode, pos=c.pos, vel=c.vel,
+                motors.append(dict(drive_req=c.req, pos=c.pos, vel=c.vel,
                                    kp=c.kp, kd=c.kd, tau_ff=c.tau_ff, flags=flags))
             chains.append(dict(chain_id=sid, motors=motors))
 

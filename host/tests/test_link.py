@@ -148,13 +148,14 @@ class MasterLinkFakeSerial(unittest.TestCase):
             self.assertEqual(len(wrong_ver), 1, "version-mismatch frame not logged as RX_FRAME")
 
     def test_tx_robot_cmd(self):
-        from master_link.link import MotorCommand, MODE_MIT, MODE_HOLD
+        from master_link.link import MotorCommand, REQ_ENABLE
         with tempfile.TemporaryDirectory() as d:
             lk, fake = self._make_link(d)
             try:
                 lk.send_robot_cmd([
-                    MotorCommand(slave=0, local=0, mode=MODE_HOLD),
-                    MotorCommand(slave=0, local=1, mode=MODE_MIT, pos=1.5, vel=-2.0),
+                    MotorCommand(slave=0, local=0, req=REQ_ENABLE, valid=True),
+                    MotorCommand(slave=0, local=1, req=REQ_ENABLE, valid=True,
+                                 pos=1.5, vel=-2.0),
                 ])
                 self.assertTrue(_wait(lambda: lk.stats["tx_frames"] == 1))
             finally:
@@ -173,8 +174,8 @@ class MasterLinkFakeSerial(unittest.TestCase):
             d2 = P.parse_robot_cmd(frames[0][3])
             self.assertEqual(d2["cmd_seq"], 1)   # first tick stamps cmd_seq=1 (skips 0)
             motors = d2["chains"][0]["motors"]
-            self.assertEqual(motors[0]["mode_req"], MODE_HOLD)
-            self.assertEqual(motors[1]["mode_req"], MODE_MIT)
+            self.assertEqual(motors[0]["drive_req"], REQ_ENABLE)
+            self.assertEqual(motors[1]["drive_req"], REQ_ENABLE)
             self.assertAlmostEqual(motors[1]["pos"], 1.5, places=3)
             self.assertAlmostEqual(motors[1]["vel"], -2.0, places=2)
             tx = [rec for rec in BinaryLogReader(lk.log_path) if rec.kind == LOG.TX_FRAME]

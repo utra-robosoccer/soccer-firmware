@@ -52,17 +52,12 @@ import yaml
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
-# TO_ZERO motion parameters (motion tuning, not per-motor identity). Tick-based
-# constants are DERIVED from the configured rates below, not hard-coded here.
-GOTO_ZERO = {
-    "MOTOR_ZERO_TOL": "0.05f",   # rad (~3 deg) — arrival position threshold
-    "MOTOR_ZERO_RATE": "0.3f",   # rad/s        — constant approach speed
-    "MOTOR_ZERO_KP": "4.0f",     # position gain while zeroing
-    "MOTOR_ZERO_KD": "1.0f",
-    "MOTOR_ZERO_LEASH": "0.15f",       # rad   — max waypoint lead over pos
-    "MOTOR_ZERO_DAMP_KD": "3.0f",      # Kd of the damping command on zero timeout
-    "MOTOR_ZERO_PROGRESS_EPS": "0.01f",# rad   — |pos| improvement counted as progress
-    "MOTOR_WOUND_OFFSET_MAX": "9.0f",  # rad — |pos_offset| above this at HOLD-arm → refuse + CAUSE_WOUND
+# Guard parameters (motion-safety tuning, not per-motor identity). TO_ZERO moved
+# to the host in protocol v9; only the wound-shaft arm guard remains firmware-side.
+GUARDS = {
+    "MOTOR_WOUND_OFFSET_MAX": "9.0f",  # rad — |pos_offset| above this at ENABLE → refuse + DRVF_WOUND
+    "MOTOR_FAULT_CHECK_DISABLED": "0u",# 1 = vendor-bit/Cali check in DISABLED (masked off
+                                       # until bench boot-rest data is clean — protocol_v9.md §8)
 }
 
 # ── Rates & timeouts (system-wide; override per-setup in configs/<setup>/system.yaml) ──
@@ -80,14 +75,14 @@ RATE_DEFAULTS = {
     # isolated glitches — re-validate on the robot harness via the CRC/resync counters.
 }
 TIMING_MS_DEFAULTS = {
-    "motor_watchdog_ms":   200,   # master-link (SPI) watchdog → IDLE
-    "can_fb_timeout_ms":   100,   # per-motor Type-2 staleness → CAUSE_CAN_TIMEOUT
-    "zero_stall_ms":      1500,   # no TO_ZERO progress → CAUSE_ZERO_TIMEOUT
-    "zero_settle_ms":       50,   # in-tolerance dwell before TO_ZERO arrival
-    "enable_mon_ms":        15,   # not-NORMAL dwell while armed → CAUSE_NOT_ENABLED
+    "can_fb_timeout_ms":   100,   # per-motor Type-2 staleness → DRVF_CAN_TIMEOUT / ABSENT
+    "enable_mon_ms":        15,   # not-Run dwell while enabled → DRVF_NOT_ENABLED
+    "enable_timeout_ms":   100,   # ENABLING without rs_mode==Run → DRVF_ENABLE_FAILED
+    "clear_timeout_ms":    100,   # CLEARING without a fresh reply → ABSENT
+    "absent_ping_ms":      100,   # state-poll period while ABSENT
     # Dead-man watchdogs (task 6).
     "master_lost_grace_ms":  50,  # slave: hold position (v/tau=0) this long after exchanges stop
-    "master_lost_damp_ms":  300,  # DAMPED dwell before IDLE (slave master-loss AND master host-death)
+    "master_lost_damp_ms":  300,  # stop-ramp damp dwell (STOPPING; also master host-death dwell)
 }
 
 
@@ -111,7 +106,6 @@ def timing_block(rates, timeouts):
     poll_ms = max(1, round(1000.0 / rates["master_poll_hz"]))
     tele_ms = max(1, round(1000.0 / rates["telemetry_hz"]))
     tick_ms = max(1, round(1000.0 / rates["slave_tick_hz"]))
-    settle_ticks = max(1, round(timeouts["zero_settle_ms"] / tick_ms))
     mon_k        = max(1, round(timeouts["enable_mon_ms"] / tick_ms))
     # Host-death (master side): 3 host-command periods, floored at 25 ms, in master cycles.
     host_lost_ms     = max(25, round(3.0 * 1000.0 / rates["host_cmd_hz"]))
@@ -143,11 +137,11 @@ def timing_block(rates, timeouts):
 #define MOTOR_LOOP_DT_S        ((float)MOTOR_LOOP_PERIOD_MS * 0.001f)
 
 /* Timeouts/debounces (ms) and tick/frame counts derived from the slave tick. */
-#define MOTOR_WATCHDOG_MS        {timeouts['motor_watchdog_ms']}u
 #define MOTOR_CAN_FB_TIMEOUT_MS  {timeouts['can_fb_timeout_ms']}u
-#define MOTOR_ZERO_STALL_MS      {timeouts['zero_stall_ms']}u
-#define MOTOR_ZERO_SETTLE_TICKS  {settle_ticks}u   /* {timeouts['zero_settle_ms']} ms / {tick_ms} ms tick */
 #define MOTOR_ENABLE_MON_K       {mon_k}u   /* {timeouts['enable_mon_ms']} ms / {tick_ms} ms tick */
+#define MOTOR_ENABLE_TIMEOUT_MS  {timeouts['enable_timeout_ms']}u   /* ENABLING → DRVF_ENABLE_FAILED */
+#define MOTOR_CLEAR_TIMEOUT_MS   {timeouts['clear_timeout_ms']}u   /* CLEARING → ABSENT */
+#define MOTOR_ABSENT_PING_MS     {timeouts['absent_ping_ms']}u   /* poll period while ABSENT */
 
 /* Dead-man watchdogs (task 6). Master host-death is counted in master cycles; the slave
    master-loss ramp is in ms (HAL_GetTick). */
@@ -155,7 +149,7 @@ def timing_block(rates, timeouts):
 #define HOST_LOST_CYCLES         {host_lost_cyc}u   /* host-death trigger (master cycles) */
 #define HOST_LOST_DAMP_CYCLES    {host_damp_cyc}u   /* master DAMPED dwell before IDLE (cycles) */
 #define MASTER_LOST_GRACE_MS     {timeouts['master_lost_grace_ms']}u   /* slave hold (v/tau=0) after exchanges stop */
-#define MASTER_LOST_DAMP_MS      {timeouts['master_lost_damp_ms']}u   /* slave DAMPED dwell before IDLE */
+#define MASTER_LOST_DAMP_MS      {timeouts['master_lost_damp_ms']}u   /* stop-ramp damp dwell (STOPPING) */
 
 /* Slave SPI TX-arm deadline (µs after an exchange): wait for motor replies, then arm the
    next exchange's DMA so the fresh reply rides it (removes the one-exchange telemetry lag). */
@@ -259,7 +253,7 @@ def gen_header(cfg, banner_src, banner_regen, rates, timeouts):
         )
     cfg_block = ",\n".join(cfg_entries)
 
-    gz = "\n".join(f"#define {k:<14} {v}" for k, v in GOTO_ZERO.items())
+    gz = "\n".join(f"#define {k:<14} {v}" for k, v in GUARDS.items())
     timing = timing_block(rates, timeouts)
 
     return f"""\

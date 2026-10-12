@@ -39,38 +39,15 @@ MSG_NAMES = {
 MAX_MOTORS_PER_CHAIN = 5
 MAX_CHAINS           = 4
 
-# ── per-motor lifecycle (tele_motor_t.drive_state) ──────────────────────────────────
-(LIFE_BOOT, LIFE_DISCOVERING, LIFE_IDLE, LIFE_HOLD, LIFE_MIT, LIFE_DAMPED,
- LIFE_TO_ZERO, LIFE_FAULT) = range(8)
-LIFECYCLE_NAMES = {
-    0: "BOOT", 1: "DISCOVERING", 2: "IDLE", 3: "HOLD", 4: "MIT",
-    5: "DAMPED", 6: "TO_ZERO", 7: "FAULT",
-}
-
-# ── host→slave mode requests (cmd_motor_t.mode_req) ───────────────────────────
-(REQ_IDLE, REQ_HOLD, REQ_MIT, REQ_DAMPED, REQ_TO_ZERO) = range(5)
-MODE_REQ_NAMES = {0: "IDLE", 1: "HOLD", 2: "MIT", 3: "DAMPED", 4: "TO_ZERO"}
-
 # ── RS motor run_mode reported in Type-2 (tele_motor_t.rs_mode) ────────────
 MOTOR_MODE_NAMES = {0: "RESET", 1: "CAL", 2: "NORMAL"}
-
-# ── fault cause (tele_motor_t.drive_fault, latched) ─────────────────────────────────
-(CAUSE_NONE, CAUSE_OVERTORQUE, CAUSE_CAN_TIMEOUT, CAUSE_WATCHDOG,
- CAUSE_MOTOR_FAULT, CAUSE_ZERO_TIMEOUT, CAUSE_NOT_ENABLED, CAUSE_WOUND,
- CAUSE_MASTER_LOST) = range(9)
-CAUSE_NAMES = {
-    0: "NONE", 1: "OVERTORQUE", 2: "CAN_TIMEOUT", 3: "WATCHDOG", 4: "MOTOR_FAULT",
-    5: "ZERO_TIMEOUT", 6: "NOT_ENABLED", 7: "WOUND", 8: "MASTER_LOST",
-}
 
 (ROBOT_INIT, ROBOT_READY, ROBOT_DEGRADED, ROBOT_HOST_LOST) = range(4)
 ROBOT_STATE_NAMES = {0: "INIT", 1: "READY", 2: "DEGRADED", 3: "HOST_LOST"}
 
 # ═══ protocol v9 — drive-state × streamed-tuple split (docs/protocol_v9.md) ═══
-# These replace LIFE_*/REQ_*/CAUSE_* when the v9 runtime (drive_sm) lands; the
-# v8 constants above remain only until the slave runtime is swapped over.
 
-# ── host→slave drive request (cmd_motor_t drive request byte, v9) ─────────────
+# ── host→slave drive request (cmd_motor_t.drive_req) ──────────────────────────
 (DRV_REQ_DISABLE, DRV_REQ_ENABLE, DRV_REQ_STOP, DRV_REQ_RESET) = range(4)
 DRIVE_REQ_NAMES = {0: "DISABLE", 1: "ENABLE", 2: "STOP", 3: "RESET"}
 
@@ -91,13 +68,13 @@ DRIVE_FAULT_NAMES = {
 }
 
 # ── cmd_motor_t.flags ─────────────────────────────────────────────────────────
-CMD_FLAG_VALID            = 1 << 0
+CMD_FLAG_VALID            = 1 << 0   # the MIT tuple is live; drive_req always applies
 CMD_FLAG_USE_CONFIG_GAINS = 1 << 1
-CMD_FLAG_FAULT_RESET      = 1 << 2
+# bit2 was CMD_FLAG_FAULT_RESET (v8); RESET is a drive request in v9
 
 # ── tele_motor_t.flags ────────────────────────────────────────────────────────
 TELE_FLAG_REQUEST_REJECTED = 1 << 0
-TELE_FLAG_TO_ZERO_ARRIVED  = 1 << 1
+# bit1 was TELE_FLAG_TO_ZERO_ARRIVED (v8); TO_ZERO is host-side in v9
 TELE_FLAG_SATURATED        = 1 << 2
 TELE_FLAG_CLAMPED_POS      = 1 << 3
 TELE_FLAG_CLAMPED_TAU      = 1 << 4
@@ -125,7 +102,7 @@ HDR_SIZE = struct.calcsize(HDR_FMT)
 FMT_MASTER_STATUS = "<BBIIIHHHHII" # +4 u16 rates +rx_resyncs,rx_discarded_bytes → 30 B
 FMT_SLAVE_STATUS  = "<BBIIII"     # slave_id,motors_alive,uptime,crc,cmd_crc,seq_gaps (18)
 
-FMT_CMD_MOTOR     = "<BhhHHhB"    # mode_req,pos,vel,kp,kd,tau_ff,flags → 12 B
+FMT_CMD_MOTOR     = "<BhhHHhB"    # drive_req,pos,vel,kp,kd,tau_ff,flags → 12 B
 SZ_CMD_MOTOR      = struct.calcsize(FMT_CMD_MOTOR)
 FMT_CMD_CHAIN_HDR = "<BB"         # chain_id,n_motors
 SZ_CMD_CHAIN      = 2 + SZ_CMD_MOTOR * MAX_MOTORS_PER_CHAIN          # 62
@@ -215,16 +192,14 @@ class TeleMotor:
     @property
     def temp(self) -> float: return float(self.temp_c)
     @property
-    def drive_state_name(self) -> str: return LIFECYCLE_NAMES.get(self.drive_state, f"?{self.drive_state}")
+    def drive_state_name(self) -> str: return DRIVE_STATE_NAMES.get(self.drive_state, f"?{self.drive_state}")
     @property
-    def drive_fault_name(self) -> str: return CAUSE_NAMES.get(self.drive_fault, f"?{self.drive_fault}")
+    def drive_fault_name(self) -> str: return DRIVE_FAULT_NAMES.get(self.drive_fault, f"?{self.drive_fault}")
     @property
     def rs_mode_name(self) -> str: return MOTOR_MODE_NAMES.get(self.rs_mode, f"?{self.rs_mode}")
 
     @property
     def request_rejected(self) -> bool: return bool(self.flags & TELE_FLAG_REQUEST_REJECTED)
-    @property
-    def to_zero_arrived(self) -> bool: return bool(self.flags & TELE_FLAG_TO_ZERO_ARRIVED)
     @property
     def saturated(self) -> bool: return bool(self.flags & TELE_FLAG_SATURATED)
     @property
@@ -238,7 +213,7 @@ class TeleMotor:
 
 
 # ── command pack ──────────────────────────────────────────────────────────────
-def pack_cmd_motor(mode_req: int, pos: float = 0.0, vel: float = 0.0,
+def pack_cmd_motor(drive_req: int, pos: float = 0.0, vel: float = 0.0,
                    kp: float = 0.0, kd: float = 0.0, tau_ff: float = 0.0,
                    flags: int = 0) -> bytes:
     """Pack one cmd_motor_t (12 B); sets TELE-side saturation is the slave's job,
@@ -248,14 +223,14 @@ def pack_cmd_motor(mode_req: int, pos: float = 0.0, vel: float = 0.0,
     kpi, _ = enc_u16(kp, KP_SCALE)
     kdi, _ = enc_u16(kd, KD_SCALE)
     t, _ = enc_i16(tau_ff, TAU_SCALE)
-    return struct.pack(FMT_CMD_MOTOR, mode_req & 0xFF, p, v, kpi, kdi, t, flags & 0xFF)
+    return struct.pack(FMT_CMD_MOTOR, drive_req & 0xFF, p, v, kpi, kdi, t, flags & 0xFF)
 
 
 def pack_robot_cmd(cycle_id: int, cmd_seq: int, chains: list, reserved: int = 0) -> bytes:
     """Build a full cmd_robot_t (254 B).
 
     ``chains`` is a list (≤ MAX_CHAINS) of dicts:
-        {"chain_id": int, "motors": [ {mode_req, pos, vel, kp, kd, tau_ff, flags}, ... ]}
+        {"chain_id": int, "motors": [ {drive_req, pos, vel, kp, kd, tau_ff, flags}, ... ]}
     Unused chain/motor slots are zero-filled (invalid). ``reserved`` carries the master
     test sentinels (0xDE arm SPI-desync, 0xB0 arm USB-TX test; 0 in normal operation)."""
     out = bytearray()
@@ -271,7 +246,7 @@ def pack_robot_cmd(cycle_id: int, cmd_seq: int, chains: list, reserved: int = 0)
                 if mi < len(motors):
                     m = motors[mi]
                     out += pack_cmd_motor(
-                        m.get("mode_req", REQ_IDLE), m.get("pos", 0.0), m.get("vel", 0.0),
+                        m.get("drive_req", DRV_REQ_DISABLE), m.get("pos", 0.0), m.get("vel", 0.0),
                         m.get("kp", 0.0), m.get("kd", 0.0), m.get("tau_ff", 0.0),
                         m.get("flags", 0))
                 else:
@@ -296,9 +271,9 @@ def parse_robot_cmd(p: bytes) -> dict:
         mbase = base + 2
         motors = []
         for mi in range(min(n_motors, MAX_MOTORS_PER_CHAIN)):
-            mode_req, pos, vel, kp, kd, tau, flags = \
+            drive_req, pos, vel, kp, kd, tau, flags = \
                 struct.unpack_from(FMT_CMD_MOTOR, p, mbase + mi * SZ_CMD_MOTOR)
-            motors.append(dict(mode_req=mode_req, pos=dec_i16(pos, POS_SCALE),
+            motors.append(dict(drive_req=drive_req, pos=dec_i16(pos, POS_SCALE),
                                vel=dec_i16(vel, VEL_SCALE), kp=dec_u16(kp, KP_SCALE),
                                kd=dec_u16(kd, KD_SCALE), tau_ff=dec_i16(tau, TAU_SCALE),
                                flags=flags))
