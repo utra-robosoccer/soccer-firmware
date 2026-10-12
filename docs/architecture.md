@@ -119,13 +119,13 @@ cross-language fixture test (`firmware/common/test/gen_fixture.c` ↔ `host/test
 | `src`,`dst` | u8,u8 | `NodeId` (JETSON 1, MASTER 2, SLAVE_0 3, SLAVE_1 4) | sender | — |
 | `ts_ms` | u32 | sender `HAL_GetTick()` (host live-detect reads the master's) | sender | host `_LiveDetector` |
 | `len` | u16 | payload bytes | `proto_build` | scanner |
-| `ver_flags` | u16 | low byte = `PROTO_VERSION` (8); high reserved 0 | `proto_build` | both ends drop+count on mismatch |
+| `ver_flags` | u16 | low byte = `PROTO_VERSION` (9); high reserved 0 | `proto_build` | both ends drop+count on mismatch |
 | `crc16` | u16 | CRC16-CCITT | `proto_build` | scanner |
 
 **Command hierarchy (host→master→slave)**
 | struct | size | fields |
 |---|---|---|
-| `cmd_motor_t` | 12 B | `mode_req` (`MotorModeReq`), `pos/vel/kp/kd/tau_ff` (fixed-point), `flags` (`CMD_FLAG_*`) |
+| `cmd_motor_t` | 12 B | `drive_req` (`DriveReq`), `pos/vel/kp/kd/tau_ff` (fixed-point MIT tuple), `flags` (`CMD_FLAG_*`; VALID gates the tuple, the request always applies) |
 | `cmd_chain_t` | 62 B | `chain_id`, `n_motors`, `cmd_motor_t[5]` |
 | `cmd_robot_t` | 254 B | `cycle_id` (host echo of last telemetry cycle), `cmd_seq`, `n_chains`, `reserved` (test sentinel 0xDE/0xB0), `cmd_chain_t[4]` |
 
@@ -146,13 +146,13 @@ cross-language fixture test (`firmware/common/test/gen_fixture.c` ↔ `host/test
 | 2 | `vel` | i16 | rad/s ×100 | slave | measured velocity |
 | 4 | `tau` | i16 | N·m ×100 | slave | measured torque |
 | 6 | `temp_c` | u8 | °C | slave | motor temperature |
-| 7 | `state` | u8 | `MotorLifecycle` (full byte) | slave mode SM | lifecycle |
-| 8 | `cause` | u8 | `MotorFaultCause` (latched) | slave | why faulted |
-| 9 | `motor_mode` | u8 | RS Type-2 run mode (0 reset/1 cal/2 normal) | slave (from CAN) | enable monitor source |
-| 10 | `motor_fault` | u8 | packed Type-2 fault bits | slave | motor self-faults |
-| 11 | `flags` | u8 | `TELE_FLAG_*` | slave | rejected/arrived/saturated/clamped/stale |
+| 7 | `drive_state` | u8 | `DriveState` (full byte) | slave drive SM | drive state |
+| 8 | `drive_fault` | u8 | `DriveFault` (latched at detection) | slave | why faulted |
+| 9 | `rs_mode` | u8 | RS Type-2 run mode (0 reset/1 cal/2 run) | slave (from CAN) | enable monitor source |
+| 10 | `rs_fault_bits` | u8 | packed Type-2 fault bits | slave | motor self-faults |
+| 11 | `flags` | u8 | `TELE_FLAG_*` | slave | rejected/saturated/clamped/stale |
 | 12 | `fb_age_ms` | u8 | ms since last Type-2, sat 255 | slave | feedback freshness |
-| 13 | `fault_word` | u32 | 0 clear / 0xFFFFFFFF read-fail / raw 0x3022 | slave | RS fault register |
+| 13 | `rs_fault_word` | u32 | 0 clear / 0xFFFFFFFF read-fail / raw 0x3022 | slave | RS fault register |
 | 17 | `last_applied_seq` | u16 | host `cmd_seq` last confirmed applied (0 = none) | slave (`cmd_seq_track`) | latency pairing |
 | 19 | `reserved` | u16 | 0 | — | growth slot |
 
@@ -176,15 +176,12 @@ dropped), `cmd_crc_errors` (relayed from the slave), `seq_gaps` (master-observed
 | enum | values |
 |---|---|
 | `MsgType` | PING 0x01, MASTER_STATUS 0x02, SLAVE_STATUS 0x03, ROBOT_CMD 0x08, ROBOT_TELE 0x09 |
-| `MotorModeReq` (cmd) | IDLE 0, HOLD 1, MIT 2, DAMPED 3, TO_ZERO 4 |
-| `MotorLifecycle` (tele `state`) | BOOT 0, DISCOVERING 1, IDLE 2, HOLD 3, MIT 4, DAMPED 5, TO_ZERO 6, FAULT 7 |
-| `MotorFaultCause` | NONE 0, OVERTORQUE 1, CAN_TIMEOUT 2, WATCHDOG 3*, MOTOR_FAULT 4, ZERO_TIMEOUT 5, NOT_ENABLED 6, WOUND 7, MASTER_LOST 8 |
+| `DriveReq` (cmd) | DISABLE 0, ENABLE 1, STOP 2, RESET 3 |
+| `DriveState` (tele `drive_state`) | BOOT 0, DISCOVERING 1, ABSENT 2, DISABLED 3, ENABLING 4, ENABLED 5, STOPPING 6, CLEARING 7, FAULT 8 |
+| `DriveFault` | NONE 0, CAN_TIMEOUT 1, MASTER_LOST 2, ENABLE_FAILED 3, NOT_ENABLED 4, OVERTORQUE 5, MOTOR_REPORTED 6, WOUND 7 |
 | `RobotState` | INIT 0, READY 1, DEGRADED 2, HOST_LOST 3 |
-| `CMD_FLAG_*` | VALID b0, USE_CONFIG_GAINS b1, FAULT_RESET b2 |
-| `TELE_FLAG_*` | REQUEST_REJECTED b0, TO_ZERO_ARRIVED b1, SATURATED b2, CLAMPED_POS b3, CLAMPED_TAU b4, CMD_STALE b5, CLAMPED_GAIN b6 |
-
-\* `CAUSE_WATCHDOG` (3) is defined but **no longer raised** — the master-loss ramp uses
-`CAUSE_MASTER_LOST` (8) instead (see §7, §8).
+| `CMD_FLAG_*` | VALID b0 (tuple live), USE_CONFIG_GAINS b1 (b2 was FAULT_RESET — reserved) |
+| `TELE_FLAG_*` | REQUEST_REJECTED b0, (b1 was TO_ZERO_ARRIVED — reserved), SATURATED b2, CLAMPED_POS b3, CLAMPED_TAU b4, CMD_STALE b5, CLAMPED_GAIN b6 |
 
 ### 2.2 Firmware internal state
 
@@ -444,39 +441,40 @@ for 6 motors on one bus; budget ~65 %.
 
 ## 7. State machines (current implementation)
 
-> **The per-motor mode machine (§7a) is temporary** — a drive-state / control-mode redesign is under
-> consideration (§12).
+> **Protocol v9**: the per-motor machine is the drive-state × streamed-tuple split.
+> `docs/protocol_v9.md` is the authoritative spec (request × state matrix, fault latch rule,
+> timing constants); this section summarises the implementation.
 
-### 7a. Per-motor mode machine (slave, `mode_sm.c` `mode_sm_step`; CAN effects in `motor_runtime.c`)
-Pure decision from `(state, mode_req, valid, fault_reset, wound)` → `ModeDecision`
-(`do_arm/do_disable/capture_hold/enter_to_zero/clear_fault/set_cause_wound/rejected/reset_cmd_seq`).
-States: `BOOT, DISCOVERING, IDLE, HOLD, MIT, DAMPED, TO_ZERO, FAULT`. **Level-triggered** — the
-requested mode is re-applied every cycle.
-
-| from \ request | IDLE | HOLD | MIT | DAMPED | TO_ZERO |
-|---|---|---|---|---|---|
-| IDLE | IDLE | **arm**→HOLD (wound→FAULT/WOUND) | reject | reject | reject |
-| HOLD/MIT/DAMPED/TO_ZERO | disable→IDLE | re-capture→HOLD | MIT | DAMPED | enter→TO_ZERO |
-| FAULT | clear→IDLE | reject (fault_reset→eval as IDLE) | reject | reject | reject |
-| BOOT/DISCOVERING | IDLE | reject | reject | reject | reject |
+### 7a. Per-motor drive machine (pure `drive_sm.h`; CAN effects in `motor_runtime.c`)
+Three pure entry points: `drive_sm_on_request(state, req, wound, fault_latched)`,
+`drive_sm_on_fault(state, fault, fault_latched)`, `drive_sm_on_tick(state, inputs)`.
+States: `BOOT, DISCOVERING, ABSENT, DISABLED, ENABLING, ENABLED, STOPPING, CLEARING, FAULT`.
+Requests (`DISABLE/ENABLE/STOP/RESET`) are **level-triggered** and always apply; the MIT
+tuple travels independently under `CMD_FLAG_VALID`.
 
 Key rules:
-- **HOLD is the only arm-from-IDLE and the only enable.** On entry: `arm_begin` starts the async
-  handshake (the motor stays IDLE on the wire until `arm_finish` enters HOLD), then capture
-  the home-frame position (`hold_pos`), load config gains.
-- **MIT** stores fixed-point targets (`pos`, `vel`, `tau_ff`) and `target_cmd_seq`;
-  `apply_soft_clamp` applies the one-sided soft-limit clamp and the `tau_ff` bound. `tau_ff` is
-  passed to the motor in MIT only — arm / re-hold / DAMPED / TO_ZERO and the watchdog ramps all
-  reset it to 0. **DAMPED** = Kp 0 + config Kd. **TO_ZERO** creeps to home 0, sets
-  `TO_ZERO_ARRIVED`, stalls → `CAUSE_ZERO_TIMEOUT`.
-- **Wound rejection:** IDLE→HOLD with `|offset| > MOTOR_WOUND_OFFSET_MAX` → FAULT/`CAUSE_WOUND`.
-- **Faults latch:** armed requests rejected until an IDLE request or `FAULT_RESET` clears, then the
-  same request is re-evaluated from IDLE.
-- **`last_applied_seq` resets to 0** on any of arm / re-hold / to-zero / disable (`reset_cmd_seq`).
-- The **arm handshake** (`arm_sm.h`) and the **enable monitor** interact: after enabling, the
-  monitor (§8) watches for `RS_MODE_NORMAL`; K not-NORMAL fresh frames → `CAUSE_NOT_ENABLED`.
-- Telemetry per state: `state` = the lifecycle; `cause` set on FAULT; `TELE_FLAG_REQUEST_REJECTED` on
-  an illegal request; `CMD_STALE` while running a held/watchdog setpoint.
+- **ENABLE is the only way on** (`DISABLED → ENABLING → ENABLED`); the handshake is
+  Type-4 clear → run-mode write → Type-3 enable (arm_sm sequencing, one CAN frame per
+  cycle) → zero-gain Type-1 polls until feedback confirms `rs_mode == Run` (early
+  advance; measured 40 ms) or `MOTOR_ENABLE_TIMEOUT_MS` → FAULT(`ENABLE_FAILED`).
+- **ENABLED is limp until the first VALID tuple** — no hold-at-capture; the host owns the
+  first word. A tuple streamed during ENABLING is latched and applied on the edge.
+  Every applied tuple goes through `apply_soft_clamp` (one-sided soft limits, vel/tau
+  bounds) and `clamp_gains`.
+- **STOP / comms-intact faults** share one stop ramp (`STOPPING`: Kp 0 + config Kd for
+  `MASTER_LOST_DAMP_MS`, then disable). A requested stop ends DISABLED; a fault-triggered
+  stop ends FAULT — `drive_fault` latches at **detection**, first wins, so a DISABLE
+  mid-ramp cannot launder a fault into DISABLED.
+- **RESET → CLEARING** (only from FAULT): clears `drive_fault`, sends the wire Type-4
+  Byte0=1, then judges the reply — clean → DISABLED, dirty → FAULT(`MOTOR_REPORTED`,
+  re-latched), silent past `MOTOR_CLEAR_TIMEOUT_MS` → ABSENT. Never enables.
+- **Presence:** DISABLED ⇄ ABSENT on feedback timeout, with a `MOTOR_ABSENT_PING_MS`
+  poll while ABSENT. *alive* = `drive_state > ABSENT` (replaces the old alive flag).
+- **Wound rejection:** ENABLE with `|offset| > MOTOR_WOUND_OFFSET_MAX` → FAULT/`DRVF_WOUND`,
+  never enables.
+- **`last_applied_seq` resets to 0** on ENABLE begin and every path out of ENABLED.
+- Telemetry: `drive_state`/`drive_fault`; `TELE_FLAG_REQUEST_REJECTED` on an illegal
+  request; `CMD_STALE` while ENABLED executes a held tuple with no fresh command.
 
 ### 7b. Master/robot state (`compute_robot_state`, `emit_*`)
 `ROBOT_INIT` (no slave alive) → `ROBOT_READY` (every alive slave's full motor mask alive) /
@@ -485,13 +483,15 @@ Key rules:
 
 ### 7c. Watchdog state machines
 - **Master host-death (`host_watchdog.h`, per cycle):** `HOST_LINK_OK` → (armed && cycles-since-fresh
-  ≥ `HOST_LOST_CYCLES` 12 = 60 ms) → `HOST_LINK_DAMPED` (master sends DAMPED, config Kd) → (after
-  `HOST_LOST_DAMP_CYCLES` 60 = 300 ms) → `HOST_LINK_IDLE` (master sends IDLE), **latched**; recovery
-  only via a fresh command carrying `FAULT_RESET`. Gated on any motor armed.
-- **Slave master-loss (`master_watchdog.h`, on a no-fresh-command cycle):** from ms since the last
-  `ROBOT_CMD` (`watchdog_ms`; NOP keepalives do **not** refresh it) — `[0,grace)` HOLD with v/tau
-  zeroed, `[grace,grace+damp)` DAMPED (config Kd, `CAUSE_MASTER_LOST`), beyond → IDLE. Thresholds
-  `MASTER_LOST_GRACE_MS` 50, `MASTER_LOST_DAMP_MS` 300.
+  ≥ `HOST_LOST_CYCLES`) → `HOST_LINK_STOPPED`, **latched**: the master forces STOP into every
+  slot and the slave owns the ramp (ends DISABLED, `drive_fault` NONE; `robot_state =
+  HOST_LOST` is the record). Recovery only via a fresh command carrying a RESET request.
+  Armed = any motor in ENABLING/ENABLED/STOPPING.
+- **Slave master-loss (on a no-fresh-command cycle):** from ms since the last `ROBOT_CMD`
+  (`watchdog_ms`; NOP keepalives do **not** refresh it) — `[0,grace)` ENABLING continues /
+  ENABLED holds with v/tau zeroed; past the grace → FAULT(`MASTER_LOST`) via the stop ramp
+  (ENABLED) or an immediate abort (ENABLING). Thresholds `MASTER_LOST_GRACE_MS` 50,
+  `MASTER_LOST_DAMP_MS` 300.
 
 ### 7d. Slave SPI-TX arm cycle (`slave_spi.c`, `tx_arm_timer.c`)
 `TxRxCplt` (exchange complete) → hand RX half to main, start TIM3 → (main stages telemetry on CAN
@@ -500,8 +500,8 @@ feedback, sets ready flag) → TIM3 deadline → `spi_arm_tx` swaps + arms the T
 masks TIM3, resets DMA, re-arms (see §3c).
 
 ### 7e. Chain lifecycle + host side
-- **Slave:** `BOOT` → `discover()` (3× ping, ≤300 ms each) → `IDLE` (alive) or `FAULT` (absent). Then
-  the forward-on-command loop.
+- **Slave:** `BOOT` → `discover()` (3× ping, ≤300 ms each) → `DISABLED` (present) or `ABSENT`
+  (silent; kept pinged at `MOTOR_ABSENT_PING_MS`). Then the forward-on-command loop.
 - **Host (`run_policy.py`):** connect (auto VID:PID) → `wait_until_live` (telemetry live-detect, 2 s)
   → `wait_master_status` + **rate verify-or-refuse** (`master_poll_hz` == config) → step on
   `cycle_id % N == 0` (N = `MASTER_POLL_HZ/rate`), late-step/dropped-step accounting → telemetry-stall
@@ -522,25 +522,25 @@ with unchanged latency (§4 bench).
 
 ## 8. Safety and fault handling
 
-| watchdog / check | where | trigger | effect |
+| watchdog / check | where | trigger | reaction (`docs/protocol_v9.md` §4) |
 |---|---|---|---|
-| host-death | master `host_watchdog.h` | no fresh host command ≥ `HOST_LOST_CYCLES` while armed | DAMPED → IDLE, latched; `ROBOT_HOST_LOST`; recover via `FAULT_RESET` |
-| master-loss | slave `master_watchdog.h` | SPI `ROBOT_CMD` exchanges stopped | HOLD(grace) → DAMPED → IDLE; `CAUSE_MASTER_LOST` |
-| CAN feedback timeout | slave `motor_runtime_update` | Type-2 stale ≥ `MOTOR_CAN_FB_TIMEOUT_MS` (100 ms) while driving | `CAUSE_CAN_TIMEOUT` |
-| enable monitor | slave `enable_monitor.c` | armed motor not `RS_MODE_NORMAL` for K=3 fresh frames | `CAUSE_NOT_ENABLED` |
-| overtorque | slave | `|tau| > cfg->max_tau` (0.8 N·m) while driving | `CAUSE_OVERTORQUE` |
-| motor self-fault | slave | Type-2 fault bits set | `CAUSE_MOTOR_FAULT` + 0x3022 read |
-| zero stall | slave (TO_ZERO) | no homing progress ≥ `MOTOR_ZERO_STALL_MS` (1500 ms) | damp + `CAUSE_ZERO_TIMEOUT` |
-| wound arm | slave `mode_sm` | IDLE→HOLD with `|offset| > MOTOR_WOUND_OFFSET_MAX` | `CAUSE_WOUND` (refuse arm) |
+| host-death | master `host_watchdog.h` | no fresh host command ≥ `HOST_LOST_CYCLES` while armed | forced STOP, latched (`HOST_LINK_STOPPED`); slave ramps to DISABLED, fault NONE; `ROBOT_HOST_LOST`; recover via a RESET request |
+| master-loss | slave | SPI `ROBOT_CMD` exchanges stopped past `MASTER_LOST_GRACE_MS` | ENABLED → stop ramp, ENABLING → abort; both → FAULT(`MASTER_LOST`) |
+| CAN feedback timeout | slave `motor_runtime_update` | Type-2 stale ≥ `MOTOR_CAN_FB_TIMEOUT_MS` (100 ms) while ENABLED/STOPPING | immediate Type-4 → FAULT(`CAN_TIMEOUT`); while DISABLED → ABSENT |
+| enable timeout | slave | ENABLING without `rs_mode == Run` ≥ `MOTOR_ENABLE_TIMEOUT_MS` | immediate Type-4 → FAULT(`ENABLE_FAILED`) |
+| enable monitor | slave `enable_monitor.c` | ENABLED motor not Run for K=3 fresh frames | immediate Type-4 → FAULT(`NOT_ENABLED`) |
+| overtorque | slave | `|tau| > cfg->max_tau` (0.8 N·m) while ENABLED | stop ramp → FAULT(`OVERTORQUE`) |
+| motor self-fault | slave | Type-2 fault bits set (armed; in DISABLED behind `MOTOR_FAULT_CHECK_DISABLED`) | immediate Type-4 → FAULT(`MOTOR_REPORTED`) + 0x3022 read |
+| wound enable | slave `drive_sm` | ENABLE with `|offset| > MOTOR_WOUND_OFFSET_MAX` | FAULT(`WOUND`), never enables |
 
-- **All causes latch** until an IDLE request or a `FAULT_RESET` flag clears them.
-- `CAUSE_WATCHDOG` (3) and `MOTOR_WATCHDOG_MS` (200 ms) are **defined but no longer used** — the
-  master-loss ramp replaced the old hard SPI watchdog.
-- **Failure responses:** host dies → master DAMPED→IDLE (host-death). Master resets/SPI dies → slave
-  HOLD→DAMPED→IDLE (master-loss). Slave SPI DMA wedges → persistent telemetry CRC → master marks it
-  offline, chain goes silent; recovery needs a slave reset. Motor disabled externally → enable monitor
-  → `CAUSE_NOT_ENABLED`. Joint parked outside its soft range at arm → one-sided clamp holds it, no
-  overtorque.
+- **`drive_fault` latches at detection, first wins**; only RESET (→ CLEARING) leaves FAULT,
+  and CLEARING clears the code on entry so a re-latch reports the current fault.
+- **Failure responses:** host dies → master forces STOP, slave ramps to DISABLED (blocked
+  until a RESET-bearing command). Master resets/SPI dies → slave grace → ramp →
+  FAULT(`MASTER_LOST`). Slave SPI DMA wedges → persistent telemetry CRC → master marks it
+  offline, chain goes silent; recovery needs a slave reset. Motor disabled externally →
+  enable monitor → FAULT(`NOT_ENABLED`). Joint parked outside its soft range at enable →
+  one-sided clamp holds it, no overtorque.
 - **CAN enable loss** (rare, ≤~0.2 %) is a consequence of one-shot TX (`AutoRetransmission=DISABLE`);
   caught by the enable monitor. Full study: `can-investigation.md`.
 
@@ -626,11 +626,11 @@ is compile-time on all three sides — there is **no in-band N check**.
 
 **Drive state / control mode split (CiA-402-style)**
 - Problem: the single mode machine conflates lifecycle and control mode.
-- Idea: joint drive state (OFF, ENABLING, ENABLED, STOPPING, DISABLING, FAULT, ABSENT) × control
-  mode (HOLD/MIT/DAMPED/TO_ZERO).
-- Trade-offs: a protocol/telemetry change; larger state table; migration.
-- Dependencies: async arm; wire-version bump.
-- Status / notes:
+- Idea: joint drive state × streamed MIT tuple; firmware stops making motion decisions.
+- Status / notes: **DONE — protocol v9** (`docs/protocol_v9.md`, `drive_sm.h`,
+  the motor_runtime swap and the host port). HOLD/TO_ZERO/DAMPED are host behaviors now;
+  ENABLED is limp until the first VALID tuple. Bench: single-motor enable 40 ms validated;
+  full acceptance checklist pending motor power + slave1 reflash.
 
 **Robot-level supervisor on the Jetson**
 - Problem: no orchestration (connect, gates, staggered enable, move to start, run, stop, safe).

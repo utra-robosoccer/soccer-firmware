@@ -1,8 +1,9 @@
 # Protocol v9 — drive-state × streamed-tuple split
 
-Status: **draft for agreement** (firmware ↔ software leads). Nothing wire-breaking merges
-until this document is agreed. Field renames that don't change bytes (see §6) may merge
-early under v8.
+Status: **draft for agreement** (firmware ↔ software leads), implemented on the firmware
+branch `akp/motor_lifecycle_rework` (slave + master + host tools; bench-validated in part —
+see §9). Nothing wire-breaking merges until this document is agreed. Field renames that
+don't change bytes (see §6) merged early under v8.
 
 v9 replaces the per-motor *mode request* (IDLE/HOLD/MIT/DAMPED/TO_ZERO) with a CiA-402-style
 split:
@@ -53,10 +54,13 @@ Renamed: `MOTOR_FAULT → MOTOR_REPORTED`. New: `ENABLE_FAILED`.
   timeout → ABSENT. Vendor fault bits or `rs_mode == Cali` → FAULT(MOTOR_REPORTED)
   *(behind a config mask, default off, until bench boot-rest data shows motors report
   clean at rest — see §8)*.
-- **ENABLING** — the async handshake: run-mode write → Type-3 enable → wait for
-  `rs_mode == Run` in feedback; `ENABLE_TIMEOUT_MS` without it → FAULT(ENABLE_FAILED).
-  A VALID tuple streamed during ENABLING is **latched and applied on the ENABLING→ENABLED
-  edge**, so a streaming host sees a limp window of zero cycles.
+- **ENABLING** — the async handshake: Type-4 Byte0=1 clear (benign on a healthy motor;
+  some units refuse the enable without it) → run-mode write → Type-3 enable → zero-gain
+  Type-1 polls until feedback shows `rs_mode == Run` (replies to MIT frames carry the
+  trustworthy run mode; the edge fires on the first confirmation, so a fast ACK advances
+  early — measured 40 ms vs the 60 ms fixed-wait v8 arm); `ENABLE_TIMEOUT_MS` without it
+  → FAULT(ENABLE_FAILED). A VALID tuple streamed during ENABLING is **latched and applied
+  on the ENABLING→ENABLED edge**, so a streaming host sees a limp window of zero cycles.
 - **ENABLED** — **limp until the first VALID tuple.** No firmware hold-at-capture. With no
   tuple yet, firmware sends an all-zero Type-1 each cycle (a pure state poll per the RS
   reference), so the enable monitor, CAN feedback timeout, and telemetry keep working
@@ -110,7 +114,9 @@ there / nothing to do).
 
 ### Host loss vs master loss — deliberately different outcomes
 
-- **Master loss** (slave stops hearing the master over SPI): slave-autonomous ramp →
+- **Master loss** (slave stops hearing the master over SPI): ENABLING and ENABLED both
+  get the `MASTER_LOST_GRACE_MS` hold grace (a missed exchange or SPI hiccup recovers
+  transparently); past it, ENABLED ramps and ENABLING aborts, both →
   **FAULT(MASTER_LOST)** per motor. This is a change from v8, where the ramp ended in IDLE.
 - **Host loss** (master stops hearing the host over USB): the master forces **STOP**
   requests into every slot. Slave-side this is an ordinary requested stop ending in
@@ -175,3 +181,17 @@ reference flow (host tools and ros2_control alike):
   from all bench motors over several power-ups shows no spurious bits (an
   uncalibrated-at-rest bit would otherwise fault every boot).
 - Boot `discover()` stays blocking for now; ABSENT covers runtime presence.
+- **SPI master↔slave carries no protocol version.** Found on the bench: a v8 slave wired
+  into a v9 system silently misreads requests (v9 ENABLE=1 is v8 HOLD, v9 STOP=2 is v8
+  MIT). All boards must be flashed together until the SPI header grows a version check —
+  proposed follow-up.
+- A `cmd_robot_t` addresses whole slaves: un-commanded slots on an addressed slave are
+  zero-filled = DISABLE with no tuple (motors a policy does not drive stay off).
+
+## 9. Bench status (2026-10-12)
+
+Single-motor enable validated: DISABLED→ENABLED in 40 ms, RESET→CLEARING→DISABLED
+recovery clean. Concurrent 5-motor enable reached 4/5 at 40–45 ms before the bench 48 V
+motor bus dropped (all motors on both chains went silent; needs a physical power check).
+Outstanding acceptance: the full fault-injection checklist, 5-motor concurrency rerun,
+and slave1 reflash (it runs v8 and has no attached probe).
