@@ -127,7 +127,7 @@ int main(int argc, char **argv)
     }
 
     // A couple of constants the firmware side also pins.
-    CHECK(PROTO_VERSION == 9u);
+    CHECK(PROTO_VERSION == 10u);
     CHECK(MSG_HEADER_SIZE == 16u);
     CHECK(PROTO_MAX_PAYLOAD == sizeof(tele_robot_t));
     CHECK(SPI_XFER_SIZE == (SPI_CMD_FRAME_SIZE > SPI_TELE_FRAME_SIZE

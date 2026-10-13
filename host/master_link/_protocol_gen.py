@@ -3,7 +3,7 @@
 Source:      firmware/common/protocol.yaml
 Regenerate:  python3 scripts/gen_protocol.py
 
-SCHEMA_HASH 0x2EE4783D: CRC-32 of the schema's canonical wire projection
+SCHEMA_HASH 0xE25161C4: CRC-32 of the schema's canonical wire projection
 (parsed YAML minus doc/unit/hex keys, compact sorted-key JSON, UTF-8) — see
 gen_protocol.py. Doc-only edits do not change it.
 
@@ -14,8 +14,8 @@ fixed-point scale and wire constant. master_link.protocol is the public
 API and re-exports from here; consumers should not import this directly."""
 import struct as _struct
 
-PROTO_VERSION = 9
-SCHEMA_HASH = 0x2EE4783D
+PROTO_VERSION = 10
+SCHEMA_HASH = 0xE25161C4
 
 # ── wire constants ──
 CMD_SEQ_NONE = 0

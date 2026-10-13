@@ -2,7 +2,7 @@
  * Source:      firmware/common/protocol.yaml
  * Regenerate:  python3 scripts/gen_protocol.py
  *
- * SCHEMA_HASH 0x2EE4783D: CRC-32 of the schema's canonical wire
+ * SCHEMA_HASH 0xE25161C4: CRC-32 of the schema's canonical wire
  * projection (parsed YAML minus doc/unit/hex keys, compact sorted-key
  * JSON, UTF-8) — see gen_protocol.py. Doc-only edits do not change it.
  */
@@ -23,8 +23,8 @@
 
 /* Wire-contract version. Carried in MsgHeader.ver_flags low byte; both
  * ends drop and count any frame whose version != this. */
-#define PROTO_VERSION 9u
-#define PROTO_SCHEMA_HASH 0x2EE4783Du
+#define PROTO_VERSION 10u
+#define PROTO_SCHEMA_HASH 0xE25161C4u
 
 /* ── wire constants ─────────────────────────────────────────────────── */
 /* cmd_seq sentinel: "no host command applied yet"

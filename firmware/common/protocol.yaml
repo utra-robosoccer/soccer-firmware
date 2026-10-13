@@ -20,12 +20,17 @@
 #     though it carries n_chains — see docs/protocol.md.)
 
 meta:
-  proto_version: 9
+  proto_version: 10
   endianness: little
   doc: >
-    Protocol v9 — drive-state × streamed-tuple split (docs/protocol_v9.md).
-    Raw [MsgHeader(16 B)][payload] frames over USB CDC; CRC16-CCITT
-    (poly 0x1021, init 0xFFFF) over header (crc zeroed) + payload.
+    Protocol v10 — the v9 drive-state × streamed-tuple split
+    (docs/protocol_v9.md) plus the v9.1 layout changes (schema SSOT, version
+    gates, position-stable chains; §10 there). v10 exists because v9 builds
+    were flashed and bench-run before 5a: a pre-5a host only checks
+    PROTO_VERSION, so the bump makes it refuse the new MasterStatus /
+    tele_robot_t layouts instead of misparsing them. Raw
+    [MsgHeader(16 B)][payload] frames over USB CDC; CRC16-CCITT (poly 0x1021,
+    init 0xFFFF) over header (crc zeroed) + payload.
 
 constants:
   - name: CMD_SEQ_NONE
