@@ -38,6 +38,7 @@ REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 SCHEMA_PATH = os.path.join(REPO_ROOT, "firmware", "common", "protocol.yaml")
 
 OUT_C = os.path.join(REPO_ROOT, "firmware", "common", "include", "protocol_gen.h")
+OUT_PY = os.path.join(REPO_ROOT, "host", "master_link", "_protocol_gen.py")
 
 # Scalar wire types: name -> (size, C type, python struct-format char)
 WIRE_TYPES = {
@@ -491,11 +492,162 @@ def emit_c(schema, layout, derived, shash):
     return "\n".join(L) + "\n"
 
 
+# ── Python emitter ───────────────────────────────────────────────────────────
+
+def _py_struct_macro(name):
+    """cmd_motor_t → CMD_MOTOR, MsgHeader → MSG_HEADER."""
+    s = name[:-2] if name.endswith("_t") else name
+    return re.sub(r"(?<!^)(?=[A-Z])", "_", s).upper()
+
+
+def _py_value(value, hexa=False):
+    return f"0x{value:02X}" if hexa else str(value)
+
+
+def emit_python(schema, layout, derived, shash):
+    consts = {c["name"]: c["value"] for c in schema["constants"]}
+    L = []
+    o = L.append
+    o('"""AUTO-GENERATED — DO NOT EDIT.')
+    o("")
+    o("Source:      firmware/common/protocol.yaml")
+    o("Regenerate:  python3 scripts/gen_protocol.py")
+    o("")
+    o(f"SCHEMA_HASH 0x{shash:08X}: CRC-32 of the schema's canonical wire projection")
+    o("(parsed YAML minus doc/unit/hex keys, compact sorted-key JSON, UTF-8) — see")
+    o("gen_protocol.py. Doc-only edits do not change it.")
+    o("")
+    o("Layout data for the little-endian packed wire structs, plus every enum")
+    o("value (PLAIN INTS, not IntEnum — str() of an IntEnum changed in Python")
+    o('3.11, which would silently alter stringified CSV/log output), flag bit,')
+    o("fixed-point scale and wire constant. master_link.protocol is the public")
+    o('API and re-exports from here; consumers should not import this directly."""')
+    o("import struct as _struct")
+    o("")
+    o(f"PROTO_VERSION = {schema['meta']['proto_version']}")
+    o(f"SCHEMA_HASH = 0x{shash:08X}")
+    o("")
+    o("# ── wire constants ──")
+    for c in schema["constants"]:
+        o(f"{c['name']} = {_py_value(c['value'], c.get('hex'))}")
+    o("")
+    for e in schema["enums"]:
+        o(f"# ── {e['name']} ({e['wire_type']} on the wire) ──")
+        for v in e["values"]:
+            o(f"{v['name']} = {_py_value(v['value'], v.get('hex'))}")
+        pairs = ", ".join(f"{v['value']}: \"{v['name']}\"" for v in e["values"])
+        o(f"{_py_struct_macro(e['name'])}_VALUE_NAMES = {{{pairs}}}")
+        o("")
+    for g in schema["flags"]:
+        o(f"# ── {g['name']} ──")
+        for b in g["bits"]:
+            if b.get("reserved"):
+                o(f"# bit {b['bit']} reserved — {b.get('doc', '')}")
+            else:
+                o(f"{b['name']} = 1 << {b['bit']}")
+        o("")
+    o("# ── fixed-point scales ──")
+    for sc in schema["scales"]:
+        o(f"{sc['name']} = {float(sc['value'])!r}")
+    o("")
+    o("# ── struct formats ('<' = little-endian, packed) ──")
+    o("# Nested structs (a trailing struct array) get a _PREFIX format covering")
+    o("# the scalar fields before the array; SZ_* is always the full wire size.")
+    structs_table = {}
+    for st in schema["structs"]:
+        mn = _py_struct_macro(st["name"])
+        lay = layout[st["name"]]
+        fmt = "<"
+        array = None
+        tbl = []
+        for fld in st["fields"]:
+            t = fld["type"]
+            count = resolve_count(fld, consts)
+            if t in WIRE_TYPES:
+                if array is not None:
+                    fail(f"python emitter: {st['name']}.{fld['name']} follows a "
+                         f"struct array — unsupported")
+                ch = WIRE_TYPES[t][2]
+                fmt += (str(count) + ch) if count else ch
+                tbl.append((fld["name"], "scalar",
+                            (str(count) + ch) if count else ch))
+            else:
+                if array is not None:
+                    fail(f"python emitter: {st['name']} has more than one "
+                         f"struct-typed field — unsupported")
+                array = (fld["name"], t, count or 1)
+                tbl.append((fld["name"], "array", t, count or 1))
+        if array is None:
+            o(f"FMT_{mn} = \"{fmt}\"")
+        else:
+            o(f"FMT_{mn}_PREFIX = \"{fmt}\"")
+        o(f"SZ_{mn} = {lay['size']}")
+        offs = ", ".join(f"\"{f['name']}\": {f['offset']}" for f in lay["fields"])
+        o(f"OFF_{mn} = {{{offs}}}")
+        structs_table[st["name"]] = tbl
+    o("")
+    o("# ── derived wire constants ──")
+    for d in schema["derived"]:
+        o(f"{d['name']} = {derived[d['name']]}   # {d['expr']}")
+    o("")
+    o("# ── generic pack/unpack (field tables + recursive helpers) ──")
+    o("# STRUCTS[name] = [(field, 'scalar', fmt) | (field, 'array', struct, n)]")
+    o("STRUCTS = {")
+    for name, tbl in structs_table.items():
+        rows = ", ".join(repr(r) for r in tbl)
+        o(f"    \"{name}\": [{rows}],")
+    o("}")
+    o("")
+    o("")
+    o("def unpack_struct(name, data, off=0):")
+    o("    \"\"\"Decode one wire struct into a dict (struct arrays → lists of dicts).")
+    o("    Raw wire values only — no fixed-point decode, no truncation handling.\"\"\"")
+    o("    out = {}")
+    o("    for row in STRUCTS[name]:")
+    o("        if row[1] == \"scalar\":")
+    o("            fmt = \"<\" + row[2]")
+    o("            vals = _struct.unpack_from(fmt, data, off)")
+    o("            out[row[0]] = vals[0] if len(vals) == 1 else list(vals)")
+    o("            off += _struct.calcsize(fmt)")
+    o("        else:")
+    o("            _, _, sub, n = row")
+    o("            sz = SZ_BY_STRUCT[sub]")
+    o("            out[row[0]] = [unpack_struct(sub, data, off + i * sz)")
+    o("                           for i in range(n)]")
+    o("            off += n * sz")
+    o("    return out")
+    o("")
+    o("")
+    o("def pack_struct(name, values):")
+    o("    \"\"\"Inverse of unpack_struct. Missing fields pack as zero; a short")
+    o("    struct-array list is zero-filled to the fixed wire length.\"\"\"")
+    o("    out = bytearray()")
+    o("    for row in STRUCTS[name]:")
+    o("        if row[1] == \"scalar\":")
+    o("            fmt = \"<\" + row[2]")
+    o("            v = values.get(row[0], 0)")
+    o("            out += _struct.pack(fmt, *v) if isinstance(v, (list, tuple)) \\")
+    o("                else _struct.pack(fmt, v)")
+    o("        else:")
+    o("            _, _, sub, n = row")
+    o("            elems = values.get(row[0], [])")
+    o("            for i in range(n):")
+    o("                out += pack_struct(sub, elems[i] if i < len(elems) else {})")
+    o("    return bytes(out)")
+    o("")
+    o("")
+    sz_pairs = ", ".join(f"\"{name}\": SZ_{_py_struct_macro(name)}"
+                         for name in structs_table)
+    o(f"SZ_BY_STRUCT = {{{sz_pairs}}}")
+    return "\n".join(L) + "\n"
+
+
 # ── main ─────────────────────────────────────────────────────────────────────
 
 EMITTERS = {
     "c": (emit_c, OUT_C),
-    # "python": step 2; "cpp": step 3
+    "python": (emit_python, OUT_PY),
+    # "cpp": step 3
 }
 
 
