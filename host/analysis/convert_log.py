@@ -53,17 +53,35 @@ def _host_ts(hdr, ts_ns):
     return (hdr["wall_start_ns"] + (ts_ns - hdr["mono_start_ns"])) / 1e9
 
 
-def _frame_header(payload):
-    if len(payload) < P.HDR_SIZE:
+def _frame_header(D, payload):
+    if len(payload) < D.HDR_SIZE:
         return None, None, None, b""
-    mt, seq, src, dst, ts_ms, pay_len, ver_flags, crc = struct.unpack_from(P.HDR_FMT, payload)
-    inner = payload[P.HDR_SIZE:P.HDR_SIZE + pay_len]
+    mt, seq, src, dst, ts_ms, pay_len, ver_flags, crc = struct.unpack_from(D.HDR_FMT, payload)
+    inner = payload[D.HDR_SIZE:D.HDR_SIZE + pay_len]
     return mt, ver_flags & 0xFF, ts_ms, inner
+
+
+def _decode_context(hdr):
+    """The decode surface to convert with: the CURRENT protocol module when the
+    log matches it (or predates embedded schemas — unchanged legacy behavior),
+    else a SchemaDecoder built from the schema text embedded in the log header,
+    so an old log stays convertible after the wire protocol moves on."""
+    meta = hdr.get("meta") or {}
+    emb_yaml = meta.get("protocol_yaml")
+    emb_hash = meta.get("schema_hash")
+    if emb_yaml and emb_hash != P.SCHEMA_HASH:
+        from master_link.schema_decode import SchemaDecoder
+        return SchemaDecoder(emb_yaml), emb_hash
+    return P, None
 
 
 def convert(path):
     reader = BinaryLogReader(path)
     hdr = reader.header
+    D, emb_hash = _decode_context(hdr)
+    if emb_hash is not None:
+        print(f"decoding with the log's embedded schema 0x{emb_hash:08X} "
+              f"(host module is 0x{P.SCHEMA_HASH:08X})")
     folder = os.path.splitext(path)[0]
     if os.path.isdir(folder):
         shutil.rmtree(folder)
@@ -92,71 +110,77 @@ def convert(path):
 
         if rec.kind == LOG.RX_FRAME:
             c["rx"] += 1
-            mt, ver, ts_ms, inner = _frame_header(rec.payload)
+            mt, ver, ts_ms, inner = _frame_header(D, rec.payload)
             if mt is None:
                 continue
-            if ver != P.PROTO_VERSION:
+            if ver != D.PROTO_VERSION:
                 c["version_frames"] += 1
                 event_w.writerow({"host_ts": ht, "kind": "VERSION_MISMATCH",
                                   "text": f"version={ver} msg_type={mt}"})
                 continue
-            if mt == P.MSG_ROBOT_TELE:
-                d = P.parse_robot_tele(inner)
+            if mt == D.MSG_ROBOT_TELE:
+                d = D.parse_robot_tele(inner)
                 if not d:
                     continue
                 status_w.writerow({"host_ts": ht, "type": "ROBOT",
-                                   "robot_state": d["robot_state"],
+                                   "robot_state": d.get("robot_state", ""),
                                    "chain_link": " ".join(
-                                       f"{ch['chain_id']}:{ch['link']}"
-                                       for ch in d["chains"]),
-                                   "cycle_id": d["cycle_id"],
-                                   "master_time_s": mtu.update(d["master_time_us"]) / 1e6,
-                                   "last_cmd_seq_rx": d["last_cmd_seq_rx"],
-                                   "cmd_seq_active": d["cmd_seq_active"],
-                                   "cmd_on_time": d["cmd_on_time"],
-                                   "cmd_late": d["cmd_late"],
-                                   "cmd_missing": d["cmd_missing"],
-                                   "cmd_duplicate": d["cmd_duplicate"],
-                                   "n_chains": d["n_chains"]})
+                                       f"{ch.get('chain_id', '?')}:{ch.get('link', '?')}"
+                                       for ch in d.get("chains", [])
+                                       if "link" in ch),
+                                   "cycle_id": d.get("cycle_id", ""),
+                                   "master_time_s": (mtu.update(d["master_time_us"]) / 1e6
+                                                     if "master_time_us" in d else ""),
+                                   "last_cmd_seq_rx": d.get("last_cmd_seq_rx", ""),
+                                   "cmd_seq_active": d.get("cmd_seq_active", ""),
+                                   "cmd_on_time": d.get("cmd_on_time", ""),
+                                   "cmd_late": d.get("cmd_late", ""),
+                                   "cmd_missing": d.get("cmd_missing", ""),
+                                   "cmd_duplicate": d.get("cmd_duplicate", ""),
+                                   "n_chains": d.get("n_chains", "")})
                 for ch in d["chains"]:
                     sid = ch["chain_id"]
                     for local, mo in enumerate(ch["motors"]):
+                        g = lambda k: getattr(mo, k, "")
                         ms_w.writerow({
                             "host_ts": ht, "master_ts_ms": ts_ms,
                             "motor": _GIDX.get((sid, local)),
                             "slave": sid, "local": local,
-                            "drive_state": mo.drive_state,
-                            "drive_state_name": mo.drive_state_name,
-                            "drive_fault": mo.drive_fault,
-                            "drive_fault_name": mo.drive_fault_name,
-                            "rs_mode": mo.rs_mode,
-                            "rs_mode_name": mo.rs_mode_name,
-                            "rs_fault_bits": mo.rs_fault_bits, "flags": mo.flags,
-                            "rs_fault_word": mo.rs_fault_word, "fb_age": mo.fb_age_ms,
-                            "pos": mo.pos, "vel": mo.vel, "tau": mo.tau, "temp": mo.temp,
-                            "last_applied_seq": mo.last_applied_seq,
+                            "drive_state": g("drive_state"),
+                            "drive_state_name": g("drive_state_name"),
+                            "drive_fault": g("drive_fault"),
+                            "drive_fault_name": g("drive_fault_name"),
+                            "rs_mode": g("rs_mode"),
+                            "rs_mode_name": g("rs_mode_name"),
+                            "rs_fault_bits": g("rs_fault_bits"), "flags": g("flags"),
+                            "rs_fault_word": g("rs_fault_word"), "fb_age": g("fb_age_ms"),
+                            "pos": g("pos"), "vel": g("vel"), "tau": g("tau"),
+                            "temp": g("temp"),
+                            "last_applied_seq": g("last_applied_seq"),
                             "request_rejected": int(mo.request_rejected),
                             "saturated": int(mo.saturated)})
-            elif mt == P.MSG_MASTER_STATUS:
-                d = P.parse_master_status(inner)
+            elif mt == D.MSG_MASTER_STATUS:
+                d = D.parse_master_status(inner)
                 if d:
                     status_w.writerow({"host_ts": ht, "type": "MASTER", **{
                         k: d[k] for k in ("schema_hash", "slave_proto_mismatch",
                                           "uptime_ms",
                                           "link_errors", "rx_frames", "master_poll_hz",
-                                          "telemetry_hz", "slave_tick_hz", "host_cmd_hz")}})
-            elif mt == P.MSG_SLAVE_STATUS:
-                d = P.parse_slave_status(inner)
+                                          "telemetry_hz", "slave_tick_hz", "host_cmd_hz")
+                        if k in d}})
+            elif mt == D.MSG_SLAVE_STATUS:
+                d = D.parse_slave_status(inner)
                 if d:
                     status_w.writerow({"host_ts": ht, "type": "SLAVE", **{
                         k: d[k] for k in ("slave_id", "motors_alive", "uptime_ms",
-                                          "crc_errors", "cmd_crc_errors", "seq_gaps")}})
+                                          "crc_errors", "cmd_crc_errors", "seq_gaps")
+                        if k in d}})
 
         elif rec.kind == LOG.TX_FRAME:
             c["tx"] += 1
-            mt, ver, ts_ms, inner = _frame_header(rec.payload)
-            if mt == P.MSG_ROBOT_CMD:
-                d = P.parse_robot_cmd(inner)
+            mt, ver, ts_ms, inner = _frame_header(D, rec.payload)
+            if mt == D.MSG_ROBOT_CMD:
+                d = D.parse_robot_cmd(inner)
                 if not d:
                     continue
                 for ch in d["chains"]:
@@ -165,13 +189,15 @@ def convert(path):
                         cmd_w.writerow({"host_ts": ht,
                                         "motor": _GIDX.get((sid, local)),
                                         "slave": sid, "local": local,
-                                        "drive_req": m["drive_req"],
-                                        "drive_req_name": P.DRIVE_REQ_NAMES.get(
-                                            m["drive_req"], str(m["drive_req"])),
-                                        "pos": m["pos"], "vel": m["vel"],
-                                        "kp": m["kp"], "kd": m["kd"], "tau_ff": m["tau_ff"],
-                                        "cmd_seq": d["cmd_seq"], "cycle_id": d["cycle_id"],
-                                        "flags": m["flags"]})
+                                        "drive_req": m.get("drive_req", ""),
+                                        "drive_req_name": D.DRIVE_REQ_NAMES.get(
+                                            m.get("drive_req"), str(m.get("drive_req"))),
+                                        "pos": m.get("pos", ""), "vel": m.get("vel", ""),
+                                        "kp": m.get("kp", ""), "kd": m.get("kd", ""),
+                                        "tau_ff": m.get("tau_ff", ""),
+                                        "cmd_seq": d.get("cmd_seq", ""),
+                                        "cycle_id": d.get("cycle_id", ""),
+                                        "flags": m.get("flags", "")})
 
         elif rec.kind == LOG.RX_DISCARD:
             c["discard_records"] += 1

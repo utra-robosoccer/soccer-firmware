@@ -158,10 +158,23 @@ def git_info() -> dict:
     return info
 
 
+def protocol_yaml_text() -> str | None:
+    """The full wire-schema text (firmware/common/protocol.yaml), or None when the
+    host runs without the firmware tree."""
+    p = os.path.join(_REPO_ROOT, "firmware", "common", "protocol.yaml")
+    if os.path.isfile(p):
+        with open(p, encoding="utf-8") as fh:
+            return fh.read()
+    return None
+
+
 def build_log_meta(producer: str) -> dict:
     """Binary-log header metadata. Records the config the RUNTIME actually uses (the
     generated module) plus the configs/active file and any $SOCCER_SETUP override, so
-    a divergence is captured in the log itself."""
+    a divergence is captured in the log itself. Since v10 it also embeds the FULL
+    wire schema + its hash, so the log stays decodable after the protocol moves on
+    (convert_log falls back to the embedded schema on a hash mismatch)."""
+    from . import protocol as P   # local import: avoid a cycle at package import
     gi = git_info()
     file_name = active_file_name()
     gen_name, gen_hash = generated_config()
@@ -174,4 +187,6 @@ def build_log_meta(producer: str) -> dict:
         "configs_active": file_name,      # the persistent pointer
         "soccer_setup": env_override(),   # env override, if any
         "config_yaml": config_yaml(file_name),
+        "schema_hash": P.SCHEMA_HASH,     # the wire contract this session spoke
+        "protocol_yaml": protocol_yaml_text(),
     }
