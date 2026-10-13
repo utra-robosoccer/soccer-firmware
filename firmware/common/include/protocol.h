@@ -1,252 +1,23 @@
 #ifndef PROTOCOL_H
 #define PROTOCOL_H
 
+/* Wire protocol — thin wrapper.
+ *
+ * Every wire LAYOUT (structs, enums, flag bits, fixed-point scales, constants)
+ * is generated from firmware/common/protocol.yaml into protocol_gen.h — edit
+ * the schema and re-run scripts/gen_protocol.py, never the generated header.
+ * This file keeps only the hand-written non-layout code: the fixed-point
+ * encode/decode helpers, CRC16-CCITT, and the USB frame builder/scanner. */
+
 #include <stdint.h>
 #include <stddef.h>
 #include <string.h>
 
+#include "protocol_gen.h"
+
 #ifdef __cplusplus
 extern "C" {
 #endif
-
-/* ── node identifiers ────────────────────────────────────────────────────── */
-typedef enum {
-    NODE_JETSON  = 1u,
-    NODE_MASTER  = 2u,
-    NODE_SLAVE_0 = 3u,
-    NODE_SLAVE_1 = 4u,
-} NodeId;
-
-/* ── message types ───────────────────────────────────────────────────────── */
-typedef enum {
-    MSG_PING          = 0x01u,
-    MSG_MASTER_STATUS = 0x02u,
-    MSG_SLAVE_STATUS  = 0x03u,
-    MSG_ROBOT_CMD     = 0x08u,  /* host→master: one cmd_robot_t per host tick    */
-    MSG_ROBOT_TELE    = 0x09u,  /* master→host: one tele_robot_t per tele tick   */
-} MsgType;
-
-/* ── robot lifecycle ─────────────────────────────────────────────────────── */
-typedef enum {
-    ROBOT_INIT      = 0u,
-    ROBOT_READY     = 1u,
-    ROBOT_DEGRADED  = 2u,
-    ROBOT_HOST_LOST = 3u,  /* master's host-death watchdog tripped (forcing STOP) */
-} RobotState;
-
-/* ═══ protocol v9 — drive-state × streamed-tuple split (docs/protocol_v9.md) ═══ */
-
-/* Host→slave per-motor drive request (cmd_motor_t.drive_req).
- * Level-triggered: safe to repeat every cycle; a repeat in the target or transit
- * state is a no-op. The MIT tuple travels independently under CMD_FLAG_VALID —
- * there is no MIT request; in ENABLED every valid tuple is simply applied. */
-typedef enum {
-    DRV_REQ_DISABLE = 0u,  /* Type-4 stop now                                   */
-    DRV_REQ_ENABLE  = 1u,  /* DISABLED → ENABLING → ENABLED; rejected elsewhere */
-    DRV_REQ_STOP    = 2u,  /* ENABLED → STOPPING (ramp) → DISABLED              */
-    DRV_REQ_RESET   = 3u,  /* FAULT → CLEARING → DISABLED; never enables        */
-} DriveReq;
-
-/* Per-motor drive state (tele_motor_t.drive_state under v9). */
-typedef enum {
-    DRV_BOOT        = 0u,
-    DRV_DISCOVERING = 1u,
-    DRV_ABSENT      = 2u,  /* no feedback; pinged ~100 ms; reply → DISABLED     */
-    DRV_DISABLED    = 3u,  /* motor off, polled every cycle                     */
-    DRV_ENABLING    = 4u,  /* async handshake; rs_mode==Run confirms → ENABLED  */
-    DRV_ENABLED     = 5u,  /* limp until the first VALID tuple; then applies it */
-    DRV_STOPPING    = 6u,  /* ramped stop; requested → DISABLED, fault → FAULT  */
-    DRV_CLEARING    = 7u,  /* RESET sent the Type-4 clear; judging the reply    */
-    DRV_FAULT       = 8u,  /* latched — see drive_fault; only RESET leaves      */
-} DriveState;
-
-/* Why a motor is faulted (tele_motor_t.drive_fault under v9). Latched at fault
- * DETECTION (first fault wins); cleared on CLEARING entry so a re-latch reports
- * the current fault. */
-typedef enum {
-    DRVF_NONE           = 0u,
-    DRVF_CAN_TIMEOUT    = 1u,  /* Type-2 feedback went stale (comms-broken)      */
-    DRVF_MASTER_LOST    = 2u,  /* SPI command stream died → autonomous stop ramp */
-    DRVF_ENABLE_FAILED  = 3u,  /* ENABLING saw no rs_mode==Run in time           */
-    DRVF_NOT_ENABLED    = 4u,  /* enable monitor: enabled motor reports not-Run  */
-    DRVF_OVERTORQUE     = 5u,  /* |tau| exceeded per-motor max_tau               */
-    DRVF_MOTOR_REPORTED = 6u,  /* RS vendor fault bits / Cali mode               */
-    DRVF_WOUND          = 7u,  /* ENABLE refused: shaft wound beyond safe range  */
-} DriveFault;
-
-/* ── cmd_motor_t.flags ───────────────────────────────────────────────────── */
-#define CMD_FLAG_VALID            (1u << 0u)  /* the MIT tuple in this slot is live;
-                                                 drive_req applies regardless      */
-#define CMD_FLAG_USE_CONFIG_GAINS (1u << 1u)  /* ignore wire kp/kd, use config defaults */
-/* bit2 was CMD_FLAG_FAULT_RESET (v8); RESET is a drive request in v9 — reserved */
-
-/* ── tele_motor_t.flags ──────────────────────────────────────────────────── */
-#define TELE_FLAG_REQUEST_REJECTED (1u << 0u)  /* last drive request was illegal  */
-/* bit1 was TELE_FLAG_TO_ZERO_ARRIVED (v8); TO_ZERO is host-side in v9 — reserved */
-#define TELE_FLAG_SATURATED        (1u << 2u)  /* a fixed-point field saturated    */
-#define TELE_FLAG_CLAMPED_POS      (1u << 3u)  /* commanded pos hit a soft limit   */
-#define TELE_FLAG_CLAMPED_TAU      (1u << 4u)  /* vel feedforward cancelled at limit */
-#define TELE_FLAG_CMD_STALE        (1u << 5u)  /* executing a held/watchdog setpoint */
-#define TELE_FLAG_CLAMPED_GAIN     (1u << 6u)  /* wire kp/kd clamped to the model's range */
-
-/* ── wire header: 16 bytes ───────────────────────────────────────────────── */
-#ifdef __GNUC__
-#  define PROTO_PACKED __attribute__((packed))
-#else
-#  define PROTO_PACKED
-#endif
-
-/* Wire-contract version. Carried in MsgHeader.ver_flags low byte; both ends drop
- * and count any frame whose version != this. High byte reserved (0). */
-#define PROTO_VERSION 9u
-
-/* cmd_seq sentinel: 0 = "no host command applied yet" (tele_motor_t.last_applied_seq
- * for pre-arm / idle). The host starts cmd_seq at 1 and skips 0 on wrap. */
-#define CMD_SEQ_NONE 0u
-
-/* ── hierarchy caps (fixed WIRE maximums; actual counts carried in n_ fields) ──
- * Distinct from the generated runtime counts (N_MOTORS / NUM_SLAVES): these size
- * the fixed-length wire arrays, so a mismatched build still has a stable layout. */
-#define MAX_MOTORS_PER_CHAIN 5u
-#define MAX_CHAINS           4u
-
-/* ── fixed-point scales (shared; host mirrors these exactly) ────────────────
- * Universal scales covering every RobStride model (incl. RS03/04/06: Kp≤5000,
- * Kd≤100). Position is HOME-FRAME ±π only (±31416 at ×10000 — multi-turn is not
- * on the wire). Encode saturates and sets TELE_FLAG_SATURATED / the cmd path's
- * own saturation handling. */
-#define PROTO_POS_SCALE 10000.0f  /* rad   → i16  (home-frame ±π)               */
-#define PROTO_VEL_SCALE 100.0f    /* rad/s → i16                                */
-#define PROTO_TAU_SCALE 100.0f    /* N·m   → i16                                */
-#define PROTO_KP_SCALE  10.0f     /* Kp    → u16  (0..6553.5, covers 0..5000)   */
-#define PROTO_KD_SCALE  100.0f    /* Kd    → u16  (0..655.35, covers 0..100)    */
-
-typedef struct PROTO_PACKED {
-    uint16_t type;    /* MsgType                              */
-    uint16_t seq;
-    uint8_t  src;     /* NodeId                               */
-    uint8_t  dst;
-    uint32_t ts_ms;   /* HAL_GetTick() at send time           */
-    uint16_t len;     /* payload bytes                        */
-    uint16_t ver_flags; /* low byte = PROTO_VERSION; high byte reserved 0 */
-    uint16_t crc16;   /* CRC16-CCITT over hdr(crc=0)+payload  */
-} MsgHeader;
-
-#define MSG_HEADER_SIZE 16u
-
-/* ── command hierarchy (host → master → slave) ───────────────────────────── */
-typedef struct PROTO_PACKED {
-    uint8_t  drive_req;  /* DriveReq                                            */
-    int16_t  pos;        /* rad   × PROTO_POS_SCALE (home-frame ±π)             */
-    int16_t  vel;        /* rad/s × PROTO_VEL_SCALE                             */
-    uint16_t kp;         /*        × PROTO_KP_SCALE                             */
-    uint16_t kd;         /*        × PROTO_KD_SCALE                             */
-    int16_t  tau_ff;     /* N·m   × PROTO_TAU_SCALE                             */
-    uint8_t  flags;      /* CMD_FLAG_*                                          */
-} cmd_motor_t;           /* 12 bytes */
-
-typedef struct PROTO_PACKED {
-    uint8_t     chain_id;
-    uint8_t     n_motors;                      /* valid slots (≤ MAX_MOTORS_PER_CHAIN) */
-    cmd_motor_t motors[MAX_MOTORS_PER_CHAIN];
-} cmd_chain_t;                                 /* 2 + 12·5 = 62 bytes */
-
-typedef struct PROTO_PACKED {
-    uint16_t    cycle_id;                      /* echo of last master cycle seen       */
-    uint16_t    cmd_seq;                       /* one per host tick (≥1, 0 reserved)   */
-    uint8_t     n_chains;                      /* valid chains (≤ MAX_CHAINS)          */
-    uint8_t     reserved;
-    cmd_chain_t chains[MAX_CHAINS];
-} cmd_robot_t;                                 /* 6 + 62·4 = 254 bytes */
-
-/* ── telemetry hierarchy (slave → master → host) ─────────────────────────── */
-typedef struct PROTO_PACKED {
-    int16_t  pos;             /* rad   × PROTO_POS_SCALE (home-frame)            */
-    int16_t  vel;             /* rad/s × PROTO_VEL_SCALE                         */
-    int16_t  tau;             /* N·m   × PROTO_TAU_SCALE (measured)             */
-    uint8_t  temp_c;          /* integer °C                                     */
-    uint8_t  drive_state;     /* MotorLifecycle                                 */
-    uint8_t  drive_fault;     /* MotorFaultCause (latched)                      */
-    uint8_t  rs_mode;         /* RS run_mode reported in Type-2 (0/1/2)         */
-    uint8_t  rs_fault_bits;   /* packed Type-2 fault bits                       */
-    uint8_t  flags;           /* TELE_FLAG_*                                    */
-    uint8_t  fb_age_ms;       /* ms since last Type-2, saturating 255           */
-    uint32_t rs_fault_word;   /* 0x3022 latched; 0 clear; 0xFFFFFFFF read-fail  */
-    uint16_t last_applied_seq;/* host cmd_seq last confirmed applied (0 = none) */
-    uint16_t reserved;        /* growth slot (0)                                */
-} tele_motor_t;               /* 21 bytes */
-
-typedef struct PROTO_PACKED {
-    uint8_t      chain_id;
-    uint8_t      n_motors;
-    uint8_t      spi_seq_echo;    /* SPI link-health seq echoed (NOT cmd_seq)   */
-    uint8_t      spi_resyncs;     /* slave SPI DMA resync count (wraps; host deltas) */
-    uint32_t     slave_time_us;   /* slave uptime (µs)                          */
-    uint16_t     cmd_crc_errors;  /* SPI command frames rejected on CRC (slave) */
-    uint16_t     can_tx_errors;   /* CAN TX errors seen by the slave            */
-    uint8_t      spi_tx_arm_fails;/* slave TX-arm (HAL DMA) failures, then retried (wraps) */
-    tele_motor_t motors[MAX_MOTORS_PER_CHAIN];
-} tele_chain_t;                   /* 12 + 21·5 = 118 bytes */
-
-typedef struct PROTO_PACKED {
-    uint16_t     cycle_id;         /* this telemetry's master cycle (increments/cycle) */
-    uint32_t     master_time_us;   /* master uptime (µs)                        */
-    uint16_t     last_cmd_seq_rx;  /* last cmd_seq the master received from host */
-    uint16_t     cmd_seq_active;   /* cmd_seq actually sent to the slaves THIS cycle
-                                      (the applied command; 0 = holding, none applied) */
-    /* Host-loop timing vs the master cycle, classified at the cycle-start mailbox swap
-       (see docs/architecture.md). Free-running counters; the host reports deltas. */
-    uint16_t     cmd_on_time;      /* applied a fresh command echoing the latest tele cycle */
-    uint16_t     cmd_late;         /* applied a fresh command echoing an OLDER cycle         */
-    uint16_t     cmd_missing;      /* cycle with no fresh command → held current targets     */
-    uint16_t     cmd_duplicate;    /* command overwritten unapplied (host sent >1 per cycle) */
-    uint8_t      n_chains;
-    uint8_t      robot_state;      /* RobotState                                */
-    tele_chain_t chains[MAX_CHAINS];
-} tele_robot_t;                    /* 20 + 118·4 = 492 bytes */
-
-/* ── status (unchanged cadence, 20 Hz) ───────────────────────────────────── */
-typedef struct PROTO_PACKED {
-    uint8_t  robot_state;   /* RobotState                   */
-    uint8_t  slave_alive;   /* bit s = slave s reachable    */
-    uint32_t uptime_ms;
-    uint32_t link_errors;   /* bad CRC or unknown msg_type  */
-    uint32_t rx_frames;
-    uint16_t master_poll_hz;    /* configured SPI poll rate      */
-    uint16_t telemetry_hz;      /* configured MSG_ROBOT_TELE rate */
-    uint16_t slave_tick_hz;     /* configured slave control-tick rate */
-    uint16_t host_cmd_hz;       /* configured expected host cmd rate   */
-    uint32_t rx_resyncs;        /* USB RX resync events (v5)           */
-    uint32_t rx_discarded_bytes;/* bytes dropped during resync (v5)    */
-} MasterStatus;                 /* 30 bytes */
-
-typedef struct PROTO_PACKED {
-    uint8_t  slave_id;        /* which slave this status is for              */
-    uint8_t  motors_alive;    /* bit i = motor i alive                       */
-    uint32_t uptime_ms;
-    uint32_t crc_errors;      /* SPI telemetry frames failing CRC (master)   */
-    uint32_t cmd_crc_errors;  /* SPI command frames the slave rejected on CRC */
-    uint32_t seq_gaps;        /* master: echoed spi-seq gaps (dropped frames) */
-} SlaveStatus;                /* 18 bytes */
-
-/* ── SPI frame layout (one full-duplex transfer) ─────────────────────────────
- * One chain per slave, so the SPI payload is a single cmd_chain_t / tele_chain_t
- * (fixed size, no per-N arithmetic).
- *   master → slave: [opcode u8][spi_seq u8][cycle_id u16][cmd_seq u16]
- *                   [cmd_chain_t][crc16]                              = 70 B
- *   slave → master: [tele_chain_t][crc16]                            = 119 B
- * Transfer length = the larger of the two. */
-#define SPI_OP_NOP        0x00u
-#define SPI_OP_ROBOT_CMD  0x01u
-
-#define SPI_CMD_HDR_BYTES  6u    /* opcode + spi_seq + cycle_id(u16) + cmd_seq(u16) */
-#define SPI_CRC_BYTES      2u
-#define SPI_CMD_CRC_OFF    ((uint16_t)(SPI_CMD_HDR_BYTES + sizeof(cmd_chain_t)))
-#define SPI_CMD_FRAME_SIZE ((uint16_t)(SPI_CMD_CRC_OFF + SPI_CRC_BYTES))
-#define SPI_TELE_CRC_OFF   ((uint16_t)(sizeof(tele_chain_t)))
-#define SPI_TELE_FRAME_SIZE ((uint16_t)(SPI_TELE_CRC_OFF + SPI_CRC_BYTES))
-#define SPI_XFER_SIZE (SPI_CMD_FRAME_SIZE > SPI_TELE_FRAME_SIZE \
-                       ? SPI_CMD_FRAME_SIZE : SPI_TELE_FRAME_SIZE)
 
 /* ── fixed-point encode/decode (shared; host mirrors the arithmetic) ────────
  * Round-half-away-from-zero, no math.h. Encoders saturate at the type limits and
@@ -269,25 +40,7 @@ static inline uint16_t proto_f_to_u16(float x, float scale, uint8_t *sat)
 static inline float proto_i16_to_f(int16_t r, float scale) { return (float)r / scale; }
 static inline float proto_u16_to_f(uint16_t r, float scale) { return (float)r / scale; }
 
-/* ── layout guards (catch C↔wire drift at compile time) ──────────────────── */
-#if defined(__STDC_VERSION__) && (__STDC_VERSION__ >= 201112L)
-_Static_assert(sizeof(MsgHeader)   == MSG_HEADER_SIZE,          "MsgHeader must be 16 bytes");
-_Static_assert(sizeof(cmd_motor_t) == 12u,                      "cmd_motor_t must be 12 bytes");
-_Static_assert(sizeof(cmd_chain_t) == 62u,                      "cmd_chain_t must be 62 bytes");
-_Static_assert(sizeof(cmd_robot_t) == 6u + 62u * MAX_CHAINS,    "cmd_robot_t size");
-_Static_assert(sizeof(tele_motor_t) == 21u,                     "tele_motor_t must be 21 bytes");
-_Static_assert(sizeof(tele_chain_t) == 118u,                    "tele_chain_t must be 118 bytes");
-_Static_assert(sizeof(tele_robot_t) == 20u + 118u * MAX_CHAINS, "tele_robot_t size");
-_Static_assert(sizeof(MasterStatus) == 30u,                     "MasterStatus must be 30 bytes");
-_Static_assert(sizeof(SlaveStatus)  == 18u,                     "SlaveStatus must be 18 bytes");
-_Static_assert(DRV_FAULT   <= 255u,                             "DriveState fits u8");
-_Static_assert(DRVF_WOUND  <= 255u,                             "DriveFault fits u8");
-_Static_assert(DRV_REQ_RESET <= 255u,                           "DriveReq fits u8");
-#endif
-
 /* ── CRC16-CCITT ─────────────────────────────────────────────────────────── */
-#define PROTO_CRC_INIT 0xFFFFu
-#define PROTO_CRC_POLY 0x1021u
 
 /* Byte-wise lookup table for CRC-16-CCITT (poly 0x1021, non-reflected, MSB-first).
    Table[b] = the bitwise CRC of the single byte b with a zero register, so the
@@ -359,9 +112,6 @@ static inline uint16_t proto_frame_crc(const void *hdr_raw,
     }
     return crc;
 }
-
-/* Largest framed payload (tele_robot_t); a header claiming more than this is junk. */
-#define PROTO_MAX_PAYLOAD ((uint16_t)sizeof(tele_robot_t))
 
 /* True for any defined MsgType — a cheap header-plausibility gate for resync. */
 static inline uint8_t proto_msg_type_known(uint8_t t)

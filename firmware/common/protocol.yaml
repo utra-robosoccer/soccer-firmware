@@ -1,0 +1,376 @@
+# protocol.yaml — single source of truth for everything on the soccer wire.
+#
+# Every wire struct, enum, flag bit, fixed-point scale and constant lives HERE;
+# scripts/gen_protocol.py emits the per-language code from it:
+#   firmware/common/include/protocol_gen.h   (C — firmware + host-run C tests)
+#   host/master_link/_protocol_gen.py        (Python — master_link.protocol)
+# Generated files are committed (the firmware build does not run Python);
+# re-run the generator after any edit here, then rebuild.
+#
+# Editing rules:
+#   - doc/unit entries are free text; changing them does NOT change SCHEMA_HASH.
+#   - Everything else (names, field order, types, counts, truncate_by, values,
+#     bits, scales, derived expressions) is part of the wire contract and IS
+#     hashed — see gen_protocol.py for the canonicalization.
+#   - Field types: u8 u16 u32 i16, or the name of a previously defined struct.
+#   - count: fixed wire array length (a constant name or integer).
+#   - truncate_by: this array is transmitted as a populated prefix; the named
+#     earlier field carries the element count. Nothing may follow such an array.
+#     (cmd_robot_t is NOT truncated: the host always ships it full-size, even
+#     though it carries n_chains — see docs/protocol.md.)
+
+meta:
+  proto_version: 9
+  endianness: little
+  doc: >
+    Protocol v9 — drive-state × streamed-tuple split (docs/protocol_v9.md).
+    Raw [MsgHeader(16 B)][payload] frames over USB CDC; CRC16-CCITT
+    (poly 0x1021, init 0xFFFF) over header (crc zeroed) + payload.
+
+constants:
+  - name: CMD_SEQ_NONE
+    value: 0
+    doc: >
+      cmd_seq sentinel: "no host command applied yet" (tele_motor_t.last_applied_seq
+      for pre-arm / idle). The host starts cmd_seq at 1 and skips 0 on wrap.
+  - name: MAX_MOTORS_PER_CHAIN
+    value: 5
+    doc: >
+      Fixed WIRE maximum (actual counts carried in n_ fields). Distinct from the
+      generated runtime counts (N_MOTORS / NUM_SLAVES): these size the fixed-length
+      wire arrays, so a mismatched build still has a stable layout.
+  - name: MAX_CHAINS
+    value: 4
+    doc: Fixed WIRE maximum number of chains (see MAX_MOTORS_PER_CHAIN).
+  - name: PROTO_CRC_INIT
+    value: 0xFFFF
+    hex: true
+    doc: CRC16-CCITT init value.
+  - name: PROTO_CRC_POLY
+    value: 0x1021
+    hex: true
+    doc: CRC16-CCITT polynomial (non-reflected, MSB-first).
+  - name: SPI_OP_NOP
+    value: 0x00
+    hex: true
+    doc: SPI command opcode — no fresh host command this cycle.
+  - name: SPI_OP_ROBOT_CMD
+    value: 0x01
+    hex: true
+    doc: SPI command opcode — frame carries a fresh cmd_chain_t.
+  - name: SPI_CMD_HDR_BYTES
+    value: 6
+    doc: "SPI cmd frame header: opcode u8 + spi_seq u8 + cycle_id u16 + cmd_seq u16."
+  - name: SPI_CRC_BYTES
+    value: 2
+    doc: CRC16 trailer on both SPI frame directions.
+
+enums:
+  - name: NodeId
+    wire_type: u8
+    doc: node identifiers
+    values:
+      - {name: NODE_JETSON,  value: 1}
+      - {name: NODE_MASTER,  value: 2}
+      - {name: NODE_SLAVE_0, value: 3}
+      - {name: NODE_SLAVE_1, value: 4}
+
+  - name: MsgType
+    wire_type: u16
+    doc: message types (MsgHeader.type)
+    values:
+      - {name: MSG_PING,          value: 0x01, hex: true}
+      - {name: MSG_MASTER_STATUS, value: 0x02, hex: true}
+      - {name: MSG_SLAVE_STATUS,  value: 0x03, hex: true}
+      - {name: MSG_ROBOT_CMD,     value: 0x08, hex: true,
+         doc: "host→master: one cmd_robot_t per host tick"}
+      - {name: MSG_ROBOT_TELE,    value: 0x09, hex: true,
+         doc: "master→host: one tele_robot_t per tele tick"}
+
+  - name: RobotState
+    wire_type: u8
+    doc: robot lifecycle (tele_robot_t.robot_state / MasterStatus.robot_state)
+    values:
+      - {name: ROBOT_INIT,      value: 0}
+      - {name: ROBOT_READY,     value: 1}
+      - {name: ROBOT_DEGRADED,  value: 2}
+      - {name: ROBOT_HOST_LOST, value: 3,
+         doc: "master's host-death watchdog tripped (forcing STOP)"}
+
+  - name: DriveReq
+    wire_type: u8
+    doc: >
+      Host→slave per-motor drive request (cmd_motor_t.drive_req). Level-triggered:
+      safe to repeat every cycle; a repeat in the target or transit state is a
+      no-op. The MIT tuple travels independently under CMD_FLAG_VALID — there is
+      no MIT request; in ENABLED every valid tuple is simply applied.
+    values:
+      - {name: DRV_REQ_DISABLE, value: 0, doc: "Type-4 stop now"}
+      - {name: DRV_REQ_ENABLE,  value: 1,
+         doc: "DISABLED → ENABLING → ENABLED; rejected elsewhere"}
+      - {name: DRV_REQ_STOP,    value: 2,
+         doc: "ENABLED → STOPPING (ramp) → DISABLED"}
+      - {name: DRV_REQ_RESET,   value: 3,
+         doc: "FAULT → CLEARING → DISABLED; never enables"}
+
+  - name: DriveState
+    wire_type: u8
+    doc: per-motor drive state (tele_motor_t.drive_state under v9)
+    values:
+      - {name: DRV_BOOT,        value: 0}
+      - {name: DRV_DISCOVERING, value: 1}
+      - {name: DRV_ABSENT,      value: 2,
+         doc: "no feedback; pinged ~100 ms; reply → DISABLED"}
+      - {name: DRV_DISABLED,    value: 3, doc: "motor off, polled every cycle"}
+      - {name: DRV_ENABLING,    value: 4,
+         doc: "async handshake; rs_mode==Run confirms → ENABLED"}
+      - {name: DRV_ENABLED,     value: 5,
+         doc: "limp until the first VALID tuple; then applies it"}
+      - {name: DRV_STOPPING,    value: 6,
+         doc: "ramped stop; requested → DISABLED, fault → FAULT"}
+      - {name: DRV_CLEARING,    value: 7,
+         doc: "RESET sent the Type-4 clear; judging the reply"}
+      - {name: DRV_FAULT,       value: 8,
+         doc: "latched — see drive_fault; only RESET leaves"}
+
+  - name: DriveFault
+    wire_type: u8
+    doc: >
+      Why a motor is faulted (tele_motor_t.drive_fault under v9). Latched at fault
+      DETECTION (first fault wins); cleared on CLEARING entry so a re-latch
+      reports the current fault.
+    values:
+      - {name: DRVF_NONE,           value: 0}
+      - {name: DRVF_CAN_TIMEOUT,    value: 1,
+         doc: "Type-2 feedback went stale (comms-broken)"}
+      - {name: DRVF_MASTER_LOST,    value: 2,
+         doc: "SPI command stream died → autonomous stop ramp"}
+      - {name: DRVF_ENABLE_FAILED,  value: 3,
+         doc: "ENABLING saw no rs_mode==Run in time"}
+      - {name: DRVF_NOT_ENABLED,    value: 4,
+         doc: "enable monitor: enabled motor reports not-Run"}
+      - {name: DRVF_OVERTORQUE,     value: 5,
+         doc: "|tau| exceeded per-motor max_tau"}
+      - {name: DRVF_MOTOR_REPORTED, value: 6,
+         doc: "RS vendor fault bits / Cali mode"}
+      - {name: DRVF_WOUND,          value: 7,
+         doc: "ENABLE refused: shaft wound beyond safe range"}
+
+flags:
+  - name: cmd_motor_flags
+    doc: cmd_motor_t.flags
+    bits:
+      - {bit: 0, name: CMD_FLAG_VALID,
+         doc: "the MIT tuple in this slot is live; drive_req applies regardless"}
+      - {bit: 1, name: CMD_FLAG_USE_CONFIG_GAINS,
+         doc: "ignore wire kp/kd, use config defaults"}
+      - {bit: 2, reserved: true,
+         doc: "was CMD_FLAG_FAULT_RESET (v8); RESET is a drive request in v9"}
+
+  - name: tele_motor_flags
+    doc: tele_motor_t.flags
+    bits:
+      - {bit: 0, name: TELE_FLAG_REQUEST_REJECTED,
+         doc: "last drive request was illegal"}
+      - {bit: 1, reserved: true,
+         doc: "was TELE_FLAG_TO_ZERO_ARRIVED (v8); TO_ZERO is host-side in v9"}
+      - {bit: 2, name: TELE_FLAG_SATURATED,
+         doc: "a fixed-point field saturated"}
+      - {bit: 3, name: TELE_FLAG_CLAMPED_POS,
+         doc: "commanded pos hit a soft limit"}
+      - {bit: 4, name: TELE_FLAG_CLAMPED_TAU,
+         doc: "vel feedforward cancelled at limit"}
+      - {bit: 5, name: TELE_FLAG_CMD_STALE,
+         doc: "executing a held/watchdog setpoint"}
+      - {bit: 6, name: TELE_FLAG_CLAMPED_GAIN,
+         doc: "wire kp/kd clamped to the model's range"}
+
+# Universal scales covering every RobStride model (incl. RS03/04/06: Kp≤5000,
+# Kd≤100). Position is HOME-FRAME ±π only (±31416 at ×10000 — multi-turn is not
+# on the wire). Encode saturates and sets TELE_FLAG_SATURATED / the cmd path's
+# own saturation handling.
+scales:
+  - {name: PROTO_POS_SCALE, value: 10000.0, unit: "rad → i16",
+     doc: "home-frame ±π"}
+  - {name: PROTO_VEL_SCALE, value: 100.0,   unit: "rad/s → i16"}
+  - {name: PROTO_TAU_SCALE, value: 100.0,   unit: "N·m → i16"}
+  - {name: PROTO_KP_SCALE,  value: 10.0,    unit: "Kp → u16",
+     doc: "0..6553.5, covers 0..5000"}
+  - {name: PROTO_KD_SCALE,  value: 100.0,   unit: "Kd → u16",
+     doc: "0..655.35, covers 0..100"}
+
+structs:
+  - name: MsgHeader
+    doc: >
+      wire header, 16 bytes. ver_flags low byte = PROTO_VERSION (both ends drop
+      and count any frame whose version differs); high byte reserved (0).
+    fields:
+      - {name: type,      type: u16, enum: MsgType}
+      - {name: seq,       type: u16}
+      - {name: src,       type: u8, enum: NodeId}
+      - {name: dst,       type: u8, enum: NodeId}
+      - {name: ts_ms,     type: u32, doc: "HAL_GetTick() at send time"}
+      - {name: len,       type: u16, doc: "payload bytes"}
+      - {name: ver_flags, type: u16,
+         doc: "low byte = PROTO_VERSION; high byte reserved 0"}
+      - {name: crc16,     type: u16,
+         doc: "CRC16-CCITT over hdr(crc=0)+payload"}
+
+  - name: cmd_motor_t
+    doc: per-motor command (host → master → slave), 12 bytes
+    fields:
+      - {name: drive_req, type: u8, enum: DriveReq}
+      - {name: pos,    type: i16, scale: PROTO_POS_SCALE,
+         doc: "rad × PROTO_POS_SCALE (home-frame ±π)"}
+      - {name: vel,    type: i16, scale: PROTO_VEL_SCALE}
+      - {name: kp,     type: u16, scale: PROTO_KP_SCALE}
+      - {name: kd,     type: u16, scale: PROTO_KD_SCALE}
+      - {name: tau_ff, type: i16, scale: PROTO_TAU_SCALE}
+      - {name: flags,  type: u8, flags: cmd_motor_flags}
+
+  - name: cmd_chain_t
+    doc: "one CAN chain's commands, 2 + 12·5 = 62 bytes"
+    fields:
+      - {name: chain_id, type: u8}
+      - {name: n_motors, type: u8, doc: "valid slots (≤ MAX_MOTORS_PER_CHAIN)"}
+      - {name: motors, type: cmd_motor_t, count: MAX_MOTORS_PER_CHAIN}
+
+  - name: cmd_robot_t
+    doc: >
+      one host tick's full command, 6 + 62·4 = 254 bytes. Always transmitted
+      full-size (NOT truncated by n_chains). reserved carries the master test
+      sentinels (0xDE arm SPI-desync, 0xB0 arm USB-TX test; 0 in normal operation).
+    fields:
+      - {name: cycle_id, type: u16, doc: "echo of last master cycle seen"}
+      - {name: cmd_seq,  type: u16, doc: "one per host tick (≥1, 0 reserved)"}
+      - {name: n_chains, type: u8, doc: "valid chains (≤ MAX_CHAINS)"}
+      - {name: reserved, type: u8, doc: "test sentinels; 0 in normal operation"}
+      - {name: chains, type: cmd_chain_t, count: MAX_CHAINS}
+
+  - name: tele_motor_t
+    doc: per-motor telemetry (slave → master → host), 21 bytes
+    fields:
+      - {name: pos,  type: i16, scale: PROTO_POS_SCALE,
+         doc: "rad × PROTO_POS_SCALE (home-frame)"}
+      - {name: vel,  type: i16, scale: PROTO_VEL_SCALE}
+      - {name: tau,  type: i16, scale: PROTO_TAU_SCALE, doc: measured}
+      - {name: temp_c, type: u8, doc: "integer °C"}
+      - {name: drive_state, type: u8, enum: DriveState}
+      - {name: drive_fault, type: u8, enum: DriveFault, doc: latched}
+      - {name: rs_mode, type: u8,
+         doc: "RS run_mode reported in Type-2 (0 reset / 1 cali / 2 run)"}
+      - {name: rs_fault_bits, type: u8, doc: "packed Type-2 fault bits"}
+      - {name: flags, type: u8, flags: tele_motor_flags}
+      - {name: fb_age_ms, type: u8, doc: "ms since last Type-2, saturating 255"}
+      - {name: rs_fault_word, type: u32,
+         doc: "0x3022 latched; 0 clear; 0xFFFFFFFF read-fail"}
+      - {name: last_applied_seq, type: u16,
+         doc: "host cmd_seq last confirmed applied (0 = none)"}
+      - {name: reserved, type: u16, doc: "growth slot (0)"}
+
+  - name: tele_chain_t
+    doc: "one CAN chain's telemetry, 12 + 21·5 = 118 bytes"
+    fields:
+      - {name: chain_id, type: u8}
+      - {name: n_motors, type: u8}
+      - {name: spi_seq_echo, type: u8,
+         doc: "SPI link-health seq echoed (NOT cmd_seq)"}
+      - {name: spi_resyncs, type: u8,
+         doc: "slave SPI DMA resync count (wraps; host deltas)"}
+      - {name: slave_time_us, type: u32, doc: "slave uptime (µs)"}
+      - {name: cmd_crc_errors, type: u16,
+         doc: "SPI command frames rejected on CRC (slave)"}
+      - {name: can_tx_errors, type: u16, doc: "CAN TX errors seen by the slave"}
+      - {name: spi_tx_arm_fails, type: u8,
+         doc: "slave TX-arm (HAL DMA) failures, then retried (wraps)"}
+      - {name: motors, type: tele_motor_t, count: MAX_MOTORS_PER_CHAIN}
+
+  - name: tele_robot_t
+    doc: >
+      one telemetry tick, 20 + 118·4 = 492 bytes full-size. The master transmits
+      header + n_chains chains only (chains is truncate_by n_chains), keeping the
+      200 Hz stream small. The four cmd_* counters classify host-loop timing vs
+      the master cycle at the cycle-start mailbox swap (docs/architecture.md);
+      free-running, the host reports deltas.
+    fields:
+      - {name: cycle_id, type: u16,
+         doc: "this telemetry's master cycle (increments/cycle)"}
+      - {name: master_time_us, type: u32, doc: "master uptime (µs)"}
+      - {name: last_cmd_seq_rx, type: u16,
+         doc: "last cmd_seq the master received from host"}
+      - {name: cmd_seq_active, type: u16,
+         doc: "cmd_seq actually sent to the slaves THIS cycle (0 = holding)"}
+      - {name: cmd_on_time, type: u16,
+         doc: "applied a fresh command echoing the latest tele cycle"}
+      - {name: cmd_late, type: u16,
+         doc: "applied a fresh command echoing an OLDER cycle"}
+      - {name: cmd_missing, type: u16,
+         doc: "cycle with no fresh command → held current targets"}
+      - {name: cmd_duplicate, type: u16,
+         doc: "command overwritten unapplied (host sent >1 per cycle)"}
+      - {name: n_chains, type: u8}
+      - {name: robot_state, type: u8, enum: RobotState}
+      - {name: chains, type: tele_chain_t, count: MAX_CHAINS,
+         truncate_by: n_chains}
+
+  - name: MasterStatus
+    doc: master status (20 Hz), 30 bytes
+    fields:
+      - {name: robot_state, type: u8, enum: RobotState}
+      - {name: slave_alive, type: u8, doc: "bit s = slave s reachable"}
+      - {name: uptime_ms, type: u32}
+      - {name: link_errors, type: u32, doc: "bad CRC or unknown msg_type"}
+      - {name: rx_frames, type: u32}
+      - {name: master_poll_hz, type: u16, doc: "configured SPI poll rate"}
+      - {name: telemetry_hz, type: u16, doc: "configured MSG_ROBOT_TELE rate"}
+      - {name: slave_tick_hz, type: u16, doc: "configured slave control-tick rate"}
+      - {name: host_cmd_hz, type: u16, doc: "configured expected host cmd rate"}
+      - {name: rx_resyncs, type: u32, doc: "USB RX resync events (v5)"}
+      - {name: rx_discarded_bytes, type: u32,
+         doc: "bytes dropped during resync (v5)"}
+
+  - name: SlaveStatus
+    doc: per-slave status (20 Hz), 18 bytes
+    fields:
+      - {name: slave_id, type: u8, doc: "which slave this status is for"}
+      - {name: motors_alive, type: u8, doc: "bit i = motor i alive"}
+      - {name: uptime_ms, type: u32}
+      - {name: crc_errors, type: u32,
+         doc: "SPI telemetry frames failing CRC (master)"}
+      - {name: cmd_crc_errors, type: u32,
+         doc: "SPI command frames the slave rejected on CRC"}
+      - {name: seq_gaps, type: u32,
+         doc: "master: echoed spi-seq gaps (dropped frames)"}
+
+# Derived wire constants. expr grammar: integer literals, constant names,
+# sizeof(StructName), binary +, and max(a, b) — evaluated by the generator
+# (no eval), emitted as numeric literals, and pinned by static asserts.
+derived:
+  - name: MSG_HEADER_SIZE
+    expr: sizeof(MsgHeader)
+    doc: wire header size
+  - name: PROTO_MAX_PAYLOAD
+    expr: sizeof(tele_robot_t)
+    cast: u16
+    doc: >
+      Largest framed payload; a header claiming more than this is junk. The host
+      side keeps its own hand-written resync bound (≥ this).
+  - name: SPI_CMD_CRC_OFF
+    expr: SPI_CMD_HDR_BYTES + sizeof(cmd_chain_t)
+    cast: u16
+    doc: CRC16 offset in a master→slave SPI command frame
+  - name: SPI_CMD_FRAME_SIZE
+    expr: SPI_CMD_HDR_BYTES + sizeof(cmd_chain_t) + SPI_CRC_BYTES
+    cast: u16
+    doc: "master → slave: [opcode u8][spi_seq u8][cycle_id u16][cmd_seq u16][cmd_chain_t][crc16]"
+  - name: SPI_TELE_CRC_OFF
+    expr: sizeof(tele_chain_t)
+    cast: u16
+    doc: CRC16 offset in a slave→master SPI telemetry frame
+  - name: SPI_TELE_FRAME_SIZE
+    expr: sizeof(tele_chain_t) + SPI_CRC_BYTES
+    cast: u16
+    doc: "slave → master: [tele_chain_t][crc16]"
+  - name: SPI_XFER_SIZE
+    expr: max(SPI_CMD_FRAME_SIZE, SPI_TELE_FRAME_SIZE)
+    doc: full-duplex SPI transfer length = the larger of the two frames
