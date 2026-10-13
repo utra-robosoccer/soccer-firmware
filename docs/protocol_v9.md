@@ -181,10 +181,10 @@ reference flow (host tools and ros2_control alike):
   from all bench motors over several power-ups shows no spurious bits (an
   uncalibrated-at-rest bit would otherwise fault every boot).
 - Boot `discover()` stays blocking for now; ABSENT covers runtime presence.
-- **SPI master↔slave carries no protocol version.** Found on the bench: a v8 slave wired
-  into a v9 system silently misreads requests (v9 ENABLE=1 is v8 HOLD, v9 STOP=2 is v8
-  MIT). All boards must be flashed together until the SPI header grows a version check —
-  proposed follow-up.
+- ~~SPI master↔slave carries no protocol version.~~ **Resolved in v9.1 (§10):** both SPI
+  directions now carry `spi_trailer_t` (proto_version + schema_hash) and each side refuses
+  a mismatched peer's payload. A pre-trailer (v8) peer fails CRC at the new offsets and
+  simply never becomes alive.
 - A `cmd_robot_t` addresses whole slaves: un-commanded slots on an addressed slave are
   zero-filled = DISABLE with no tuple (motors a policy does not drive stay off).
 
@@ -210,3 +210,50 @@ Outstanding acceptance: physical fault injections (unplug mid-stream → CAN_TIM
 the runtime ABSENT→DISABLED ping recovery, forced overtorque → STOPPING ramp, supply
 sag → MOTOR_REPORTED), boot-rest vendor-bit data across several power-ups, and slave1
 reflash before it rejoins (it runs v8; SPI has no version check).
+
+## 10. v9.1 — schema single source of truth + version safety
+
+Still `PROTO_VERSION 9` (unreleased); shipped on branch `akp/protocol_schema`.
+
+**Schema SSOT.** Every wire layout now lives in `firmware/common/protocol.yaml`;
+`scripts/gen_protocol.py` emits `protocol_gen.h` (C), `_protocol_gen.py` (host Python) and
+`generated/cpp/robot_wire_gen.hpp` + golden fixture bytes (for soccer-software to pin).
+`PROTO_SCHEMA_HASH` is a CRC-32 of the schema's wire projection (doc-only edits don't
+change it; any layout/name/value change does). `gen_protocol.py --check` fails the test
+suite on drifted committed outputs. See `docs/protocol.md` for the change workflow.
+
+**Host↔master gate.** `MasterStatus` (33 B) carries `schema_hash`; the host refuses to run
+on a mismatch, exactly like the rate check. `robot_state` and `slave_alive` left
+`MasterStatus`: `robot_state` rides `tele_robot_t` (emitted unconditionally every cycle in
+every state, `n_chains = 0` pre-discovery), and per-slave reachability is now the
+master-authored **`tele_chain_t.link`** byte (`LOST / ALIVE / MISMATCH`).
+
+**Position-stable chains.** The master emits EVERY configured chain every cycle at its
+fixed slot (`chains[s]` = slave s, `n_chains` = configured count). A non-ALIVE chain
+carries `n_motors = 0` and no stale motor data. Consumers must never remap chains by
+set-bit order or packing — the slot is the identity (`chain_id` is also stamped).
+
+**Master↔slave gate (SPI).** Both SPI frames carry `spi_trailer_t`
+(`proto_version` u8 + `schema_hash` u32) between payload and CRC:
+`[hdr 6][cmd_chain_t 62][trailer 5][crc 2]` = 75 B and
+`[tele_chain_t 119][trailer 5][crc 2]` = 126 B; `SPI_XFER_SIZE` 126.
+- Master, on a CRC-intact but mismatched tele frame: slave excluded from
+  alive/forwarding (polled with NOPs), reported via `tele_chain_t.link = MISMATCH`,
+  `MasterStatus.slave_proto_mismatch` (bit s) and `robot_state = PROTO_MISMATCH`.
+  While ANY slave mismatches, NEW enables are refused robot-wide (ENABLE for a
+  not-yet-armed motor is rewritten to DISABLE; already-armed motors are left alone, so a
+  mid-run mismatch never force-disables running joints). The gate is stateless per frame:
+  a reflashed slave is re-accepted without a master reset.
+- Slave, symmetric: a mismatched master's command is refused (counted with
+  `cmd_crc_errors`); with no fresh command ever applied, the master-loss watchdog keeps
+  the motors safe.
+
+**robot_state reporting priority** (one byte, several possible conditions):
+`HOST_LOST` > `PROTO_MISMATCH` > computed `INIT / READY / DEGRADED`. HOST_LOST is
+transient (cleared by a RESET-bearing command), so a simultaneous mismatch surfaces right
+after recovery.
+
+**Known budget constraint.** The largest USB frame (header 16 + tele_robot_t 496 = 512 B)
+now equals `USB_TX_SLOT_MAX` exactly — margin 0. Any tele growth (e.g. the ~17 B IMU
+block) requires raising `USB_TX_SLOT_MAX` in protocol.yaml (RAM cost: NUM_SLOTS(16) × Δ
+on the master). Generation fails loudly if the budget is exceeded.
