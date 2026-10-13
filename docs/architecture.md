@@ -104,84 +104,48 @@ alive chains into a `tele_robot_t` (populated prefix only) → USB TX ring → h
 
 ## 2. Data structures
 
-All multi-byte wire fields are **little-endian, packed** (`PROTO_PACKED`). Fixed-point scales are
-shared (`protocol.h`): pos ×10000 (home-frame ±π, i16), vel ×100 (i16), tau ×100 (i16), Kp ×10
-(u16), Kd ×100 (u16). The C header and `host/master_link/protocol.py` are kept in lockstep by the
-cross-language fixture test (`firmware/common/test/gen_fixture.c` ↔ `host/tests/test_protocol.py`).
+All multi-byte wire fields are **little-endian, packed**. Since v10 every wire layout —
+constants, enums, flag bits, fixed-point scales, every struct, the derived frame sizes — is
+GENERATED from the single source of truth **`firmware/common/protocol.yaml`** by
+`scripts/gen_protocol.py` (see `docs/protocol.md` for the change workflow). Do not edit the
+generated files (`protocol_gen.h`, `_protocol_gen.py`, `robot_wire_gen.hpp`); the `--check`
+drift gate in the test suite rejects it.
 
-### 2.1 Wire structs (`firmware/common/include/protocol.h`, `_Static_assert` on every size)
+### 2.1 Wire structs (generated — see `protocol.yaml` for the authoritative layout)
 
-**`MsgHeader` — 16 B** (every USB frame; CRC covers header-with-crc=0 + payload)
-| field | type | meaning | writer | reader |
-|---|---|---|---|---|
-| `type` | u16 | `MsgType` | `proto_build` | `proto_frame_scan` / `decode_frame` |
-| `seq` | u16 | per-message counter (PING echoes it) | sender | diagnostics |
-| `src`,`dst` | u8,u8 | `NodeId` (JETSON 1, MASTER 2, SLAVE_0 3, SLAVE_1 4) | sender | — |
-| `ts_ms` | u32 | sender `HAL_GetTick()` (host live-detect reads the master's) | sender | host `_LiveDetector` |
-| `len` | u16 | payload bytes | `proto_build` | scanner |
-| `ver_flags` | u16 | low byte = `PROTO_VERSION` (9); high reserved 0 | `proto_build` | both ends drop+count on mismatch |
-| `crc16` | u16 | CRC16-CCITT | `proto_build` | scanner |
+The schema carries every field's type, order, scale and doc string; `protocol_gen.h` pins the
+layout with a `_Static_assert` on every struct size AND every field offset, and the golden
+fixtures (`gen_fixture.c` ↔ `test_protocol.py` ↔ `generated/cpp/fixtures/`) pin the bytes in
+all three languages. What follows is the semantic map only:
 
-**Command hierarchy (host→master→slave)**
-| struct | size | fields |
-|---|---|---|
-| `cmd_motor_t` | 12 B | `drive_req` (`DriveReq`), `pos/vel/kp/kd/tau_ff` (fixed-point MIT tuple), `flags` (`CMD_FLAG_*`; VALID gates the tuple, the request always applies) |
-| `cmd_chain_t` | 62 B | `chain_id`, `n_motors`, `cmd_motor_t[5]` |
-| `cmd_robot_t` | 254 B | `cycle_id` (host echo of last telemetry cycle), `cmd_seq`, `n_chains`, `reserved` (test sentinel 0xDE/0xB0), `cmd_chain_t[4]` |
-
-**Telemetry hierarchy (slave→master→host)**
-| struct | size | fields |
-|---|---|---|
-| `tele_motor_t` | 21 B | see 2.2 |
-| `tele_chain_t` | **118 B** | `chain_id`, `n_motors`, `spi_seq_echo`, `spi_resyncs` (u8, wraps), `slave_time_us` (u32), `cmd_crc_errors` (u16), `can_tx_errors` (u16), `spi_tx_arm_fails` (u8, wraps — added v8), `tele_motor_t[5]` |
-| `tele_robot_t` | **492 B** | `cycle_id`, `master_time_us` (u32), `last_cmd_seq_rx`, `cmd_seq_active`, `cmd_on_time`, `cmd_late`, `cmd_missing`, `cmd_duplicate` (all u16), `n_chains`, `robot_state`, `tele_chain_t[4]` |
-
-> The in-code size **comments** on `tele_chain_t` (“117”), `tele_robot_t` (“488”) and the SPI block
-> (“119 B”) are stale; the `_Static_assert`s (118 / 492) and `SPI_XFER_SIZE` are correct.
-
-**`tele_motor_t` — 21 B** (built by `motor_runtime_sample`, parsed into host `TeleMotor`)
-| off | field | type | units / encoding | writer | purpose |
-|---|---|---|---|---|---|
-| 0 | `pos` | i16 | rad ×10000, home-frame wrapped [−π,π] | slave | measured position |
-| 2 | `vel` | i16 | rad/s ×100 | slave | measured velocity |
-| 4 | `tau` | i16 | N·m ×100 | slave | measured torque |
-| 6 | `temp_c` | u8 | °C | slave | motor temperature |
-| 7 | `drive_state` | u8 | `DriveState` (full byte) | slave drive SM | drive state |
-| 8 | `drive_fault` | u8 | `DriveFault` (latched at detection) | slave | why faulted |
-| 9 | `rs_mode` | u8 | RS Type-2 run mode (0 reset/1 cal/2 run) | slave (from CAN) | enable monitor source |
-| 10 | `rs_fault_bits` | u8 | packed Type-2 fault bits | slave | motor self-faults |
-| 11 | `flags` | u8 | `TELE_FLAG_*` | slave | rejected/saturated/clamped/stale |
-| 12 | `fb_age_ms` | u8 | ms since last Type-2, sat 255 | slave | feedback freshness |
-| 13 | `rs_fault_word` | u32 | 0 clear / 0xFFFFFFFF read-fail / raw 0x3022 | slave | RS fault register |
-| 17 | `last_applied_seq` | u16 | host `cmd_seq` last confirmed applied (0 = none) | slave (`cmd_seq_track`) | latency pairing |
-| 19 | `reserved` | u16 | 0 | — | growth slot |
-
-**`MasterStatus` — 30 B** (`emit_master_status`, 20 Hz)
-`robot_state`, `slave_alive` (bitmask), `uptime_ms`, `link_errors`, `rx_frames`, `master_poll_hz`,
-`telemetry_hz`, `slave_tick_hz`, `host_cmd_hz`, `rx_resyncs`, `rx_discarded_bytes`.
-> **There is no `missed_deadlines` field.** TIM2 overruns are counted internally
-> (`master_cycle_overruns()`) but are not currently on the wire.
-
-**`SlaveStatus` — 18 B** (`emit_slave_status`, 20 Hz, master-generated)
-`slave_id`, `motors_alive` (bitmask), `uptime_ms`, `crc_errors` (telemetry frames the master
-dropped), `cmd_crc_errors` (relayed from the slave), `seq_gaps` (master-observed echo stalls).
-
-**SPI frame (one exchange; `SPI_XFER_SIZE` = max of the two = 120 B)**
-| dir | layout | size |
-|---|---|---|
-| master→slave | `[opcode u8][spi_seq u8][cycle_id u16][cmd_seq u16][cmd_chain_t (62)][crc16]` | 70 B |
-| slave→master | `[tele_chain_t (118)][crc16]` | 120 B |
-
-**Enums / flags**
-| enum | values |
-|---|---|
-| `MsgType` | PING 0x01, MASTER_STATUS 0x02, SLAVE_STATUS 0x03, ROBOT_CMD 0x08, ROBOT_TELE 0x09 |
-| `DriveReq` (cmd) | DISABLE 0, ENABLE 1, STOP 2, RESET 3 |
-| `DriveState` (tele `drive_state`) | BOOT 0, DISCOVERING 1, ABSENT 2, DISABLED 3, ENABLING 4, ENABLED 5, STOPPING 6, CLEARING 7, FAULT 8 |
-| `DriveFault` | NONE 0, CAN_TIMEOUT 1, MASTER_LOST 2, ENABLE_FAILED 3, NOT_ENABLED 4, OVERTORQUE 5, MOTOR_REPORTED 6, WOUND 7 |
-| `RobotState` | INIT 0, READY 1, DEGRADED 2, HOST_LOST 3 |
-| `CMD_FLAG_*` | VALID b0 (tuple live), USE_CONFIG_GAINS b1 (b2 was FAULT_RESET — reserved) |
-| `TELE_FLAG_*` | REQUEST_REJECTED b0, (b1 was TO_ZERO_ARRIVED — reserved), SATURATED b2, CLAMPED_POS b3, CLAMPED_TAU b4, CMD_STALE b5, CLAMPED_GAIN b6 |
+- **`MsgHeader` 16 B** — every USB frame; `ver_flags` low byte = `PROTO_VERSION` (10), CRC16
+  over header-with-crc=0 + payload; both ends drop + count wrong-version frames.
+- **Commands (host→master→slave)**: `cmd_motor_t` 12 B (`drive_req` + fixed-point MIT tuple +
+  flags; VALID gates the tuple, the request always applies) → `cmd_chain_t` 62 B →
+  `cmd_robot_t` 254 B (`reserved` carries the 0xDE/0xB0 test sentinels). Always transmitted
+  full-size.
+- **Telemetry (slave→master→host)**: `tele_motor_t` 21 B (measured pos/vel/tau/temp,
+  `drive_state`/`drive_fault`, RS mirrors, flags, `fb_age_ms`, `last_applied_seq` for latency
+  pairing) → `tele_chain_t` 119 B (link-health counters + the master-authored **`link`** byte:
+  `CHAIN_LINK_LOST/ALIVE/MISMATCH`) → `tele_robot_t` 496 B full-size (cycle/cmd-seq echoes,
+  the four host-timing counters, `robot_state`, chains). The master emits EVERY configured
+  chain every cycle at its fixed slot (`chains[s]` = slave s, `n_chains` = configured count)
+  and transmits the populated prefix; a non-ALIVE chain carries `n_motors = 0`. Consumers must
+  never remap chains by packing order.
+- **`MasterStatus` 33 B** (20 Hz) — `schema_hash` (host refuses on mismatch),
+  `slave_proto_mismatch` bitmask, uptime, USB link counters, configured rates. `robot_state`
+  and per-slave reachability ride telemetry, not status. (TIM2 overruns are counted
+  internally by `master_cycle_overruns()` but are not on the wire.)
+- **`SlaveStatus` 18 B** (20 Hz, master-generated) — per-slave `crc_errors` (telemetry frames
+  the master dropped), `cmd_crc_errors` (relayed; includes version-gate rejects), `seq_gaps`.
+- **SPI exchange** (`SPI_XFER_SIZE` 126 B): master→slave
+  `[opcode][spi_seq][cycle_id][cmd_seq][cmd_chain_t][spi_trailer_t][crc16]` = 75 B;
+  slave→master `[tele_chain_t][spi_trailer_t][crc16]` = 126 B. `spi_trailer_t`
+  (`proto_version` + `schema_hash`) is the symmetric version gate: a mismatched peer's
+  payload is refused, polling continues, recovery is automatic on reflash
+  (`docs/protocol_v9.md` §10).
+- **Enum values** (DriveReq/DriveState/DriveFault/RobotState/ChainLink/flags): see
+  `protocol.yaml` — one place, with docs per value.
 
 ### 2.2 Firmware internal state
 
@@ -253,18 +217,22 @@ dropped), `cmd_crc_errors` (relayed from the slave), `seq_gaps` (master-observed
   active set and counts a missing cycle. It classifies the four counters (§6).
 - **Poll:** `poll_one_slave` sends the active chain (`SPI_OP_ROBOT_CMD`), a `SPI_OP_NOP` keepalive if
   nothing was ever applied, or a master **override** (`REQ_DAMPED`/`REQ_IDLE`) when the host-death
-  watchdog has tripped. CRC-valid reply → `latest_tele[s]`, slave/motor alive masks, echo-stall
-  diagnostics. CRC-fail/absent → slave marked offline (its chain is then omitted from telemetry).
-- **Telemetry assembly + prefix truncation:** `emit_robot_tele` copies only currently-alive slaves'
-  chains and transmits only the **populated prefix** (`offsetof(chains)+nc·118`, 138 B payload for
-  one chain) instead of the full 492 B — the host parses by `n_chains`, so the truncation decodes
-  identically and keeps the 200 Hz stream small.
+  watchdog has tripped. CRC-valid reply + trailer match → `latest_tele[s]`, slave/motor alive
+  masks, echo-stall diagnostics. CRC-fail/absent → slave offline (chain reported `LOST`);
+  CRC-valid but trailer mismatch → version gate (chain `MISMATCH`, commands withheld, enables
+  refused robot-wide — docs/protocol_v9.md §10).
+- **Telemetry assembly + prefix truncation:** `emit_robot_tele` emits EVERY configured chain at
+  its fixed slot (`chains[s]` = slave s, master-authored `link` byte; a non-ALIVE chain carries
+  `n_motors = 0`) and transmits the **populated prefix** (`offsetof(chains) + n_chains·119`,
+  n_chains = configured count) instead of the full 496 B — the host parses by `n_chains`.
 - **Host-death watchdog:** `host_watchdog_step` (see §7c).
 
 ### 3c. Master ↔ slave (SPI)
 - **Exchange:** one blocking `HAL_SPI_TransmitReceive` per slave per cycle (master is SPI master,
-  CPOL0/CPHA0, MSB-first; CS on GPIOC `SLAVE_CS_0..3`). 120 B each way. Frame CRC doubles as integrity
-  and presence check (absent slave clocks back garbage → CRC fail).
+  CPOL0/CPHA0, MSB-first; CS on GPIOC `SLAVE_CS_0..3`). `SPI_XFER_SIZE` = 126 B each way (cmd
+  75 B + tele 126 B padded to the max). Frame CRC doubles as integrity and presence check
+  (absent slave clocks back garbage → CRC fail); the `spi_trailer_t` version gate rides between
+  payload and CRC in both directions.
 - **Prescaler:** generated `MASTER_SPI_PRESCALER_DIV` (= **16** → 4.5 MHz; APB2 72 MHz). A bench
   sweep found 64/32/16/8 all CRC-clean on short wiring; **re-validate on the robot harness** and drop
   the prescaler if CRC/resync counters climb.
@@ -352,7 +320,7 @@ bench and has not been re-measured.
 |---|---|---|
 | master cycle period / jitter | 5000 µs, σ ≈ 9 µs idle / 26 µs under load; 0 overruns *(1-slave baseline)* | TIM2 bring-up run |
 | poll + telemetry assembly | ≈ 2.55 ms/cycle (headroom to 5 ms) *(1-slave baseline)* | TIM2 bring-up run |
-| SPI exchange | ~0.05 ms (120 B @ 4.5 MHz + HAL overhead) | derived |
+| SPI exchange | ~0.05 ms (126 B @ 4.5 MHz + HAL overhead) | derived |
 | CAN per frame | ~130–140 µs (8-byte extended @ 1 Mbit) | §3e / can-investigation |
 | CAN first-send → last-reply (5 motors) | span mean **1413 µs**, max 1431; last reply max **1490 µs** | `logs/2026-10-02/20-25-16_bench_sine.bin` |
 | CAN per-motor reply time (from exchange) | m0 911 / m1 1051 / m2 1192 / m3 1333 / m4 1473 µs (~140 µs apart) | same |
@@ -391,7 +359,7 @@ for 6 motors on one bus; budget ~65 %.
 | `-O2` + `-fno-strict-aliasing` | speed without aliasing UB on the packed-struct casts | stable builds; no aliasing miscompiles |
 | configurable SPI prescaler | tune link speed vs margin per harness | div 16 (4.5 MHz) default, all of 64–8 CRC-clean on bench |
 | whole-frame USB TX + ZLP (`usb_tx.c`) | frames never interleave; multi-packet frames terminate | supersedes the old 64 B-per-call drain |
-| telemetry prefix truncation (`emit_robot_tele`) | the full 492 B @ 200 Hz swamped the Python host | ~138 B/frame for one chain; no host backlog |
+| telemetry prefix truncation (`emit_robot_tele`) | the full 496 B @ 200 Hz swamped the Python host | ~139 B/chain; no host backlog |
 | host C CRC (`binascii.crc_hqx`) | Python per-byte CRC too slow at 200 Hz | decode ≫ 200 Hz; RX no longer the bottleneck |
 | USB RX resync out of the ISR | ISR only rings bytes; scan+CRC in main | a stray byte/lost packet can't desync permanently |
 | double-buffered mailbox | deterministic apply-at-n+1, no torn command set | 0 superseded at 200 Hz telemetry-driven |
