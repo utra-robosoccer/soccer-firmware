@@ -1,6 +1,6 @@
 /* AUTO-GENERATED — DO NOT EDIT.
- * Sources: configs/2s_10m/firmware_config.yaml
- * Regenerate: SOCCER_SETUP=2s_10m python3 scripts/gen_motor_config.py --system
+ * Sources: configs/1s_5m/firmware_config.yaml
+ * Regenerate: SOCCER_SETUP=1s_5m python3 scripts/gen_motor_config.py --system
  */
 #ifndef SYSTEM_CONFIG_H
 #define SYSTEM_CONFIG_H
@@ -11,9 +11,9 @@
 extern "C" {
 #endif
 
-#define NUM_SLAVES            2u
+#define NUM_SLAVES            1u
 #define MAX_MOTORS_PER_SLAVE  5u
-#define TOTAL_MOTORS          10u
+#define TOTAL_MOTORS          5u
 
 /* SPI transport encoding bounds (global, widest model across all slaves). */
 #define MOTOR_P_MIN  -12.57f
@@ -63,12 +63,11 @@ extern "C" {
 #define TX_ARM_DEADLINE_US       3000u
 
 /* Number of active motors on each slave (chain order). */
-static const uint8_t slave_motor_counts[NUM_SLAVES] = { 5u, 5u };
+static const uint8_t slave_motor_counts[NUM_SLAVES] = { 5u };
 
 /* Per-slave RobStride CAN node ids (chain order). Unused slots are 0. */
 static const uint8_t slave_motor_ids[NUM_SLAVES][MAX_MOTORS_PER_SLAVE] = {
-    { 1u, 2u, 3u, 4u, 5u },
-    { 6u, 7u, 8u, 9u, 10u }
+    { 1u, 2u, 3u, 4u, 5u }
 };
 
 #ifdef __cplusplus

@@ -1,6 +1,6 @@
 /* AUTO-GENERATED — DO NOT EDIT.
- * Source: configs/2s_10m/firmware_config.yaml (section slave0)
- * Regenerate: SOCCER_SETUP=2s_10m python3 scripts/gen_motor_config.py --slave slave0
+ * Source: configs/1s_5m/firmware_config.yaml (section slave0)
+ * Regenerate: SOCCER_SETUP=1s_5m python3 scripts/gen_motor_config.py --slave slave0
  */
 #ifndef MOTOR_CONFIG_H
 #define MOTOR_CONFIG_H
@@ -110,7 +110,7 @@ static const MotorConfig motor_configs[N_MOTORS] = {
         .soft_min   = -0.79f,
         .soft_max   = 0.79f,
         .max_vel    = 10.0f,
-        .max_tau    = 0.8f,
+        .max_tau    = 3.0f,
         .default_kp = 15.0f,
         .default_kd = 1.0f,
     },
@@ -121,7 +121,7 @@ static const MotorConfig motor_configs[N_MOTORS] = {
         .soft_min   = -1.05f,
         .soft_max   = 1.05f,
         .max_vel    = 10.0f,
-        .max_tau    = 0.8f,
+        .max_tau    = 3.0f,
         .default_kp = 15.0f,
         .default_kd = 1.0f,
     },
@@ -132,7 +132,7 @@ static const MotorConfig motor_configs[N_MOTORS] = {
         .soft_min   = -1.31f,
         .soft_max   = 1.31f,
         .max_vel    = 10.0f,
-        .max_tau    = 0.8f,
+        .max_tau    = 3.0f,
         .default_kp = 15.0f,
         .default_kd = 1.0f,
     },
@@ -143,7 +143,7 @@ static const MotorConfig motor_configs[N_MOTORS] = {
         .soft_min   = -1.31f,
         .soft_max   = 1.31f,
         .max_vel    = 10.0f,
-        .max_tau    = 0.8f,
+        .max_tau    = 3.0f,
         .default_kp = 15.0f,
         .default_kd = 1.0f,
     },
@@ -154,7 +154,7 @@ static const MotorConfig motor_configs[N_MOTORS] = {
         .soft_min   = -1.31f,
         .soft_max   = 1.31f,
         .max_vel    = 10.0f,
-        .max_tau    = 0.8f,
+        .max_tau    = 3.0f,
         .default_kp = 15.0f,
         .default_kd = 1.0f,
     }

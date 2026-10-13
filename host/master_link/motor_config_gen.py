@@ -1,31 +1,24 @@
 # AUTO-GENERATED — DO NOT EDIT.
-# Sources: configs/2s_10m/firmware_config.yaml
-# Regenerate: SOCCER_SETUP=2s_10m python3 scripts/gen_motor_config.py --system
+# Sources: configs/1s_5m/firmware_config.yaml
+# Regenerate: SOCCER_SETUP=1s_5m python3 scripts/gen_motor_config.py --system
 """Motor configuration constants for host tools (generated, multi-slave)."""
 
 # Active setup name + sha256 over its slave YAMLs (sorted by filename). The runner
 # recomputes the hash from configs/<CONFIG_NAME>/ and warns if this file is stale.
-CONFIG_NAME = '2s_10m'
-CONFIG_HASH = '811c23f1a80025b2a4deb817b2fabfe1eb52ed1fad7bf867eea0813a56a7a74d'
+CONFIG_NAME = '1s_5m'
+CONFIG_HASH = '4c9e04f153fb2e39fadea8ca05a03ca081103322d186b3550efceca6c2ef9ab7'
 
-N_SLAVES = 2
+N_SLAVES = 1
 
 # Per-slave structure, in slave order. Each motor dict's "idx" is LOCAL to its
 # slave (0-based chain index). The host addresses a motor by (slave, idx).
 SLAVES = [
     dict(slave=0, name='slave0', motors=[
-        dict(idx=0, can_id=1, model='RS02', joint_name='bench_j1', soft_min=-0.79, soft_max=0.79, max_vel=10.0, max_tau=0.8, default_kp=15.0, default_kd=1.0),
-        dict(idx=1, can_id=2, model='RS02', joint_name='bench_j2', soft_min=-1.05, soft_max=1.05, max_vel=10.0, max_tau=0.8, default_kp=15.0, default_kd=1.0),
-        dict(idx=2, can_id=3, model='RS00', joint_name='bench_j3', soft_min=-1.31, soft_max=1.31, max_vel=10.0, max_tau=0.8, default_kp=15.0, default_kd=1.0),
-        dict(idx=3, can_id=4, model='RS00', joint_name='bench_j4', soft_min=-1.31, soft_max=1.31, max_vel=10.0, max_tau=0.8, default_kp=15.0, default_kd=1.0),
-        dict(idx=4, can_id=5, model='RS00', joint_name='bench_j5', soft_min=-1.31, soft_max=1.31, max_vel=10.0, max_tau=0.8, default_kp=15.0, default_kd=1.0),
-    ]),
-    dict(slave=1, name='slave1', motors=[
-        dict(idx=0, can_id=6, model='RS02', joint_name='bench_j6', soft_min=-0.79, soft_max=0.79, max_vel=10.0, max_tau=0.8, default_kp=15.0, default_kd=1.0),
-        dict(idx=1, can_id=7, model='RS02', joint_name='bench_j7', soft_min=-1.05, soft_max=1.05, max_vel=10.0, max_tau=0.8, default_kp=15.0, default_kd=1.0),
-        dict(idx=2, can_id=8, model='RS00', joint_name='bench_j8', soft_min=-1.31, soft_max=1.31, max_vel=10.0, max_tau=0.8, default_kp=15.0, default_kd=1.0),
-        dict(idx=3, can_id=9, model='RS00', joint_name='bench_j9', soft_min=-1.31, soft_max=1.31, max_vel=10.0, max_tau=0.8, default_kp=15.0, default_kd=1.0),
-        dict(idx=4, can_id=10, model='RS00', joint_name='bench_j10', soft_min=-1.31, soft_max=1.31, max_vel=10.0, max_tau=0.8, default_kp=15.0, default_kd=1.0),
+        dict(idx=0, can_id=1, model='RS02', joint_name='bench_j1', soft_min=-0.79, soft_max=0.79, max_vel=10.0, max_tau=3.0, default_kp=15.0, default_kd=1.0),
+        dict(idx=1, can_id=2, model='RS02', joint_name='bench_j2', soft_min=-1.05, soft_max=1.05, max_vel=10.0, max_tau=3.0, default_kp=15.0, default_kd=1.0),
+        dict(idx=2, can_id=3, model='RS00', joint_name='bench_j3', soft_min=-1.31, soft_max=1.31, max_vel=10.0, max_tau=3.0, default_kp=15.0, default_kd=1.0),
+        dict(idx=3, can_id=4, model='RS00', joint_name='bench_j4', soft_min=-1.31, soft_max=1.31, max_vel=10.0, max_tau=3.0, default_kp=15.0, default_kd=1.0),
+        dict(idx=4, can_id=5, model='RS00', joint_name='bench_j5', soft_min=-1.31, soft_max=1.31, max_vel=10.0, max_tau=3.0, default_kp=15.0, default_kd=1.0),
     ]),
 ]
 
