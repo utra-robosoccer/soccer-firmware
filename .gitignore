@@ -33,3 +33,6 @@ venv/
 
 # Dashboard session logs
 logs/
+
+# Generated wire-protocol golden fixtures ARE tracked (soccer-software pins them)
+!generated/cpp/fixtures/*.bin
