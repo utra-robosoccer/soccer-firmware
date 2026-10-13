@@ -4,8 +4,7 @@
  * Pure byte/struct manipulation, no HAL. The host golden tests
  * (firmware/common/test/test_spi_proto.c) pin the byte layout + CRC.
  */
-#include "spi_proto.h"
-#include "spi_gate.h"
+#include "spi_proto.h"   /* pulls in proto_common.h → protocol.h + spi_gate.h */
 #include <string.h>
 
 uint8_t spi_proto_parse_cmd(const uint8_t *frame, SpiCmdHdr *hdr, cmd_chain_t *chain)
