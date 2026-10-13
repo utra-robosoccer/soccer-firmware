@@ -70,6 +70,17 @@ static void MX_UART4_Init(void);
 /* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
 
+/* Stdio guard: the USB CDC stream carries ONLY framed protocol messages
+   (docs/protocol.md), so libc stdio must never reach it. This STRONG _write
+   overrides the weak one in syscalls.c and swallows any stray printf/puts —
+   it also removes the weak-undefined __io_putchar call path (a branch to 0).
+   Real diagnostics go through debug_printf (UART4, -DMASTER_DEBUG_UART). */
+int _write(int file, char *ptr, int len)
+{
+  (void)file; (void)ptr;
+  return len;
+}
+
 /* USER CODE END 0 */
 
 /**

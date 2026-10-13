@@ -42,7 +42,14 @@ typedef struct {
 extern uint8_t new_usb_packet_rx_flag;
 extern uint8_t buf_rx_jet2master[NUM_SLV * MAX_MOTORS_PER_SLAVE * USB_BYTES_PER_MOTOR];
 
-void usb_printf(const char *fmt, ...);
+/* Gated debug output: ONLY to UART4, never the USB CDC (the CDC carries framed
+   protocol messages exclusively — docs/protocol.md). Compiled out by default;
+   build with -DMASTER_DEBUG_UART to enable. */
+#ifdef MASTER_DEBUG_UART
+void debug_printf(const char *fmt, ...);
+#else
+#define debug_printf(...) ((void)0)
+#endif
 
 /**
  * @brief  Initializes the SPI master with handles and sets up the multi-slave chains

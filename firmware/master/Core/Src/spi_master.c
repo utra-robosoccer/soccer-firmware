@@ -101,16 +101,26 @@ static uint32_t     slave_cmd_crc_errors[NUM_SLAVES];/* relayed from tele_chain_
 static uint16_t     tx_seq = 0;
 
 /* ── helpers ─────────────────────────────────────────────────────────────── */
-/* usb_printf goes through the ring buffer so it no longer drops */
-void usb_printf(const char *fmt, ...)
+/* The CDC stream carries ONLY framed protocol messages (docs/protocol.md) —
+   there is deliberately NO printf-to-USB path. Diagnostics go to UART4
+   (dedicated PA0/PA1) via debug_printf, compiled out unless the build defines
+   MASTER_DEBUG_UART. NOTE: this uses BLOCKING HAL_UART_Transmit (~87 µs/char
+   budget at 115200), so MASTER_DEBUG_UART builds are NOT timing-representative
+   — debug only, never a release flag. */
+#ifdef MASTER_DEBUG_UART
+void debug_printf(const char *fmt, ...)
 {
-    char buf[256];
+    char buf[128];
     va_list ap;
     va_start(ap, fmt);
     int n = vsnprintf(buf, sizeof(buf), fmt, ap);
     va_end(ap);
-    if (n > 0) usb_tx_write((const uint8_t *)buf, (uint16_t)n);
+    if (n > 0 && master_huart != NULL) {
+        if (n > (int)sizeof(buf) - 1) n = (int)sizeof(buf) - 1;
+        HAL_UART_Transmit(master_huart, (uint8_t *)buf, (uint16_t)n, 20u);
+    }
 }
+#endif
 
 static inline void CS_ALL_HIGH(void) {
     HAL_GPIO_WritePin(GPIOC,
