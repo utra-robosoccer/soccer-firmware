@@ -108,3 +108,37 @@ The hash is enforced at every seam, so two builds generated from different
 
 One telemetry frame is `16 + 20 + n_chains × 119` B: 2 chains → 274 B ≈
 55 KB/s. `cmd_robot_t` up: 270 B framed ≈ 54 KB/s. Well inside USB FS CDC.
+
+## Releases vs protocol version
+
+`PROTO_VERSION` (schema `meta.proto_version`) and `PROTO_SCHEMA_HASH` identify the
+**wire contract**. Firmware/host **releases** are tagged separately, e.g.
+`fw-1.1.0`, with the protocol version and schema hash recorded in the tag
+message. Two different firmware tags can share one wire contract.
+
+Soccer-software pins a firmware **tag** (for `generated/cpp/robot_wire_gen.hpp`
++ `generated/cpp/fixtures/`). Whether it must rebuild when the pin could move:
+
+- **schema hash unchanged** → the wire contract is identical; bumping the pin is
+  optional (firmware-only changes: timing, diagnostics, the CDC-purity work).
+- **schema hash changed** → the pin MUST move and the generated header be
+  re-vendored; the host↔master and master↔slave hash checks enforce it (a stale
+  consumer refuses to run rather than misparse).
+
+(The old `fw-proto10` tag conflated "firmware release" with "protocol version";
+superseded by the `fw-<semver>` scheme. `fw-proto10` is left in place — a moved
+tag would silently change what an existing pin resolves to.)
+
+## Known-harmless host→master artifact
+
+On connect the master's RX counters typically start at `link_errors`/
+`rx_resyncs`/`rx_discarded_bytes` = 1 (a single byte), absorbed by the frame
+resync and never recurring. It is host→master (the opposite direction from the
+framed telemetry stream), most likely pyserial's open sequence or the host
+link's initial buffer flush — harmless and **not worth investigating**. The
+larger historical ~16-byte blip was ModemManager probing the CDC-ACM port; that
+is eliminated by the udev rule (`tools/udev/99-robosoccer-master.rules`,
+`ID_MM_DEVICE_IGNORE=1`), which must ship with any deployment that opens the
+port. Consumers should judge link health by counter **deltas after connect**,
+not absolute values: snapshot after the schema-hash check and alarm only on
+growth while active.
