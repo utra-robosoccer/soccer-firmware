@@ -29,9 +29,17 @@ typedef struct {
     uint16_t cmd_seq;   /* host command sequence (one per host tick)     */
 } SpiCmdHdr;
 
-/* Verify the command-frame CRC, extract the header, and copy out the cmd_chain_t.
- * Returns 1 on a CRC-valid frame (*hdr and *chain filled), 0 otherwise (*hdr and
- * *chain zeroed). The caller owns dispatch and error counting. */
+/* spi_proto_parse_cmd result. */
+typedef enum {
+    SPI_PARSE_BAD      = 0,  /* CRC failure / garbage — *hdr and *chain zeroed  */
+    SPI_PARSE_OK       = 1,  /* valid frame from a matching build — outputs set */
+    SPI_PARSE_MISMATCH = 2,  /* CRC-intact but the master's spi_trailer_t
+                                version/schema differ — outputs zeroed, apply
+                                nothing (version gate, v9.1)                    */
+} SpiParseResult;
+
+/* Verify the command-frame CRC + version trailer, extract the header, and copy
+ * out the cmd_chain_t. The caller owns dispatch and error counting. */
 uint8_t spi_proto_parse_cmd(const uint8_t *frame, SpiCmdHdr *hdr, cmd_chain_t *chain);
 
 /* Assemble a full slave→master telemetry frame into `frame` (SPI_TELE_FRAME_SIZE

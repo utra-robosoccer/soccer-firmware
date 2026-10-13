@@ -56,6 +56,7 @@ ROBOT_INIT      = _G.ROBOT_INIT
 ROBOT_READY     = _G.ROBOT_READY
 ROBOT_DEGRADED  = _G.ROBOT_DEGRADED
 ROBOT_HOST_LOST = _G.ROBOT_HOST_LOST
+ROBOT_PROTO_MISMATCH = _G.ROBOT_PROTO_MISMATCH   # SPI version gate tripped (v9.1)
 ROBOT_STATE_NAMES = _names(_G.ROBOT_STATE_VALUE_NAMES, "ROBOT_")
 
 # ── per-chain SPI link state (tele_chain_t.link, master-authored) ──────────────

@@ -3,7 +3,7 @@
 Source:      firmware/common/protocol.yaml
 Regenerate:  python3 scripts/gen_protocol.py
 
-SCHEMA_HASH 0x86C73223: CRC-32 of the schema's canonical wire projection
+SCHEMA_HASH 0x2EE4783D: CRC-32 of the schema's canonical wire projection
 (parsed YAML minus doc/unit/hex keys, compact sorted-key JSON, UTF-8) — see
 gen_protocol.py. Doc-only edits do not change it.
 
@@ -15,7 +15,7 @@ API and re-exports from here; consumers should not import this directly."""
 import struct as _struct
 
 PROTO_VERSION = 9
-SCHEMA_HASH = 0x86C73223
+SCHEMA_HASH = 0x2EE4783D
 
 # ── wire constants ──
 CMD_SEQ_NONE = 0
@@ -49,7 +49,8 @@ ROBOT_INIT = 0
 ROBOT_READY = 1
 ROBOT_DEGRADED = 2
 ROBOT_HOST_LOST = 3
-ROBOT_STATE_VALUE_NAMES = {0: "ROBOT_INIT", 1: "ROBOT_READY", 2: "ROBOT_DEGRADED", 3: "ROBOT_HOST_LOST"}
+ROBOT_PROTO_MISMATCH = 4
+ROBOT_STATE_VALUE_NAMES = {0: "ROBOT_INIT", 1: "ROBOT_READY", 2: "ROBOT_DEGRADED", 3: "ROBOT_HOST_LOST", 4: "ROBOT_PROTO_MISMATCH"}
 
 # ── DriveReq (u8 on the wire) ──
 DRV_REQ_DISABLE = 0
@@ -135,6 +136,9 @@ OFF_TELE_ROBOT = {"cycle_id": 0, "master_time_us": 2, "last_cmd_seq_rx": 6, "cmd
 FMT_MASTER_STATUS = "<IBIIIHHHHII"
 SZ_MASTER_STATUS = 33
 OFF_MASTER_STATUS = {"schema_hash": 0, "slave_proto_mismatch": 4, "uptime_ms": 5, "link_errors": 9, "rx_frames": 13, "master_poll_hz": 17, "telemetry_hz": 19, "slave_tick_hz": 21, "host_cmd_hz": 23, "rx_resyncs": 25, "rx_discarded_bytes": 29}
+FMT_SPI_TRAILER = "<BI"
+SZ_SPI_TRAILER = 5
+OFF_SPI_TRAILER = {"proto_version": 0, "schema_hash": 1}
 FMT_SLAVE_STATUS = "<BBIIII"
 SZ_SLAVE_STATUS = 18
 OFF_SLAVE_STATUS = {"slave_id": 0, "motors_alive": 1, "uptime_ms": 2, "crc_errors": 6, "cmd_crc_errors": 10, "seq_gaps": 14}
@@ -142,11 +146,13 @@ OFF_SLAVE_STATUS = {"slave_id": 0, "motors_alive": 1, "uptime_ms": 2, "crc_error
 # ── derived wire constants ──
 MSG_HEADER_SIZE = 16   # sizeof(MsgHeader)
 PROTO_MAX_PAYLOAD = 496   # sizeof(tele_robot_t)
-SPI_CMD_CRC_OFF = 68   # SPI_CMD_HDR_BYTES + sizeof(cmd_chain_t)
-SPI_CMD_FRAME_SIZE = 70   # SPI_CMD_HDR_BYTES + sizeof(cmd_chain_t) + SPI_CRC_BYTES
-SPI_TELE_CRC_OFF = 119   # sizeof(tele_chain_t)
-SPI_TELE_FRAME_SIZE = 121   # sizeof(tele_chain_t) + SPI_CRC_BYTES
-SPI_XFER_SIZE = 121   # max(SPI_CMD_FRAME_SIZE, SPI_TELE_FRAME_SIZE)
+SPI_CMD_TRAILER_OFF = 68   # SPI_CMD_HDR_BYTES + sizeof(cmd_chain_t)
+SPI_CMD_CRC_OFF = 73   # SPI_CMD_HDR_BYTES + sizeof(cmd_chain_t) + sizeof(spi_trailer_t)
+SPI_CMD_FRAME_SIZE = 75   # SPI_CMD_HDR_BYTES + sizeof(cmd_chain_t) + sizeof(spi_trailer_t) + SPI_CRC_BYTES
+SPI_TELE_TRAILER_OFF = 119   # sizeof(tele_chain_t)
+SPI_TELE_CRC_OFF = 124   # sizeof(tele_chain_t) + sizeof(spi_trailer_t)
+SPI_TELE_FRAME_SIZE = 126   # sizeof(tele_chain_t) + sizeof(spi_trailer_t) + SPI_CRC_BYTES
+SPI_XFER_SIZE = 126   # max(SPI_CMD_FRAME_SIZE, SPI_TELE_FRAME_SIZE)
 USB_MAX_FRAME_SIZE = 512   # sizeof(MsgHeader) + sizeof(tele_robot_t)
 
 # ── generic pack/unpack (field tables + recursive helpers) ──
@@ -160,6 +166,7 @@ STRUCTS = {
     "tele_chain_t": [('chain_id', 'scalar', 'B'), ('n_motors', 'scalar', 'B'), ('link', 'scalar', 'B'), ('spi_seq_echo', 'scalar', 'B'), ('spi_resyncs', 'scalar', 'B'), ('slave_time_us', 'scalar', 'I'), ('cmd_crc_errors', 'scalar', 'H'), ('can_tx_errors', 'scalar', 'H'), ('spi_tx_arm_fails', 'scalar', 'B'), ('motors', 'array', 'tele_motor_t', 5)],
     "tele_robot_t": [('cycle_id', 'scalar', 'H'), ('master_time_us', 'scalar', 'I'), ('last_cmd_seq_rx', 'scalar', 'H'), ('cmd_seq_active', 'scalar', 'H'), ('cmd_on_time', 'scalar', 'H'), ('cmd_late', 'scalar', 'H'), ('cmd_missing', 'scalar', 'H'), ('cmd_duplicate', 'scalar', 'H'), ('n_chains', 'scalar', 'B'), ('robot_state', 'scalar', 'B'), ('chains', 'array', 'tele_chain_t', 4)],
     "MasterStatus": [('schema_hash', 'scalar', 'I'), ('slave_proto_mismatch', 'scalar', 'B'), ('uptime_ms', 'scalar', 'I'), ('link_errors', 'scalar', 'I'), ('rx_frames', 'scalar', 'I'), ('master_poll_hz', 'scalar', 'H'), ('telemetry_hz', 'scalar', 'H'), ('slave_tick_hz', 'scalar', 'H'), ('host_cmd_hz', 'scalar', 'H'), ('rx_resyncs', 'scalar', 'I'), ('rx_discarded_bytes', 'scalar', 'I')],
+    "spi_trailer_t": [('proto_version', 'scalar', 'B'), ('schema_hash', 'scalar', 'I')],
     "SlaveStatus": [('slave_id', 'scalar', 'B'), ('motors_alive', 'scalar', 'B'), ('uptime_ms', 'scalar', 'I'), ('crc_errors', 'scalar', 'I'), ('cmd_crc_errors', 'scalar', 'I'), ('seq_gaps', 'scalar', 'I')],
 }
 
@@ -201,4 +208,4 @@ def pack_struct(name, values):
     return bytes(out)
 
 
-SZ_BY_STRUCT = {"MsgHeader": SZ_MSG_HEADER, "cmd_motor_t": SZ_CMD_MOTOR, "cmd_chain_t": SZ_CMD_CHAIN, "cmd_robot_t": SZ_CMD_ROBOT, "tele_motor_t": SZ_TELE_MOTOR, "tele_chain_t": SZ_TELE_CHAIN, "tele_robot_t": SZ_TELE_ROBOT, "MasterStatus": SZ_MASTER_STATUS, "SlaveStatus": SZ_SLAVE_STATUS}
+SZ_BY_STRUCT = {"MsgHeader": SZ_MSG_HEADER, "cmd_motor_t": SZ_CMD_MOTOR, "cmd_chain_t": SZ_CMD_CHAIN, "cmd_robot_t": SZ_CMD_ROBOT, "tele_motor_t": SZ_TELE_MOTOR, "tele_chain_t": SZ_TELE_CHAIN, "tele_robot_t": SZ_TELE_ROBOT, "MasterStatus": SZ_MASTER_STATUS, "spi_trailer_t": SZ_SPI_TRAILER, "SlaveStatus": SZ_SLAVE_STATUS}

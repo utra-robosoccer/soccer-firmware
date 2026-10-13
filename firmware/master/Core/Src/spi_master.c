@@ -85,6 +85,8 @@ void MotorMaster_UsbRxFromISR(const uint8_t *buf, uint16_t len)
 
 /* ── per-slave runtime state ─────────────────────────────────────────────── */
 static uint8_t      slave_alive[NUM_SLAVES];
+static uint8_t      slave_mismatch[NUM_SLAVES];      /* version gate: CRC-intact tele but
+                                                        wrong proto/schema (v9.1) */
 static uint8_t      slave_motors_alive[NUM_SLAVES];
 static tele_chain_t latest_tele[NUM_SLAVES];        /* last CRC-valid telemetry chain */
 static uint32_t     slave_crc_errors[NUM_SLAVES];   /* telemetry frames failing CRC */
@@ -132,10 +134,16 @@ static inline void CS_SELECT(SpiDevId dev) {
    back in RX. The frame CRC doubles as integrity AND presence check — an absent
    slave clocks back garbage that fails CRC. Returns HAL_OK only on a CRC-valid
    telemetry frame. */
-static HAL_StatusTypeDef spi_exchange(SpiDevId dev, uint8_t opcode, uint8_t spi_seq_v,
-                                       uint16_t cycle_id, uint16_t cmd_seq,
-                                       const cmd_chain_t *chain,
-                                       tele_chain_t *tele_out)
+typedef enum {
+    SPI_EX_DEAD     = 0,   /* HAL failure or CRC-bad/absent frame               */
+    SPI_EX_OK       = 1,   /* valid frame from a matching build — *tele_out set */
+    SPI_EX_MISMATCH = 2,   /* CRC-intact frame, wrong proto/schema (version gate) */
+} SpiExResult;
+
+static SpiExResult spi_exchange(SpiDevId dev, uint8_t opcode, uint8_t spi_seq_v,
+                                uint16_t cycle_id, uint16_t cmd_seq,
+                                const cmd_chain_t *chain,
+                                tele_chain_t *tele_out)
 {
     uint8_t tx[SPI_XFER_SIZE];
     uint8_t rx[SPI_XFER_SIZE];
@@ -147,6 +155,7 @@ static HAL_StatusTypeDef spi_exchange(SpiDevId dev, uint8_t opcode, uint8_t spi_
     tx[4] = (uint8_t)(cmd_seq & 0xFFu);
     tx[5] = (uint8_t)(cmd_seq >> 8);
     if (chain != NULL) memcpy(&tx[SPI_CMD_HDR_BYTES], chain, sizeof(cmd_chain_t));
+    spi_trailer_write(&tx[SPI_CMD_TRAILER_OFF]);   /* version gate (v9.1) */
     uint16_t ccrc = proto_crc16(tx, SPI_CMD_CRC_OFF);
     tx[SPI_CMD_CRC_OFF]     = (uint8_t)(ccrc & 0xFFu);
     tx[SPI_CMD_CRC_OFF + 1] = (uint8_t)(ccrc >> 8);
@@ -155,18 +164,30 @@ static HAL_StatusTypeDef spi_exchange(SpiDevId dev, uint8_t opcode, uint8_t spi_
     HAL_StatusTypeDef st = HAL_SPI_TransmitReceive(master_hspi, tx, rx,
                                                     SPI_XFER_SIZE, HAL_MAX_DELAY);
     CS_ALL_HIGH();
-    if (st != HAL_OK) return st;
+    if (st != HAL_OK) return SPI_EX_DEAD;
 
     uint16_t rx_crc = (uint16_t)(rx[SPI_TELE_CRC_OFF] |
                       ((uint16_t)rx[SPI_TELE_CRC_OFF + 1] << 8));
     uint16_t calc   = proto_crc16(rx, SPI_TELE_CRC_OFF);
     if (rx_crc != calc) {
         slave_crc_errors[(uint8_t)dev]++;
-        return HAL_ERROR;              /* bad/absent frame → caller marks offline */
+        return SPI_EX_DEAD;            /* bad/absent frame → caller marks offline */
     }
+    /* CRC-intact but a different build on the other side: refuse the payload. */
+    if (!spi_trailer_match(&rx[SPI_TELE_TRAILER_OFF])) return SPI_EX_MISMATCH;
+
     memcpy(tele_out, rx, sizeof(tele_chain_t));
     slave_cmd_crc_errors[(uint8_t)dev] = tele_out->cmd_crc_errors;   /* relayed */
-    return HAL_OK;
+    return SPI_EX_OK;
+}
+
+/* 1 = any configured slave currently fails the version gate. */
+static uint8_t any_slave_mismatch(void)
+{
+    for (uint8_t s = 0; s < NUM_SLAVES; s++) {
+        if (slave_mismatch[s]) return 1u;
+    }
+    return 0u;
 }
 
 /* ── emit protocol frames over USB TX ring ───────────────────────────────── */
@@ -211,8 +232,10 @@ static void emit_master_status(uint32_t now_ms)
        tele_robot_t / tele_chain_t.link every cycle); status carries the
        build fingerprint and the slow link counters. */
     MasterStatus pay = {0};
-    pay.schema_hash          = PROTO_SCHEMA_HASH;
-    pay.slave_proto_mismatch = 0u;   /* populated by the SPI version gate (v9.1 5b) */
+    pay.schema_hash = PROTO_SCHEMA_HASH;
+    for (uint8_t s = 0; s < NUM_SLAVES && s < 8u; s++) {
+        if (slave_mismatch[s]) pay.slave_proto_mismatch |= (uint8_t)(1u << s);
+    }
     pay.uptime_ms      = now_ms;
     pay.link_errors    = master_link_errors;
     pay.rx_frames      = master_rx_frames;
@@ -271,8 +294,11 @@ static void emit_robot_tele(uint32_t master_time_us)
     pay.cmd_late         = cnt_late;
     pay.cmd_missing      = cnt_missing;
     pay.cmd_duplicate    = cnt_duplicate;
-    pay.robot_state      = (g_host_action != HOST_LINK_OK)
-                           ? (uint8_t)ROBOT_HOST_LOST : (uint8_t)compute_robot_state(NULL);
+    /* Reporting priority (spec §robot_state): HOST_LOST > PROTO_MISMATCH >
+       the computed INIT/READY/DEGRADED. */
+    pay.robot_state      = (g_host_action != HOST_LINK_OK) ? (uint8_t)ROBOT_HOST_LOST
+                         : any_slave_mismatch()            ? (uint8_t)ROBOT_PROTO_MISMATCH
+                                                           : (uint8_t)compute_robot_state(NULL);
 
     /* Every CONFIGURED chain is emitted every cycle at its fixed slot
        (chains[s] = slave s), so chain position is stable whether or not the
@@ -285,7 +311,8 @@ static void emit_robot_tele(uint32_t master_time_us)
             pay.chains[s].link = CHAIN_LINK_ALIVE;
         } else {
             pay.chains[s].n_motors = 0u;
-            pay.chains[s].link     = CHAIN_LINK_LOST;
+            pay.chains[s].link     = slave_mismatch[s] ? CHAIN_LINK_MISMATCH
+                                                       : CHAIN_LINK_LOST;
         }
         pay.chains[s].chain_id = s;    /* stamp the slave index — the slave hardcodes 0,
                                           so multi-slave telemetry would otherwise collide */
@@ -512,13 +539,31 @@ static void poll_one_slave(uint8_t s)
         chain_local.n_motors = slave_motor_counts[s];
     }
 
+    /* Version gate (v9.1): never forward commands to a mismatched slave (poll
+       with NOPs so a reflash is detected), and while ANY slave mismatches
+       refuse NEW enables robot-wide — an ENABLE for a not-yet-armed motor is
+       rewritten to DISABLE (no-op); armed motors are left alone. */
+    if (slave_mismatch[s]) {
+        opcode = SPI_OP_NOP;
+        memset(&chain_local, 0, sizeof(chain_local));
+        chain_local.chain_id = s;
+        chain_local.n_motors = slave_motor_counts[s];
+    } else if (opcode == SPI_OP_ROBOT_CMD && any_slave_mismatch()) {
+        for (uint8_t i = 0; i < MAX_MOTORS_PER_CHAIN; i++) {
+            uint8_t ds = slave_alive[s] ? latest_tele[s].motors[i].drive_state
+                                        : (uint8_t)DRV_BOOT;
+            chain_local.motors[i].drive_req =
+                spi_gate_filter_req(chain_local.motors[i].drive_req, ds);
+        }
+    }
+
     uint8_t seq_to_send = spi_seq[s]++;
     tele_chain_t tele;
-    HAL_StatusTypeDef st = spi_exchange((SpiDevId)s, opcode, seq_to_send,
-                                        master_cycle_id, g_cmd_seq_active,
-                                        &chain_local, &tele);
+    SpiExResult st = spi_exchange((SpiDevId)s, opcode, seq_to_send,
+                                  master_cycle_id, g_cmd_seq_active,
+                                  &chain_local, &tele);
 
-    if (st == HAL_OK) {   /* CRC verified inside spi_exchange = valid + present */
+    if (st == SPI_EX_OK) {   /* CRC verified inside spi_exchange = valid + present */
         /* Echo-stall diagnostics on the SPI link-health seq (sustained freeze =
            a command link that stopped confirming). Any advance resets the streak. */
         uint8_t echo = tele.spi_seq_echo;
@@ -542,13 +587,25 @@ static void poll_one_slave(uint8_t s)
                 alive_mask |= (uint8_t)(1u << i);
         }
         slave_alive[s]        = 1u;
+        slave_mismatch[s]     = 0u;      /* match (again) → gate reopens, no reset */
         slave_motors_alive[s] = alive_mask;
         latest_tele[s]        = tele;    /* struct copy */
+    } else if (st == SPI_EX_MISMATCH) {
+        /* Responding slave built against a different wire contract: excluded
+           from alive/forwarding/enables, reported via tele_chain_t.link and
+           MasterStatus.slave_proto_mismatch. Polling continues (NOPs), so a
+           reflashed slave is re-accepted without a master reset. */
+        slave_alive[s]        = 0u;
+        slave_mismatch[s]     = 1u;
+        slave_motors_alive[s] = 0u;
+        have_prev_echo[s]     = 0u;
+        echo_stall[s]         = 0u;
     } else {
         /* Absent slave / garbage frame — mark offline; reset the seq-echo baseline
            so recovery doesn't false-count. The host command mailbox is left intact
            (level-triggered: it reapplies once the slave is back). */
         slave_alive[s]        = 0u;
+        slave_mismatch[s]     = 0u;
         slave_motors_alive[s] = 0u;
         have_prev_echo[s]     = 0u;
         echo_stall[s]         = 0u;

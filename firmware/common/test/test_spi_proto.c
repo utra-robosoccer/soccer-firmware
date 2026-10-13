@@ -11,6 +11,7 @@
  *       firmware/common/test/test_spi_proto.c .../spi_proto.c -o test_spi_proto
  */
 #include "spi_proto.h"
+#include "spi_gate.h"
 #include <stdio.h>
 #include <string.h>
 #include <stdint.h>
@@ -75,6 +76,15 @@ static void build_cmd_frame(uint8_t *frame, uint8_t opcode, uint8_t spi_seq,
     frame[4] = (uint8_t)(cmd_seq & 0xFFu);
     frame[5] = (uint8_t)(cmd_seq >> 8);
     memcpy(&frame[SPI_CMD_HDR_BYTES], chain, sizeof(cmd_chain_t));
+    spi_trailer_write(&frame[SPI_CMD_TRAILER_OFF]);   /* version gate (v9.1) */
+    uint16_t crc = proto_crc16(frame, SPI_CMD_CRC_OFF);
+    frame[SPI_CMD_CRC_OFF]     = (uint8_t)(crc & 0xFFu);
+    frame[SPI_CMD_CRC_OFF + 1] = (uint8_t)(crc >> 8);
+}
+
+/* Re-CRC a frame after a deliberate payload/trailer edit (CRC stays valid). */
+static void recrc_cmd_frame(uint8_t *frame)
+{
     uint16_t crc = proto_crc16(frame, SPI_CMD_CRC_OFF);
     frame[SPI_CMD_CRC_OFF]     = (uint8_t)(crc & 0xFFu);
     frame[SPI_CMD_CRC_OFF + 1] = (uint8_t)(crc >> 8);
@@ -89,6 +99,8 @@ static void test_build_tele(void)
         spi_proto_build_tele(frame, &t);
         CHECK(memcmp(frame, &t, sizeof(tele_chain_t)) == 0,
               "tele frame prefix != tele_chain_t");
+        CHECK(spi_trailer_match(&frame[SPI_TELE_TRAILER_OFF]) == 1u,
+              "tele trailer not this build's");
         uint16_t crc = proto_crc16(frame, SPI_TELE_CRC_OFF);
         CHECK(frame[SPI_TELE_CRC_OFF] == (uint8_t)(crc & 0xFFu) &&
               frame[SPI_TELE_CRC_OFF + 1] == (uint8_t)(crc >> 8), "tele CRC mismatch");
@@ -110,16 +122,39 @@ static void test_parse_cmd(void)
 
         SpiCmdHdr   hdr;
         cmd_chain_t out;
-        CHECK(spi_proto_parse_cmd(frame, &hdr, &out) == 1u, "valid cmd rejected");
+        CHECK(spi_proto_parse_cmd(frame, &hdr, &out) == SPI_PARSE_OK,
+              "valid cmd rejected");
         CHECK(hdr.opcode == opcode && hdr.spi_seq == spi_seq &&
               hdr.cycle_id == cyc && hdr.cmd_seq == cseq, "cmd header mismatch");
         CHECK(memcmp(&out, &c, sizeof(cmd_chain_t)) == 0, "cmd_chain_t mismatch");
+
+        /* CRC-intact frame from a differently-versioned master → MISMATCH and
+           zeroed outputs (the payload must never be applied). */
+        uint8_t mm[SPI_CMD_FRAME_SIZE];
+        memcpy(mm, frame, SPI_CMD_FRAME_SIZE);
+        mm[SPI_CMD_TRAILER_OFF] ^= 0x01u;       /* wrong proto_version */
+        recrc_cmd_frame(mm);
+        SpiCmdHdr   hdrm;
+        cmd_chain_t outm;
+        CHECK(spi_proto_parse_cmd(mm, &hdrm, &outm) == SPI_PARSE_MISMATCH,
+              "mismatched cmd not flagged");
+        CHECK(hdrm.opcode == 0u && hdrm.cmd_seq == 0u, "mismatch hdr not zeroed");
+        memcpy(mm, frame, SPI_CMD_FRAME_SIZE);
+        mm[SPI_CMD_TRAILER_OFF + 2] ^= 0x40u;   /* wrong schema hash byte */
+        recrc_cmd_frame(mm);
+        CHECK(spi_proto_parse_cmd(mm, &hdrm, &outm) == SPI_PARSE_MISMATCH,
+              "hash-mismatched cmd not flagged");
+
+        /* Recovery: the original matching frame parses OK again (stateless). */
+        CHECK(spi_proto_parse_cmd(frame, &hdr, &out) == SPI_PARSE_OK,
+              "recovery after mismatch failed");
 
         /* Corrupt a CRC-covered byte → must reject. */
         frame[0] ^= 0xFFu;
         SpiCmdHdr   hdr2;
         cmd_chain_t out2;
-        CHECK(spi_proto_parse_cmd(frame, &hdr2, &out2) == 0u, "corrupt cmd accepted");
+        CHECK(spi_proto_parse_cmd(frame, &hdr2, &out2) == SPI_PARSE_BAD,
+              "corrupt cmd accepted");
     }
 }
 

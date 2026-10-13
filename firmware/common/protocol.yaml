@@ -95,13 +95,20 @@ enums:
 
   - name: RobotState
     wire_type: u8
-    doc: robot lifecycle (tele_robot_t.robot_state / MasterStatus.robot_state)
+    doc: >
+      robot lifecycle (tele_robot_t.robot_state). Reporting priority when
+      several conditions hold: HOST_LOST > PROTO_MISMATCH > the computed
+      INIT/READY/DEGRADED — docs/protocol_v9.md §Host-loss.
     values:
       - {name: ROBOT_INIT,      value: 0}
       - {name: ROBOT_READY,     value: 1}
       - {name: ROBOT_DEGRADED,  value: 2}
       - {name: ROBOT_HOST_LOST, value: 3,
          doc: "master's host-death watchdog tripped (forcing STOP)"}
+      - {name: ROBOT_PROTO_MISMATCH, value: 4,
+         doc: "a responding slave fails the SPI version gate; NEW enables are
+               refused robot-wide until every slave matches (reflash + rejoin
+               needs no master reset)"}
 
   - name: DriveReq
     wire_type: u8
@@ -361,6 +368,19 @@ structs:
       - {name: rx_discarded_bytes, type: u32,
          doc: "bytes dropped during resync (v5)"}
 
+  - name: spi_trailer_t
+    doc: >
+      SPI version gate (v9.1), 5 bytes, appended to BOTH SPI frame directions
+      between the payload and the CRC. Each side stamps its own build; the
+      receiver refuses a mismatched frame's payload (master: slave excluded
+      from alive/forwarding/enables, reported via tele_chain_t.link = MISMATCH
+      and MasterStatus.slave_proto_mismatch; slave: command ignored, counted in
+      cmd_crc_errors). Polling continues, so a reflashed board is re-accepted
+      without a reset on either side.
+    fields:
+      - {name: proto_version, type: u8, doc: "sender's PROTO_VERSION"}
+      - {name: schema_hash, type: u32, doc: "sender's PROTO_SCHEMA_HASH"}
+
   - name: SlaveStatus
     doc: per-slave status (20 Hz), 18 bytes
     fields:
@@ -387,22 +407,30 @@ derived:
     doc: >
       Largest framed payload; a header claiming more than this is junk. The host
       side keeps its own hand-written resync bound (≥ this).
-  - name: SPI_CMD_CRC_OFF
+  - name: SPI_CMD_TRAILER_OFF
     expr: SPI_CMD_HDR_BYTES + sizeof(cmd_chain_t)
+    cast: u16
+    doc: spi_trailer_t offset in a master→slave SPI command frame
+  - name: SPI_CMD_CRC_OFF
+    expr: SPI_CMD_HDR_BYTES + sizeof(cmd_chain_t) + sizeof(spi_trailer_t)
     cast: u16
     doc: CRC16 offset in a master→slave SPI command frame
   - name: SPI_CMD_FRAME_SIZE
-    expr: SPI_CMD_HDR_BYTES + sizeof(cmd_chain_t) + SPI_CRC_BYTES
+    expr: SPI_CMD_HDR_BYTES + sizeof(cmd_chain_t) + sizeof(spi_trailer_t) + SPI_CRC_BYTES
     cast: u16
-    doc: "master → slave: [opcode u8][spi_seq u8][cycle_id u16][cmd_seq u16][cmd_chain_t][crc16]"
-  - name: SPI_TELE_CRC_OFF
+    doc: "master → slave: [opcode u8][spi_seq u8][cycle_id u16][cmd_seq u16][cmd_chain_t][spi_trailer_t][crc16]"
+  - name: SPI_TELE_TRAILER_OFF
     expr: sizeof(tele_chain_t)
+    cast: u16
+    doc: spi_trailer_t offset in a slave→master SPI telemetry frame
+  - name: SPI_TELE_CRC_OFF
+    expr: sizeof(tele_chain_t) + sizeof(spi_trailer_t)
     cast: u16
     doc: CRC16 offset in a slave→master SPI telemetry frame
   - name: SPI_TELE_FRAME_SIZE
-    expr: sizeof(tele_chain_t) + SPI_CRC_BYTES
+    expr: sizeof(tele_chain_t) + sizeof(spi_trailer_t) + SPI_CRC_BYTES
     cast: u16
-    doc: "slave → master: [tele_chain_t][crc16]"
+    doc: "slave → master: [tele_chain_t][spi_trailer_t][crc16]"
   - name: SPI_XFER_SIZE
     expr: max(SPI_CMD_FRAME_SIZE, SPI_TELE_FRAME_SIZE)
     doc: full-duplex SPI transfer length = the larger of the two frames

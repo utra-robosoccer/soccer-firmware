@@ -2,7 +2,7 @@
 // Source:      firmware/common/protocol.yaml
 // Regenerate:  python3 scripts/gen_protocol.py
 //
-// SCHEMA_HASH 0x86C73223: CRC-32 of the schema's canonical wire
+// SCHEMA_HASH 0x2EE4783D: CRC-32 of the schema's canonical wire
 // projection (parsed YAML minus doc/unit/hex keys, compact sorted-key
 // JSON, UTF-8) — see gen_protocol.py. Doc-only edits do not change it.
 //
@@ -23,7 +23,7 @@
 namespace robot_wire {
 
 constexpr std::uint8_t  PROTO_VERSION = 9u;
-constexpr std::uint32_t PROTO_SCHEMA_HASH = 0x86C73223u;
+constexpr std::uint32_t PROTO_SCHEMA_HASH = 0x2EE4783Du;
 
 // ── wire constants ──
 constexpr std::uint16_t CMD_SEQ_NONE = 0u;
@@ -54,12 +54,15 @@ enum class MsgType : std::uint16_t {
     MSG_ROBOT_TELE    = 0x09u,  // master→host: one tele_robot_t per tele tick
 };
 
-// robot lifecycle (tele_robot_t.robot_state / MasterStatus.robot_state)
+// robot lifecycle (tele_robot_t.robot_state). Reporting priority when
+// several conditions hold: HOST_LOST > PROTO_MISMATCH > the computed
+// INIT/READY/DEGRADED — docs/protocol_v9.md §Host-loss.
 enum class RobotState : std::uint8_t {
-    ROBOT_INIT      = 0u,
-    ROBOT_READY     = 1u,
-    ROBOT_DEGRADED  = 2u,
-    ROBOT_HOST_LOST = 3u,  // master's host-death watchdog tripped (forcing STOP)
+    ROBOT_INIT           = 0u,
+    ROBOT_READY          = 1u,
+    ROBOT_DEGRADED       = 2u,
+    ROBOT_HOST_LOST      = 3u,  // master's host-death watchdog tripped (forcing STOP)
+    ROBOT_PROTO_MISMATCH = 4u,  // a responding slave fails the SPI version gate; NEW enables are refused robot-wide until every slave matches (reflash + rejoin needs no master reset)
 };
 
 // Host→slave per-motor drive request (cmd_motor_t.drive_req).
@@ -249,6 +252,18 @@ struct MasterStatus {
     std::uint32_t rx_discarded_bytes;   // bytes dropped during resync (v5)
 };
 
+// SPI version gate (v9.1), 5 bytes, appended to BOTH SPI frame directions
+// between the payload and the CRC. Each side stamps its own build; the
+// receiver refuses a mismatched frame's payload (master: slave excluded from
+// alive/forwarding/enables, reported via tele_chain_t.link = MISMATCH and
+// MasterStatus.slave_proto_mismatch; slave: command ignored, counted in
+// cmd_crc_errors). Polling continues, so a reflashed board is re-accepted
+// without a reset on either side.
+struct spi_trailer_t {
+    std::uint8_t proto_version;         // sender's PROTO_VERSION
+    std::uint32_t schema_hash;          // sender's PROTO_SCHEMA_HASH
+};
+
 // per-slave status (20 Hz), 18 bytes
 struct SlaveStatus {
     std::uint8_t slave_id;              // which slave this status is for
@@ -264,11 +279,13 @@ struct SlaveStatus {
 // ── derived wire constants ──
 constexpr std::uint16_t MSG_HEADER_SIZE = 16u;  // sizeof(MsgHeader)
 constexpr std::uint16_t PROTO_MAX_PAYLOAD = 496u;  // sizeof(tele_robot_t)
-constexpr std::uint16_t SPI_CMD_CRC_OFF = 68u;  // SPI_CMD_HDR_BYTES + sizeof(cmd_chain_t)
-constexpr std::uint16_t SPI_CMD_FRAME_SIZE = 70u;  // SPI_CMD_HDR_BYTES + sizeof(cmd_chain_t) + SPI_CRC_BYTES
-constexpr std::uint16_t SPI_TELE_CRC_OFF = 119u;  // sizeof(tele_chain_t)
-constexpr std::uint16_t SPI_TELE_FRAME_SIZE = 121u;  // sizeof(tele_chain_t) + SPI_CRC_BYTES
-constexpr std::uint16_t SPI_XFER_SIZE = 121u;  // max(SPI_CMD_FRAME_SIZE, SPI_TELE_FRAME_SIZE)
+constexpr std::uint16_t SPI_CMD_TRAILER_OFF = 68u;  // SPI_CMD_HDR_BYTES + sizeof(cmd_chain_t)
+constexpr std::uint16_t SPI_CMD_CRC_OFF = 73u;  // SPI_CMD_HDR_BYTES + sizeof(cmd_chain_t) + sizeof(spi_trailer_t)
+constexpr std::uint16_t SPI_CMD_FRAME_SIZE = 75u;  // SPI_CMD_HDR_BYTES + sizeof(cmd_chain_t) + sizeof(spi_trailer_t) + SPI_CRC_BYTES
+constexpr std::uint16_t SPI_TELE_TRAILER_OFF = 119u;  // sizeof(tele_chain_t)
+constexpr std::uint16_t SPI_TELE_CRC_OFF = 124u;  // sizeof(tele_chain_t) + sizeof(spi_trailer_t)
+constexpr std::uint16_t SPI_TELE_FRAME_SIZE = 126u;  // sizeof(tele_chain_t) + sizeof(spi_trailer_t) + SPI_CRC_BYTES
+constexpr std::uint16_t SPI_XFER_SIZE = 126u;  // max(SPI_CMD_FRAME_SIZE, SPI_TELE_FRAME_SIZE)
 constexpr std::uint16_t USB_MAX_FRAME_SIZE = 512u;  // sizeof(MsgHeader) + sizeof(tele_robot_t)
 
 // ── layout guards ──
@@ -348,6 +365,9 @@ static_assert(offsetof(MasterStatus, slave_tick_hz) == 21u, "MasterStatus.slave_
 static_assert(offsetof(MasterStatus, host_cmd_hz) == 23u, "MasterStatus.host_cmd_hz offset");
 static_assert(offsetof(MasterStatus, rx_resyncs) == 25u, "MasterStatus.rx_resyncs offset");
 static_assert(offsetof(MasterStatus, rx_discarded_bytes) == 29u, "MasterStatus.rx_discarded_bytes offset");
+static_assert(sizeof(spi_trailer_t) == 5u, "spi_trailer_t size");
+static_assert(offsetof(spi_trailer_t, proto_version) == 0u, "spi_trailer_t.proto_version offset");
+static_assert(offsetof(spi_trailer_t, schema_hash) == 1u, "spi_trailer_t.schema_hash offset");
 static_assert(sizeof(SlaveStatus) == 18u, "SlaveStatus size");
 static_assert(offsetof(SlaveStatus, slave_id) == 0u, "SlaveStatus.slave_id offset");
 static_assert(offsetof(SlaveStatus, motors_alive) == 1u, "SlaveStatus.motors_alive offset");

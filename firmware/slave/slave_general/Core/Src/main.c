@@ -307,14 +307,22 @@ int main(void)
       data_receive_flag = 0;
       __enable_irq();
 
-      /* Verify the command-frame CRC + extract the header and cmd_chain_t. On a CRC
-         failure apply nothing (a corrupt command must not refresh watchdogs or move a
-         motor), count it, and resync the DMA — send nothing this exchange. */
+      /* Verify the command-frame CRC + version trailer, extract the header and
+         cmd_chain_t. On a CRC failure apply nothing (a corrupt command must not
+         refresh watchdogs or move a motor), count it, and resync the DMA — send
+         nothing this exchange. On a VERSION MISMATCH (CRC-intact frame from a
+         master built against a different wire contract) apply nothing and count
+         it, but do NOT resync: the link itself is framed correctly, and with no
+         fresh commands ever applied the master-loss watchdog keeps the motors
+         safe until someone reflashes. */
       SpiCmdHdr   hdr;
       cmd_chain_t chain;
-      if (!spi_proto_parse_cmd(cmd_local, &hdr, &chain)) {
+      uint8_t parse = spi_proto_parse_cmd(cmd_local, &hdr, &chain);
+      if (parse == SPI_PARSE_BAD) {
         cmd_crc_errors++;
         slave_spi_resync(&hspi1);
+      } else if (parse == SPI_PARSE_MISMATCH) {
+        cmd_crc_errors++;             /* counted with CRC rejects (both = "refused") */
       } else {
         spi_echo_seq = hdr.spi_seq;   /* echo the SPI link-health seq */
         uint8_t cmd_fresh = (hdr.opcode == SPI_OP_ROBOT_CMD) ? 1u : 0u;

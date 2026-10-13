@@ -2,7 +2,7 @@
  * Source:      firmware/common/protocol.yaml
  * Regenerate:  python3 scripts/gen_protocol.py
  *
- * SCHEMA_HASH 0x86C73223: CRC-32 of the schema's canonical wire
+ * SCHEMA_HASH 0x2EE4783D: CRC-32 of the schema's canonical wire
  * projection (parsed YAML minus doc/unit/hex keys, compact sorted-key
  * JSON, UTF-8) — see gen_protocol.py. Doc-only edits do not change it.
  */
@@ -24,7 +24,7 @@
 /* Wire-contract version. Carried in MsgHeader.ver_flags low byte; both
  * ends drop and count any frame whose version != this. */
 #define PROTO_VERSION 9u
-#define PROTO_SCHEMA_HASH 0x86C73223u
+#define PROTO_SCHEMA_HASH 0x2EE4783Du
 
 /* ── wire constants ─────────────────────────────────────────────────── */
 /* cmd_seq sentinel: "no host command applied yet"
@@ -74,12 +74,17 @@ typedef enum {
 } MsgType;
 
 /* ── RobotState (u8 on the wire) ── */
-/* robot lifecycle (tele_robot_t.robot_state / MasterStatus.robot_state) */
+/* robot lifecycle (tele_robot_t.robot_state). Reporting priority when
+ * several conditions hold: HOST_LOST > PROTO_MISMATCH > the computed
+ * INIT/READY/DEGRADED — docs/protocol_v9.md §Host-loss. */
 typedef enum {
-    ROBOT_INIT      = 0u,
-    ROBOT_READY     = 1u,
-    ROBOT_DEGRADED  = 2u,
-    ROBOT_HOST_LOST = 3u,  /* master's host-death watchdog tripped (forcing STOP) */
+    ROBOT_INIT           = 0u,
+    ROBOT_READY          = 1u,
+    ROBOT_DEGRADED       = 2u,
+    ROBOT_HOST_LOST      = 3u,  /* master's host-death watchdog tripped (forcing STOP) */
+    ROBOT_PROTO_MISMATCH = 4u,  /* a responding slave fails the SPI version gate; NEW enables
+       are refused robot-wide until every slave matches (reflash +
+       rejoin needs no master reset) */
 } RobotState;
 
 /* ── DriveReq (u8 on the wire) ── */
@@ -272,6 +277,18 @@ typedef struct PROTO_PACKED {
     uint32_t rx_discarded_bytes;        /* bytes dropped during resync (v5) */
 } MasterStatus;   /* 33 bytes */
 
+/* SPI version gate (v9.1), 5 bytes, appended to BOTH SPI frame directions
+ * between the payload and the CRC. Each side stamps its own build; the
+ * receiver refuses a mismatched frame's payload (master: slave excluded from
+ * alive/forwarding/enables, reported via tele_chain_t.link = MISMATCH and
+ * MasterStatus.slave_proto_mismatch; slave: command ignored, counted in
+ * cmd_crc_errors). Polling continues, so a reflashed board is re-accepted
+ * without a reset on either side. */
+typedef struct PROTO_PACKED {
+    uint8_t proto_version;              /* sender's PROTO_VERSION */
+    uint32_t schema_hash;               /* sender's PROTO_SCHEMA_HASH */
+} spi_trailer_t;   /* 5 bytes */
+
 /* per-slave status (20 Hz), 18 bytes */
 typedef struct PROTO_PACKED {
     uint8_t slave_id;                   /* which slave this status is for */
@@ -288,17 +305,21 @@ typedef struct PROTO_PACKED {
 /* Largest framed payload; a header claiming more than this is junk. The host
  * side keeps its own hand-written resync bound (≥ this). */
 #define PROTO_MAX_PAYLOAD ((uint16_t)496u)   /* sizeof(tele_robot_t) */
+/* spi_trailer_t offset in a master→slave SPI command frame */
+#define SPI_CMD_TRAILER_OFF ((uint16_t)68u)   /* SPI_CMD_HDR_BYTES + sizeof(cmd_chain_t) */
 /* CRC16 offset in a master→slave SPI command frame */
-#define SPI_CMD_CRC_OFF ((uint16_t)68u)   /* SPI_CMD_HDR_BYTES + sizeof(cmd_chain_t) */
+#define SPI_CMD_CRC_OFF ((uint16_t)73u)   /* SPI_CMD_HDR_BYTES + sizeof(cmd_chain_t) + sizeof(spi_trailer_t) */
 /* master → slave: [opcode u8][spi_seq u8][cycle_id u16][cmd_seq
- * u16][cmd_chain_t][crc16] */
-#define SPI_CMD_FRAME_SIZE ((uint16_t)70u)   /* SPI_CMD_HDR_BYTES + sizeof(cmd_chain_t) + SPI_CRC_BYTES */
+ * u16][cmd_chain_t][spi_trailer_t][crc16] */
+#define SPI_CMD_FRAME_SIZE ((uint16_t)75u)   /* SPI_CMD_HDR_BYTES + sizeof(cmd_chain_t) + sizeof(spi_trailer_t) + SPI_CRC_BYTES */
+/* spi_trailer_t offset in a slave→master SPI telemetry frame */
+#define SPI_TELE_TRAILER_OFF ((uint16_t)119u)   /* sizeof(tele_chain_t) */
 /* CRC16 offset in a slave→master SPI telemetry frame */
-#define SPI_TELE_CRC_OFF ((uint16_t)119u)   /* sizeof(tele_chain_t) */
-/* slave → master: [tele_chain_t][crc16] */
-#define SPI_TELE_FRAME_SIZE ((uint16_t)121u)   /* sizeof(tele_chain_t) + SPI_CRC_BYTES */
+#define SPI_TELE_CRC_OFF ((uint16_t)124u)   /* sizeof(tele_chain_t) + sizeof(spi_trailer_t) */
+/* slave → master: [tele_chain_t][spi_trailer_t][crc16] */
+#define SPI_TELE_FRAME_SIZE ((uint16_t)126u)   /* sizeof(tele_chain_t) + sizeof(spi_trailer_t) + SPI_CRC_BYTES */
 /* full-duplex SPI transfer length = the larger of the two frames */
-#define SPI_XFER_SIZE 121u   /* max(SPI_CMD_FRAME_SIZE, SPI_TELE_FRAME_SIZE) */
+#define SPI_XFER_SIZE 126u   /* max(SPI_CMD_FRAME_SIZE, SPI_TELE_FRAME_SIZE) */
 /* largest full USB frame (header + largest payload); must fit one TX slot */
 #define USB_MAX_FRAME_SIZE 512u   /* sizeof(MsgHeader) + sizeof(tele_robot_t) */
 
@@ -380,6 +401,9 @@ _Static_assert(offsetof(MasterStatus, slave_tick_hz) == 21u, "MasterStatus.slave
 _Static_assert(offsetof(MasterStatus, host_cmd_hz) == 23u, "MasterStatus.host_cmd_hz offset");
 _Static_assert(offsetof(MasterStatus, rx_resyncs) == 25u, "MasterStatus.rx_resyncs offset");
 _Static_assert(offsetof(MasterStatus, rx_discarded_bytes) == 29u, "MasterStatus.rx_discarded_bytes offset");
+_Static_assert(sizeof(spi_trailer_t) == 5u, "spi_trailer_t size");
+_Static_assert(offsetof(spi_trailer_t, proto_version) == 0u, "spi_trailer_t.proto_version offset");
+_Static_assert(offsetof(spi_trailer_t, schema_hash) == 1u, "spi_trailer_t.schema_hash offset");
 _Static_assert(sizeof(SlaveStatus) == 18u, "SlaveStatus size");
 _Static_assert(offsetof(SlaveStatus, slave_id) == 0u, "SlaveStatus.slave_id offset");
 _Static_assert(offsetof(SlaveStatus, motors_alive) == 1u, "SlaveStatus.motors_alive offset");
@@ -389,7 +413,7 @@ _Static_assert(offsetof(SlaveStatus, cmd_crc_errors) == 10u, "SlaveStatus.cmd_cr
 _Static_assert(offsetof(SlaveStatus, seq_gaps) == 14u, "SlaveStatus.seq_gaps offset");
 _Static_assert(NODE_SLAVE_1 <= 255u, "NodeId fits u8");
 _Static_assert(MSG_ROBOT_TELE <= 65535u, "MsgType fits u16");
-_Static_assert(ROBOT_HOST_LOST <= 255u, "RobotState fits u8");
+_Static_assert(ROBOT_PROTO_MISMATCH <= 255u, "RobotState fits u8");
 _Static_assert(DRV_REQ_RESET <= 255u, "DriveReq fits u8");
 _Static_assert(DRV_FAULT <= 255u, "DriveState fits u8");
 _Static_assert(CHAIN_LINK_MISMATCH <= 255u, "ChainLink fits u8");
