@@ -58,6 +58,15 @@ ROBOT_DEGRADED  = _G.ROBOT_DEGRADED
 ROBOT_HOST_LOST = _G.ROBOT_HOST_LOST
 ROBOT_STATE_NAMES = _names(_G.ROBOT_STATE_VALUE_NAMES, "ROBOT_")
 
+# ── per-chain SPI link state (tele_chain_t.link, master-authored) ──────────────
+CHAIN_LINK_LOST     = _G.CHAIN_LINK_LOST
+CHAIN_LINK_ALIVE    = _G.CHAIN_LINK_ALIVE
+CHAIN_LINK_MISMATCH = _G.CHAIN_LINK_MISMATCH
+CHAIN_LINK_NAMES = _names(_G.CHAIN_LINK_VALUE_NAMES, "CHAIN_LINK_")
+
+# ── schema hash (wire-contract fingerprint; MasterStatus.schema_hash mirror) ───
+SCHEMA_HASH = _G.SCHEMA_HASH
+
 # ═══ protocol v9 — drive-state × streamed-tuple split (docs/protocol_v9.md) ═══
 
 # ── host→slave drive request (cmd_motor_t.drive_req) ──────────────────────────
@@ -305,10 +314,10 @@ def pack_robot_tele(cycle_id: int, master_time_us: int, last_cmd_seq_rx: int,
                     cmd_seq_active: int, robot_state: int, chains: list, *,
                     cmd_on_time: int = 0, cmd_late: int = 0,
                     cmd_missing: int = 0, cmd_duplicate: int = 0) -> bytes:
-    """Build a full tele_robot_t (488 B). ``chains`` (≤ MAX_CHAINS) is a list of
-    dicts {chain_id, spi_seq_echo, slave_time_us, cmd_crc_errors, can_tx_errors,
-    motors:[raw-field dict ...]}; unused slots zero-filled. The four cmd_* counters
-    are keyword-only (default 0)."""
+    """Build a full tele_robot_t (496 B). ``chains`` (≤ MAX_CHAINS) is a list of
+    dicts {chain_id, link, spi_seq_echo, slave_time_us, cmd_crc_errors,
+    can_tx_errors, motors:[raw-field dict ...]}; unused slots zero-filled. The
+    four cmd_* counters are keyword-only (default 0)."""
     out = bytearray()
     n_chains = len(chains)
     out += struct.pack(FMT_TELE_ROBOT_HDR, cycle_id & 0xFFFF,
@@ -321,7 +330,9 @@ def pack_robot_tele(cycle_id: int, master_time_us: int, last_cmd_seq_rx: int,
             ch = chains[ci]
             motors = ch["motors"]
             out += struct.pack(FMT_TELE_CHAIN_HDR, ch["chain_id"] & 0xFF,
-                               len(motors) & 0xFF, ch.get("spi_seq_echo", 0) & 0xFF,
+                               len(motors) & 0xFF,
+                               ch.get("link", CHAIN_LINK_ALIVE) & 0xFF,
+                               ch.get("spi_seq_echo", 0) & 0xFF,
                                ch.get("spi_resyncs", 0) & 0xFF,
                                ch.get("slave_time_us", 0) & 0xFFFFFFFF,
                                ch.get("cmd_crc_errors", 0) & 0xFFFF,
@@ -357,12 +368,12 @@ def parse_robot_tele(p: bytes) -> dict:
         if ci >= n_chains:
             break
         base = base0 + ci * SZ_TELE_CHAIN
-        chain_id, n_motors, spi_seq_echo, spi_resyncs, slave_us, cmd_crc, can_tx, \
-            spi_tx_arm_fails = struct.unpack_from(FMT_TELE_CHAIN_HDR, p, base)
+        chain_id, n_motors, link, spi_seq_echo, spi_resyncs, slave_us, cmd_crc, \
+            can_tx, spi_tx_arm_fails = struct.unpack_from(FMT_TELE_CHAIN_HDR, p, base)
         mbase = base + struct.calcsize(FMT_TELE_CHAIN_HDR)
         motors = [TeleMotor.unpack(p, mbase + mi * SZ_TELE_MOTOR)
                   for mi in range(min(n_motors, MAX_MOTORS_PER_CHAIN))]
-        chains.append(dict(chain_id=chain_id, n_motors=n_motors,
+        chains.append(dict(chain_id=chain_id, n_motors=n_motors, link=link,
                            spi_seq_echo=spi_seq_echo, spi_resyncs=spi_resyncs,
                            slave_time_us=slave_us,
                            cmd_crc_errors=cmd_crc, can_tx_errors=can_tx,
@@ -484,9 +495,10 @@ def decode_frame(buf: bytearray, on_reject=None, on_frame=None):
 def parse_master_status(p: bytes) -> dict:
     if len(p) < struct.calcsize(FMT_MASTER_STATUS):
         return {}
-    rs, sa, up, le, rf, poll_hz, tele_hz, tick_hz, host_hz, resyncs, discarded = \
-        struct.unpack_from(FMT_MASTER_STATUS, p)
-    return dict(robot_state=rs, slave_alive=sa, uptime_ms=up, link_errors=le,
+    (schema_hash, mismatch, up, le, rf, poll_hz, tele_hz, tick_hz, host_hz,
+     resyncs, discarded) = struct.unpack_from(FMT_MASTER_STATUS, p)
+    return dict(schema_hash=schema_hash, slave_proto_mismatch=mismatch,
+                uptime_ms=up, link_errors=le,
                 rx_frames=rf, master_poll_hz=poll_hz, telemetry_hz=tele_hz,
                 slave_tick_hz=tick_hz, host_cmd_hz=host_hz,
                 rx_resyncs=resyncs, rx_discarded_bytes=discarded)

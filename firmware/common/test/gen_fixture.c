@@ -54,6 +54,7 @@ int main(void)
     t.robot_state      = ROBOT_READY;
     t.chains[0].chain_id       = 0u;
     t.chains[0].n_motors       = 1u;
+    t.chains[0].link           = CHAIN_LINK_ALIVE;
     t.chains[0].spi_seq_echo   = 0x2Au;
     t.chains[0].slave_time_us  = 7777u;
     t.chains[0].cmd_crc_errors = 3u;

@@ -135,7 +135,9 @@ static void test_golden(void)
 
     uint8_t frame[SPI_TELE_FRAME_SIZE];
     spi_proto_build_tele(frame, &t);
-    CHECK(frame[0] == 0x03u && frame[1] == 0x01u && frame[2] == 0x2Au, "golden header bytes");
+    /* byte 2 is tele_chain_t.link (master-authored; the slave sends 0). */
+    CHECK(frame[0] == 0x03u && frame[1] == 0x01u && frame[2] == 0x00u &&
+          frame[3] == 0x2Au, "golden header bytes");
     uint16_t crc = proto_crc16(frame, SPI_TELE_CRC_OFF);
     CHECK(frame[SPI_TELE_CRC_OFF] == (uint8_t)(crc & 0xFFu) &&
           frame[SPI_TELE_CRC_OFF + 1] == (uint8_t)(crc >> 8), "golden CRC");

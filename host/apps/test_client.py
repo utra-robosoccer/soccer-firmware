@@ -154,10 +154,9 @@ def print_frame(msg_type: int, seq: int, payload: bytes) -> None:
 
     if msg_type == MSG_MASTER_STATUS:
         d = parse_master_status(payload)
-        rs = ROBOT_STATE_NAMES.get(d.get("robot_state", 0), "?")
         print(f"[{_t()}] {label:<16} "
-              f"robot_state={rs:<9} "
-              f"slave_alive=0b{d.get('slave_alive', 0):b} "
+              f"schema=0x{d.get('schema_hash', 0):08X} "
+              f"proto_mismatch=0b{d.get('slave_proto_mismatch', 0):b} "
               f"link_errs={d.get('link_errors', 0)}")
 
     elif msg_type == MSG_SLAVE_STATUS:

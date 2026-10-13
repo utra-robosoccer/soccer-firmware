@@ -803,7 +803,7 @@ FIXTURES = {
         "cmd_seq_active": 41, "cmd_on_time": 1000, "cmd_late": 7,
         "cmd_missing": 3, "cmd_duplicate": 2, "n_chains": 1, "robot_state": 1,
         "chains": [{
-            "chain_id": 0, "n_motors": 1, "spi_seq_echo": 0x2A,
+            "chain_id": 0, "n_motors": 1, "link": 1, "spi_seq_echo": 0x2A,
             "slave_time_us": 7777, "cmd_crc_errors": 3, "can_tx_errors": 1,
             "spi_tx_arm_fails": 4,
             "motors": [{"pos": 5000, "vel": -125, "tau": 30, "temp_c": 42,

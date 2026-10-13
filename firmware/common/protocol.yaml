@@ -139,6 +139,21 @@ enums:
       - {name: DRV_FAULT,       value: 8,
          doc: "latched — see drive_fault; only RESET leaves"}
 
+  - name: ChainLink
+    wire_type: u8
+    doc: >
+      Per-chain SPI link state (tele_chain_t.link), authored by the MASTER when
+      it assembles tele_robot_t — the slave leaves the byte 0. Every configured
+      chain is emitted every cycle at its fixed slot (chains[s] = slave s), so
+      the host sees an unreachable or mismatched slave in the same cycle; a
+      chain that is not ALIVE carries n_motors = 0 and no motor data.
+    values:
+      - {name: CHAIN_LINK_LOST,     value: 0,
+         doc: "no CRC-valid SPI telemetry from this slave this cycle"}
+      - {name: CHAIN_LINK_ALIVE,    value: 1}
+      - {name: CHAIN_LINK_MISMATCH, value: 2,
+         doc: "slave responds but its proto_version/schema_hash differ (v9.1 gate)"}
+
   - name: DriveFault
     wire_type: u8
     doc: >
@@ -275,10 +290,12 @@ structs:
       - {name: reserved, type: u16, doc: "growth slot (0)"}
 
   - name: tele_chain_t
-    doc: "one CAN chain's telemetry, 12 + 21·5 = 118 bytes"
+    doc: "one CAN chain's telemetry, 13 + 21·5 = 119 bytes"
     fields:
       - {name: chain_id, type: u8}
       - {name: n_motors, type: u8}
+      - {name: link, type: u8, enum: ChainLink,
+         doc: "master-authored; slave sends 0"}
       - {name: spi_seq_echo, type: u8,
          doc: "SPI link-health seq echoed (NOT cmd_seq)"}
       - {name: spi_resyncs, type: u8,
@@ -293,11 +310,13 @@ structs:
 
   - name: tele_robot_t
     doc: >
-      one telemetry tick, 20 + 118·4 = 492 bytes full-size. The master transmits
-      header + n_chains chains only (chains is truncate_by n_chains), keeping the
-      200 Hz stream small. The four cmd_* counters classify host-loop timing vs
-      the master cycle at the cycle-start mailbox swap (docs/architecture.md);
-      free-running, the host reports deltas.
+      one telemetry tick, 20 + 119·4 = 496 bytes full-size. The master transmits
+      header + n_chains chains (chains is truncate_by n_chains), where n_chains
+      is the CONFIGURED slave count — every configured chain is emitted every
+      cycle at its fixed slot (chains[s] = slave s; see ChainLink), so chain
+      position is stable whether or not a slave is reachable. The four cmd_*
+      counters classify host-loop timing vs the master cycle at the cycle-start
+      mailbox swap (docs/architecture.md); free-running, the host reports deltas.
     fields:
       - {name: cycle_id, type: u16,
          doc: "this telemetry's master cycle (increments/cycle)"}
@@ -320,10 +339,17 @@ structs:
          truncate_by: n_chains}
 
   - name: MasterStatus
-    doc: master status (20 Hz), 30 bytes
+    doc: >
+      master status (20 Hz), 33 bytes. robot_state and slave reachability are
+      NOT here: robot_state rides tele_robot_t (emitted unconditionally every
+      cycle) and per-slave link state is tele_chain_t.link, so the host sees
+      both in the same cycle it reads motors.
     fields:
-      - {name: robot_state, type: u8, enum: RobotState}
-      - {name: slave_alive, type: u8, doc: "bit s = slave s reachable"}
+      - {name: schema_hash, type: u32,
+         doc: "the firmware's PROTO_SCHEMA_HASH; the host link compares it
+               against its own on connect and refuses to run on a mismatch"}
+      - {name: slave_proto_mismatch, type: u8,
+         doc: "bit s = slave s responds but fails the SPI version gate (v9.1)"}
       - {name: uptime_ms, type: u32}
       - {name: link_errors, type: u32, doc: "bad CRC or unknown msg_type"}
       - {name: rx_frames, type: u32}

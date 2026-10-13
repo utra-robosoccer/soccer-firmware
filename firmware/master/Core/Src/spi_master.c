@@ -207,12 +207,12 @@ static uint8_t any_motor_armed(void)
 
 static void emit_master_status(uint32_t now_ms)
 {
-    uint8_t alive_mask = 0u;
-    RobotState rs = compute_robot_state(&alive_mask);
-
+    /* robot_state and per-slave reachability are NOT here (they ride
+       tele_robot_t / tele_chain_t.link every cycle); status carries the
+       build fingerprint and the slow link counters. */
     MasterStatus pay = {0};
-    pay.robot_state    = (uint8_t)rs;
-    pay.slave_alive    = alive_mask;             /* bit s = slave s reachable */
+    pay.schema_hash          = PROTO_SCHEMA_HASH;
+    pay.slave_proto_mismatch = 0u;   /* populated by the SPI version gate (v9.1 5b) */
     pay.uptime_ms      = now_ms;
     pay.link_errors    = master_link_errors;
     pay.rx_frames      = master_rx_frames;
@@ -274,16 +274,23 @@ static void emit_robot_tele(uint32_t master_time_us)
     pay.robot_state      = (g_host_action != HOST_LINK_OK)
                            ? (uint8_t)ROBOT_HOST_LOST : (uint8_t)compute_robot_state(NULL);
 
-    uint8_t nc = 0u;
-    for (uint8_t s = 0; s < NUM_SLAVES; s++) {
-        if (slave_alive[s] && nc < MAX_CHAINS) {
-            memcpy(&pay.chains[nc], &latest_tele[s], sizeof(tele_chain_t));
-            pay.chains[nc].chain_id = s;   /* stamp the slave index — the slave hardcodes 0,
-                                              so multi-slave telemetry would otherwise collide */
-            nc++;
+    /* Every CONFIGURED chain is emitted every cycle at its fixed slot
+       (chains[s] = slave s), so chain position is stable whether or not the
+       slave is reachable — the host never remaps by set-bit order. The master
+       authors the per-chain link byte; an un-alive chain carries n_motors = 0
+       and no (stale) motor data. */
+    for (uint8_t s = 0; s < NUM_SLAVES && s < MAX_CHAINS; s++) {
+        if (slave_alive[s]) {
+            memcpy(&pay.chains[s], &latest_tele[s], sizeof(tele_chain_t));
+            pay.chains[s].link = CHAIN_LINK_ALIVE;
+        } else {
+            pay.chains[s].n_motors = 0u;
+            pay.chains[s].link     = CHAIN_LINK_LOST;
         }
+        pay.chains[s].chain_id = s;    /* stamp the slave index — the slave hardcodes 0,
+                                          so multi-slave telemetry would otherwise collide */
     }
-    pay.n_chains = nc;
+    pay.n_chains = (NUM_SLAVES < MAX_CHAINS) ? NUM_SLAVES : MAX_CHAINS;
 
     /* Transmit only the POPULATED prefix (header fields + nc chains), not the full
        fixed-size struct. The struct stays MAX_CHAINS-sized in memory, but sending a
@@ -291,7 +298,7 @@ static void emit_robot_tele(uint32_t master_time_us)
        and builds a ~110 ms receive backlog; the prefix is ~129 B for one chain. The
        host parses by n_chains, so a truncated payload decodes identically. */
     uint16_t pay_len = (uint16_t)(offsetof(tele_robot_t, chains) +
-                                  (uint16_t)nc * sizeof(tele_chain_t));
+                                  (uint16_t)pay.n_chains * sizeof(tele_chain_t));
     uint8_t frame[MSG_HEADER_SIZE + sizeof(tele_robot_t)];
     uint16_t n = proto_build(frame, sizeof(frame),
                               MSG_ROBOT_TELE, tx_seq++,

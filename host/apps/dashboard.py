@@ -303,8 +303,8 @@ def _ingest(mt: int, pl: bytes, ts_ms: int = 0) -> None:
                 _link["rx"]            = d["rx_frames"]
                 _link["err"]           = d["link_errors"]
                 _link["uptime_ms"]     = d["uptime_ms"]
-                _master["robot_state"] = d["robot_state"]
-                _master["slave_alive"] = d["slave_alive"]
+                # v9.1: robot_state rides tele_robot_t and per-slave link state is
+                # tele_chain_t.link; MasterStatus no longer carries either.
 
     elif mt == tc.MSG_SLAVE_STATUS:
         d = tc.parse_slave_status(pl)

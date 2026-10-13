@@ -3,7 +3,7 @@
 Source:      firmware/common/protocol.yaml
 Regenerate:  python3 scripts/gen_protocol.py
 
-SCHEMA_HASH 0xBC39C97D: CRC-32 of the schema's canonical wire projection
+SCHEMA_HASH 0x86C73223: CRC-32 of the schema's canonical wire projection
 (parsed YAML minus doc/unit/hex keys, compact sorted-key JSON, UTF-8) — see
 gen_protocol.py. Doc-only edits do not change it.
 
@@ -15,7 +15,7 @@ API and re-exports from here; consumers should not import this directly."""
 import struct as _struct
 
 PROTO_VERSION = 9
-SCHEMA_HASH = 0xBC39C97D
+SCHEMA_HASH = 0x86C73223
 
 # ── wire constants ──
 CMD_SEQ_NONE = 0
@@ -70,6 +70,12 @@ DRV_CLEARING = 7
 DRV_FAULT = 8
 DRIVE_STATE_VALUE_NAMES = {0: "DRV_BOOT", 1: "DRV_DISCOVERING", 2: "DRV_ABSENT", 3: "DRV_DISABLED", 4: "DRV_ENABLING", 5: "DRV_ENABLED", 6: "DRV_STOPPING", 7: "DRV_CLEARING", 8: "DRV_FAULT"}
 
+# ── ChainLink (u8 on the wire) ──
+CHAIN_LINK_LOST = 0
+CHAIN_LINK_ALIVE = 1
+CHAIN_LINK_MISMATCH = 2
+CHAIN_LINK_VALUE_NAMES = {0: "CHAIN_LINK_LOST", 1: "CHAIN_LINK_ALIVE", 2: "CHAIN_LINK_MISMATCH"}
+
 # ── DriveFault (u8 on the wire) ──
 DRVF_NONE = 0
 DRVF_CAN_TIMEOUT = 1
@@ -120,28 +126,28 @@ OFF_CMD_ROBOT = {"cycle_id": 0, "cmd_seq": 2, "n_chains": 4, "reserved": 5, "cha
 FMT_TELE_MOTOR = "<hhhBBBBBBBIHH"
 SZ_TELE_MOTOR = 21
 OFF_TELE_MOTOR = {"pos": 0, "vel": 2, "tau": 4, "temp_c": 6, "drive_state": 7, "drive_fault": 8, "rs_mode": 9, "rs_fault_bits": 10, "flags": 11, "fb_age_ms": 12, "rs_fault_word": 13, "last_applied_seq": 17, "reserved": 19}
-FMT_TELE_CHAIN_PREFIX = "<BBBBIHHB"
-SZ_TELE_CHAIN = 118
-OFF_TELE_CHAIN = {"chain_id": 0, "n_motors": 1, "spi_seq_echo": 2, "spi_resyncs": 3, "slave_time_us": 4, "cmd_crc_errors": 8, "can_tx_errors": 10, "spi_tx_arm_fails": 12, "motors": 13}
+FMT_TELE_CHAIN_PREFIX = "<BBBBBIHHB"
+SZ_TELE_CHAIN = 119
+OFF_TELE_CHAIN = {"chain_id": 0, "n_motors": 1, "link": 2, "spi_seq_echo": 3, "spi_resyncs": 4, "slave_time_us": 5, "cmd_crc_errors": 9, "can_tx_errors": 11, "spi_tx_arm_fails": 13, "motors": 14}
 FMT_TELE_ROBOT_PREFIX = "<HIHHHHHHBB"
-SZ_TELE_ROBOT = 492
+SZ_TELE_ROBOT = 496
 OFF_TELE_ROBOT = {"cycle_id": 0, "master_time_us": 2, "last_cmd_seq_rx": 6, "cmd_seq_active": 8, "cmd_on_time": 10, "cmd_late": 12, "cmd_missing": 14, "cmd_duplicate": 16, "n_chains": 18, "robot_state": 19, "chains": 20}
-FMT_MASTER_STATUS = "<BBIIIHHHHII"
-SZ_MASTER_STATUS = 30
-OFF_MASTER_STATUS = {"robot_state": 0, "slave_alive": 1, "uptime_ms": 2, "link_errors": 6, "rx_frames": 10, "master_poll_hz": 14, "telemetry_hz": 16, "slave_tick_hz": 18, "host_cmd_hz": 20, "rx_resyncs": 22, "rx_discarded_bytes": 26}
+FMT_MASTER_STATUS = "<IBIIIHHHHII"
+SZ_MASTER_STATUS = 33
+OFF_MASTER_STATUS = {"schema_hash": 0, "slave_proto_mismatch": 4, "uptime_ms": 5, "link_errors": 9, "rx_frames": 13, "master_poll_hz": 17, "telemetry_hz": 19, "slave_tick_hz": 21, "host_cmd_hz": 23, "rx_resyncs": 25, "rx_discarded_bytes": 29}
 FMT_SLAVE_STATUS = "<BBIIII"
 SZ_SLAVE_STATUS = 18
 OFF_SLAVE_STATUS = {"slave_id": 0, "motors_alive": 1, "uptime_ms": 2, "crc_errors": 6, "cmd_crc_errors": 10, "seq_gaps": 14}
 
 # ── derived wire constants ──
 MSG_HEADER_SIZE = 16   # sizeof(MsgHeader)
-PROTO_MAX_PAYLOAD = 492   # sizeof(tele_robot_t)
+PROTO_MAX_PAYLOAD = 496   # sizeof(tele_robot_t)
 SPI_CMD_CRC_OFF = 68   # SPI_CMD_HDR_BYTES + sizeof(cmd_chain_t)
 SPI_CMD_FRAME_SIZE = 70   # SPI_CMD_HDR_BYTES + sizeof(cmd_chain_t) + SPI_CRC_BYTES
-SPI_TELE_CRC_OFF = 118   # sizeof(tele_chain_t)
-SPI_TELE_FRAME_SIZE = 120   # sizeof(tele_chain_t) + SPI_CRC_BYTES
-SPI_XFER_SIZE = 120   # max(SPI_CMD_FRAME_SIZE, SPI_TELE_FRAME_SIZE)
-USB_MAX_FRAME_SIZE = 508   # sizeof(MsgHeader) + sizeof(tele_robot_t)
+SPI_TELE_CRC_OFF = 119   # sizeof(tele_chain_t)
+SPI_TELE_FRAME_SIZE = 121   # sizeof(tele_chain_t) + SPI_CRC_BYTES
+SPI_XFER_SIZE = 121   # max(SPI_CMD_FRAME_SIZE, SPI_TELE_FRAME_SIZE)
+USB_MAX_FRAME_SIZE = 512   # sizeof(MsgHeader) + sizeof(tele_robot_t)
 
 # ── generic pack/unpack (field tables + recursive helpers) ──
 # STRUCTS[name] = [(field, 'scalar', fmt) | (field, 'array', struct, n)]
@@ -151,9 +157,9 @@ STRUCTS = {
     "cmd_chain_t": [('chain_id', 'scalar', 'B'), ('n_motors', 'scalar', 'B'), ('motors', 'array', 'cmd_motor_t', 5)],
     "cmd_robot_t": [('cycle_id', 'scalar', 'H'), ('cmd_seq', 'scalar', 'H'), ('n_chains', 'scalar', 'B'), ('reserved', 'scalar', 'B'), ('chains', 'array', 'cmd_chain_t', 4)],
     "tele_motor_t": [('pos', 'scalar', 'h'), ('vel', 'scalar', 'h'), ('tau', 'scalar', 'h'), ('temp_c', 'scalar', 'B'), ('drive_state', 'scalar', 'B'), ('drive_fault', 'scalar', 'B'), ('rs_mode', 'scalar', 'B'), ('rs_fault_bits', 'scalar', 'B'), ('flags', 'scalar', 'B'), ('fb_age_ms', 'scalar', 'B'), ('rs_fault_word', 'scalar', 'I'), ('last_applied_seq', 'scalar', 'H'), ('reserved', 'scalar', 'H')],
-    "tele_chain_t": [('chain_id', 'scalar', 'B'), ('n_motors', 'scalar', 'B'), ('spi_seq_echo', 'scalar', 'B'), ('spi_resyncs', 'scalar', 'B'), ('slave_time_us', 'scalar', 'I'), ('cmd_crc_errors', 'scalar', 'H'), ('can_tx_errors', 'scalar', 'H'), ('spi_tx_arm_fails', 'scalar', 'B'), ('motors', 'array', 'tele_motor_t', 5)],
+    "tele_chain_t": [('chain_id', 'scalar', 'B'), ('n_motors', 'scalar', 'B'), ('link', 'scalar', 'B'), ('spi_seq_echo', 'scalar', 'B'), ('spi_resyncs', 'scalar', 'B'), ('slave_time_us', 'scalar', 'I'), ('cmd_crc_errors', 'scalar', 'H'), ('can_tx_errors', 'scalar', 'H'), ('spi_tx_arm_fails', 'scalar', 'B'), ('motors', 'array', 'tele_motor_t', 5)],
     "tele_robot_t": [('cycle_id', 'scalar', 'H'), ('master_time_us', 'scalar', 'I'), ('last_cmd_seq_rx', 'scalar', 'H'), ('cmd_seq_active', 'scalar', 'H'), ('cmd_on_time', 'scalar', 'H'), ('cmd_late', 'scalar', 'H'), ('cmd_missing', 'scalar', 'H'), ('cmd_duplicate', 'scalar', 'H'), ('n_chains', 'scalar', 'B'), ('robot_state', 'scalar', 'B'), ('chains', 'array', 'tele_chain_t', 4)],
-    "MasterStatus": [('robot_state', 'scalar', 'B'), ('slave_alive', 'scalar', 'B'), ('uptime_ms', 'scalar', 'I'), ('link_errors', 'scalar', 'I'), ('rx_frames', 'scalar', 'I'), ('master_poll_hz', 'scalar', 'H'), ('telemetry_hz', 'scalar', 'H'), ('slave_tick_hz', 'scalar', 'H'), ('host_cmd_hz', 'scalar', 'H'), ('rx_resyncs', 'scalar', 'I'), ('rx_discarded_bytes', 'scalar', 'I')],
+    "MasterStatus": [('schema_hash', 'scalar', 'I'), ('slave_proto_mismatch', 'scalar', 'B'), ('uptime_ms', 'scalar', 'I'), ('link_errors', 'scalar', 'I'), ('rx_frames', 'scalar', 'I'), ('master_poll_hz', 'scalar', 'H'), ('telemetry_hz', 'scalar', 'H'), ('slave_tick_hz', 'scalar', 'H'), ('host_cmd_hz', 'scalar', 'H'), ('rx_resyncs', 'scalar', 'I'), ('rx_discarded_bytes', 'scalar', 'I')],
     "SlaveStatus": [('slave_id', 'scalar', 'B'), ('motors_alive', 'scalar', 'B'), ('uptime_ms', 'scalar', 'I'), ('crc_errors', 'scalar', 'I'), ('cmd_crc_errors', 'scalar', 'I'), ('seq_gaps', 'scalar', 'I')],
 }
 

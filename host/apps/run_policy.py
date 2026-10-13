@@ -16,6 +16,7 @@ import time
 
 from master_link import config_meta
 from master_link import motor_config_gen as mc
+from master_link import protocol as P
 from master_link.link import MasterLink, MotorCommand, REQ_DISABLE
 from policies.listen_policy import ListenPolicy
 from policies.man_1s_1m_policy import Man1s1mPolicy
@@ -99,6 +100,13 @@ def main(argv=None):
         link.log_event("error:no_master_status"); link.close()
         sys.exit("no MasterStatus within 0.5 s — cannot verify the master cycle rate "
                  "(is the master firmware up to date?).")
+    live_hash = mstat.get("schema_hash", 0)
+    if live_hash != P.SCHEMA_HASH:
+        link.log_event("error:schema_mismatch"); link.close()
+        sys.exit(f"wire-schema mismatch: host SCHEMA_HASH 0x{P.SCHEMA_HASH:08X}, but the "
+                 f"master reports 0x{live_hash:08X}. Host and firmware were generated from "
+                 f"different protocol.yaml revisions — reflash the boards or update the "
+                 f"host checkout; refusing to run on a mismatched wire contract.")
     live_hz = mstat.get("master_poll_hz", 0)
     if live_hz != mc.MASTER_POLL_HZ:
         link.log_event("error:rate_mismatch"); link.close()

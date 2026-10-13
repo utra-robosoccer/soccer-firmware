@@ -38,7 +38,8 @@ MOTOR_STATE_FIELDS = ["host_ts", "master_ts_ms", "motor", "slave", "local",
                       "saturated"]
 MOTOR_CMD_FIELDS = ["host_ts", "motor", "slave", "local", "drive_req", "drive_req_name",
                     "pos", "vel", "kp", "kd", "tau_ff", "cmd_seq", "cycle_id", "flags"]
-STATUS_FIELDS = ["host_ts", "type", "robot_state", "slave_alive", "uptime_ms",
+STATUS_FIELDS = ["host_ts", "type", "robot_state", "chain_link", "schema_hash",
+                 "slave_proto_mismatch", "uptime_ms",
                  "link_errors", "rx_frames", "master_poll_hz", "telemetry_hz",
                  "slave_tick_hz", "host_cmd_hz", "slave_id", "motors_alive",
                  "crc_errors", "cmd_crc_errors", "seq_gaps",
@@ -105,6 +106,9 @@ def convert(path):
                     continue
                 status_w.writerow({"host_ts": ht, "type": "ROBOT",
                                    "robot_state": d["robot_state"],
+                                   "chain_link": " ".join(
+                                       f"{ch['chain_id']}:{ch['link']}"
+                                       for ch in d["chains"]),
                                    "cycle_id": d["cycle_id"],
                                    "master_time_s": mtu.update(d["master_time_us"]) / 1e6,
                                    "last_cmd_seq_rx": d["last_cmd_seq_rx"],
@@ -137,7 +141,8 @@ def convert(path):
                 d = P.parse_master_status(inner)
                 if d:
                     status_w.writerow({"host_ts": ht, "type": "MASTER", **{
-                        k: d[k] for k in ("robot_state", "slave_alive", "uptime_ms",
+                        k: d[k] for k in ("schema_hash", "slave_proto_mismatch",
+                                          "uptime_ms",
                                           "link_errors", "rx_frames", "master_poll_hz",
                                           "telemetry_hz", "slave_tick_hz", "host_cmd_hz")}})
             elif mt == P.MSG_SLAVE_STATUS:

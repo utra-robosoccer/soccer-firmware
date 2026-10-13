@@ -100,6 +100,8 @@ int main(int argc, char **argv)
             CHECK(t.robot_state ==
                   static_cast<std::uint8_t>(RobotState::ROBOT_READY));
             const tele_chain_t ch = t.chains[0];
+            CHECK(ch.link ==
+                  static_cast<std::uint8_t>(ChainLink::CHAIN_LINK_ALIVE));
             CHECK(ch.spi_seq_echo == 0x2Au);
             CHECK(ch.slave_time_us == 7777u);
             CHECK(ch.cmd_crc_errors == 3u);
@@ -128,7 +130,8 @@ int main(int argc, char **argv)
     CHECK(PROTO_VERSION == 9u);
     CHECK(MSG_HEADER_SIZE == 16u);
     CHECK(PROTO_MAX_PAYLOAD == sizeof(tele_robot_t));
-    CHECK(SPI_XFER_SIZE == 120u);
+    CHECK(SPI_XFER_SIZE == (SPI_CMD_FRAME_SIZE > SPI_TELE_FRAME_SIZE
+                            ? SPI_CMD_FRAME_SIZE : SPI_TELE_FRAME_SIZE));
 
     if (failures == 0) {
         std::printf("test_cpp_wire: OK\n");

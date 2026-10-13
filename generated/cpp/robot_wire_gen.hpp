@@ -2,7 +2,7 @@
 // Source:      firmware/common/protocol.yaml
 // Regenerate:  python3 scripts/gen_protocol.py
 //
-// SCHEMA_HASH 0xBC39C97D: CRC-32 of the schema's canonical wire
+// SCHEMA_HASH 0x86C73223: CRC-32 of the schema's canonical wire
 // projection (parsed YAML minus doc/unit/hex keys, compact sorted-key
 // JSON, UTF-8) — see gen_protocol.py. Doc-only edits do not change it.
 //
@@ -23,7 +23,7 @@
 namespace robot_wire {
 
 constexpr std::uint8_t  PROTO_VERSION = 9u;
-constexpr std::uint32_t PROTO_SCHEMA_HASH = 0xBC39C97Du;
+constexpr std::uint32_t PROTO_SCHEMA_HASH = 0x86C73223u;
 
 // ── wire constants ──
 constexpr std::uint16_t CMD_SEQ_NONE = 0u;
@@ -85,6 +85,17 @@ enum class DriveState : std::uint8_t {
     DRV_STOPPING    = 6u,  // ramped stop; requested → DISABLED, fault → FAULT
     DRV_CLEARING    = 7u,  // RESET sent the Type-4 clear; judging the reply
     DRV_FAULT       = 8u,  // latched — see drive_fault; only RESET leaves
+};
+
+// Per-chain SPI link state (tele_chain_t.link), authored by the MASTER when
+// it assembles tele_robot_t — the slave leaves the byte 0. Every configured
+// chain is emitted every cycle at its fixed slot (chains[s] = slave s), so
+// the host sees an unreachable or mismatched slave in the same cycle; a
+// chain that is not ALIVE carries n_motors = 0 and no motor data.
+enum class ChainLink : std::uint8_t {
+    CHAIN_LINK_LOST     = 0u,  // no CRC-valid SPI telemetry from this slave this cycle
+    CHAIN_LINK_ALIVE    = 1u,
+    CHAIN_LINK_MISMATCH = 2u,  // slave responds but its proto_version/schema_hash differ (v9.1 gate)
 };
 
 // Why a motor is faulted (tele_motor_t.drive_fault under v9). Latched at
@@ -184,10 +195,11 @@ struct tele_motor_t {
     std::uint16_t reserved;             // growth slot (0)
 };
 
-// one CAN chain's telemetry, 12 + 21·5 = 118 bytes
+// one CAN chain's telemetry, 13 + 21·5 = 119 bytes
 struct tele_chain_t {
     std::uint8_t chain_id;
     std::uint8_t n_motors;
+    std::uint8_t link;                  // ChainLink; master-authored; slave sends 0
     std::uint8_t spi_seq_echo;          // SPI link-health seq echoed (NOT cmd_seq)
     std::uint8_t spi_resyncs;           // slave SPI DMA resync count (wraps; host deltas)
     std::uint32_t slave_time_us;        // slave uptime (µs)
@@ -197,11 +209,14 @@ struct tele_chain_t {
     tele_motor_t motors[MAX_MOTORS_PER_CHAIN];
 };
 
-// one telemetry tick, 20 + 118·4 = 492 bytes full-size. The master transmits
-// header + n_chains chains only (chains is truncate_by n_chains), keeping
-// the 200 Hz stream small. The four cmd_* counters classify host-loop timing
-// vs the master cycle at the cycle-start mailbox swap
-// (docs/architecture.md); free-running, the host reports deltas.
+// one telemetry tick, 20 + 119·4 = 496 bytes full-size. The master transmits
+// header + n_chains chains (chains is truncate_by n_chains), where n_chains
+// is the CONFIGURED slave count — every configured chain is emitted every
+// cycle at its fixed slot (chains[s] = slave s; see ChainLink), so chain
+// position is stable whether or not a slave is reachable. The four cmd_*
+// counters classify host-loop timing vs the master cycle at the cycle-start
+// mailbox swap (docs/architecture.md); free-running, the host reports
+// deltas.
 struct tele_robot_t {
     std::uint16_t cycle_id;             // this telemetry's master cycle (increments/cycle)
     std::uint32_t master_time_us;       // master uptime (µs)
@@ -216,10 +231,13 @@ struct tele_robot_t {
     tele_chain_t chains[MAX_CHAINS];    // transmitted prefix sized by n_chains
 };
 
-// master status (20 Hz), 30 bytes
+// master status (20 Hz), 33 bytes. robot_state and slave reachability are
+// NOT here: robot_state rides tele_robot_t (emitted unconditionally every
+// cycle) and per-slave link state is tele_chain_t.link, so the host sees
+// both in the same cycle it reads motors.
 struct MasterStatus {
-    std::uint8_t robot_state;           // RobotState
-    std::uint8_t slave_alive;           // bit s = slave s reachable
+    std::uint32_t schema_hash;          // the firmware's PROTO_SCHEMA_HASH; the host link compares it against its own on connect and refuses to run on a mismatch
+    std::uint8_t slave_proto_mismatch;  // bit s = slave s responds but fails the SPI version gate (v9.1)
     std::uint32_t uptime_ms;
     std::uint32_t link_errors;          // bad CRC or unknown msg_type
     std::uint32_t rx_frames;
@@ -245,13 +263,13 @@ struct SlaveStatus {
 
 // ── derived wire constants ──
 constexpr std::uint16_t MSG_HEADER_SIZE = 16u;  // sizeof(MsgHeader)
-constexpr std::uint16_t PROTO_MAX_PAYLOAD = 492u;  // sizeof(tele_robot_t)
+constexpr std::uint16_t PROTO_MAX_PAYLOAD = 496u;  // sizeof(tele_robot_t)
 constexpr std::uint16_t SPI_CMD_CRC_OFF = 68u;  // SPI_CMD_HDR_BYTES + sizeof(cmd_chain_t)
 constexpr std::uint16_t SPI_CMD_FRAME_SIZE = 70u;  // SPI_CMD_HDR_BYTES + sizeof(cmd_chain_t) + SPI_CRC_BYTES
-constexpr std::uint16_t SPI_TELE_CRC_OFF = 118u;  // sizeof(tele_chain_t)
-constexpr std::uint16_t SPI_TELE_FRAME_SIZE = 120u;  // sizeof(tele_chain_t) + SPI_CRC_BYTES
-constexpr std::uint16_t SPI_XFER_SIZE = 120u;  // max(SPI_CMD_FRAME_SIZE, SPI_TELE_FRAME_SIZE)
-constexpr std::uint16_t USB_MAX_FRAME_SIZE = 508u;  // sizeof(MsgHeader) + sizeof(tele_robot_t)
+constexpr std::uint16_t SPI_TELE_CRC_OFF = 119u;  // sizeof(tele_chain_t)
+constexpr std::uint16_t SPI_TELE_FRAME_SIZE = 121u;  // sizeof(tele_chain_t) + SPI_CRC_BYTES
+constexpr std::uint16_t SPI_XFER_SIZE = 121u;  // max(SPI_CMD_FRAME_SIZE, SPI_TELE_FRAME_SIZE)
+constexpr std::uint16_t USB_MAX_FRAME_SIZE = 512u;  // sizeof(MsgHeader) + sizeof(tele_robot_t)
 
 // ── layout guards ──
 static_assert(sizeof(MsgHeader) == 16u, "MsgHeader size");
@@ -295,17 +313,18 @@ static_assert(offsetof(tele_motor_t, fb_age_ms) == 12u, "tele_motor_t.fb_age_ms 
 static_assert(offsetof(tele_motor_t, rs_fault_word) == 13u, "tele_motor_t.rs_fault_word offset");
 static_assert(offsetof(tele_motor_t, last_applied_seq) == 17u, "tele_motor_t.last_applied_seq offset");
 static_assert(offsetof(tele_motor_t, reserved) == 19u, "tele_motor_t.reserved offset");
-static_assert(sizeof(tele_chain_t) == 118u, "tele_chain_t size");
+static_assert(sizeof(tele_chain_t) == 119u, "tele_chain_t size");
 static_assert(offsetof(tele_chain_t, chain_id) == 0u, "tele_chain_t.chain_id offset");
 static_assert(offsetof(tele_chain_t, n_motors) == 1u, "tele_chain_t.n_motors offset");
-static_assert(offsetof(tele_chain_t, spi_seq_echo) == 2u, "tele_chain_t.spi_seq_echo offset");
-static_assert(offsetof(tele_chain_t, spi_resyncs) == 3u, "tele_chain_t.spi_resyncs offset");
-static_assert(offsetof(tele_chain_t, slave_time_us) == 4u, "tele_chain_t.slave_time_us offset");
-static_assert(offsetof(tele_chain_t, cmd_crc_errors) == 8u, "tele_chain_t.cmd_crc_errors offset");
-static_assert(offsetof(tele_chain_t, can_tx_errors) == 10u, "tele_chain_t.can_tx_errors offset");
-static_assert(offsetof(tele_chain_t, spi_tx_arm_fails) == 12u, "tele_chain_t.spi_tx_arm_fails offset");
-static_assert(offsetof(tele_chain_t, motors) == 13u, "tele_chain_t.motors offset");
-static_assert(sizeof(tele_robot_t) == 492u, "tele_robot_t size");
+static_assert(offsetof(tele_chain_t, link) == 2u, "tele_chain_t.link offset");
+static_assert(offsetof(tele_chain_t, spi_seq_echo) == 3u, "tele_chain_t.spi_seq_echo offset");
+static_assert(offsetof(tele_chain_t, spi_resyncs) == 4u, "tele_chain_t.spi_resyncs offset");
+static_assert(offsetof(tele_chain_t, slave_time_us) == 5u, "tele_chain_t.slave_time_us offset");
+static_assert(offsetof(tele_chain_t, cmd_crc_errors) == 9u, "tele_chain_t.cmd_crc_errors offset");
+static_assert(offsetof(tele_chain_t, can_tx_errors) == 11u, "tele_chain_t.can_tx_errors offset");
+static_assert(offsetof(tele_chain_t, spi_tx_arm_fails) == 13u, "tele_chain_t.spi_tx_arm_fails offset");
+static_assert(offsetof(tele_chain_t, motors) == 14u, "tele_chain_t.motors offset");
+static_assert(sizeof(tele_robot_t) == 496u, "tele_robot_t size");
 static_assert(offsetof(tele_robot_t, cycle_id) == 0u, "tele_robot_t.cycle_id offset");
 static_assert(offsetof(tele_robot_t, master_time_us) == 2u, "tele_robot_t.master_time_us offset");
 static_assert(offsetof(tele_robot_t, last_cmd_seq_rx) == 6u, "tele_robot_t.last_cmd_seq_rx offset");
@@ -317,18 +336,18 @@ static_assert(offsetof(tele_robot_t, cmd_duplicate) == 16u, "tele_robot_t.cmd_du
 static_assert(offsetof(tele_robot_t, n_chains) == 18u, "tele_robot_t.n_chains offset");
 static_assert(offsetof(tele_robot_t, robot_state) == 19u, "tele_robot_t.robot_state offset");
 static_assert(offsetof(tele_robot_t, chains) == 20u, "tele_robot_t.chains offset");
-static_assert(sizeof(MasterStatus) == 30u, "MasterStatus size");
-static_assert(offsetof(MasterStatus, robot_state) == 0u, "MasterStatus.robot_state offset");
-static_assert(offsetof(MasterStatus, slave_alive) == 1u, "MasterStatus.slave_alive offset");
-static_assert(offsetof(MasterStatus, uptime_ms) == 2u, "MasterStatus.uptime_ms offset");
-static_assert(offsetof(MasterStatus, link_errors) == 6u, "MasterStatus.link_errors offset");
-static_assert(offsetof(MasterStatus, rx_frames) == 10u, "MasterStatus.rx_frames offset");
-static_assert(offsetof(MasterStatus, master_poll_hz) == 14u, "MasterStatus.master_poll_hz offset");
-static_assert(offsetof(MasterStatus, telemetry_hz) == 16u, "MasterStatus.telemetry_hz offset");
-static_assert(offsetof(MasterStatus, slave_tick_hz) == 18u, "MasterStatus.slave_tick_hz offset");
-static_assert(offsetof(MasterStatus, host_cmd_hz) == 20u, "MasterStatus.host_cmd_hz offset");
-static_assert(offsetof(MasterStatus, rx_resyncs) == 22u, "MasterStatus.rx_resyncs offset");
-static_assert(offsetof(MasterStatus, rx_discarded_bytes) == 26u, "MasterStatus.rx_discarded_bytes offset");
+static_assert(sizeof(MasterStatus) == 33u, "MasterStatus size");
+static_assert(offsetof(MasterStatus, schema_hash) == 0u, "MasterStatus.schema_hash offset");
+static_assert(offsetof(MasterStatus, slave_proto_mismatch) == 4u, "MasterStatus.slave_proto_mismatch offset");
+static_assert(offsetof(MasterStatus, uptime_ms) == 5u, "MasterStatus.uptime_ms offset");
+static_assert(offsetof(MasterStatus, link_errors) == 9u, "MasterStatus.link_errors offset");
+static_assert(offsetof(MasterStatus, rx_frames) == 13u, "MasterStatus.rx_frames offset");
+static_assert(offsetof(MasterStatus, master_poll_hz) == 17u, "MasterStatus.master_poll_hz offset");
+static_assert(offsetof(MasterStatus, telemetry_hz) == 19u, "MasterStatus.telemetry_hz offset");
+static_assert(offsetof(MasterStatus, slave_tick_hz) == 21u, "MasterStatus.slave_tick_hz offset");
+static_assert(offsetof(MasterStatus, host_cmd_hz) == 23u, "MasterStatus.host_cmd_hz offset");
+static_assert(offsetof(MasterStatus, rx_resyncs) == 25u, "MasterStatus.rx_resyncs offset");
+static_assert(offsetof(MasterStatus, rx_discarded_bytes) == 29u, "MasterStatus.rx_discarded_bytes offset");
 static_assert(sizeof(SlaveStatus) == 18u, "SlaveStatus size");
 static_assert(offsetof(SlaveStatus, slave_id) == 0u, "SlaveStatus.slave_id offset");
 static_assert(offsetof(SlaveStatus, motors_alive) == 1u, "SlaveStatus.motors_alive offset");

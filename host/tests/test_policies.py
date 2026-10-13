@@ -46,7 +46,8 @@ class _FakeLink:
     frame counter jumps for that frame (1 = contiguous, >1 = coalesced ⇒ skips). Master
     time is cycle_id-derived so step() time is predictable. When frames run out, wait_robot
     returns None (a telemetry stall)."""
-    def __init__(self, frames=(), poll_hz=POLL_HZ, have_master=True):
+    def __init__(self, frames=(), poll_hz=POLL_HZ, have_master=True,
+                 schema_hash=None):
         self.port = "fake"
         self.log_path = os.devnull
         self.stats = dict(rx_frames=0, tx_frames=0, tx_errors=0, discard_records=0,
@@ -54,6 +55,7 @@ class _FakeLink:
         self._frames = list(frames)
         self._poll_hz = poll_hz
         self._have_master = have_master
+        self._schema_hash = schema_hash          # None = report the host's own
         self._i = -1
         self._fno = 0
         self.sent = []          # list of (echo_cycle, [modes])
@@ -63,7 +65,11 @@ class _FakeLink:
         return True, set()
 
     def wait_master_status(self, timeout=1.0):
-        return {"master_poll_hz": self._poll_hz} if self._have_master else None
+        if not self._have_master:
+            return None
+        from master_link import protocol as _P
+        h = self._schema_hash if self._schema_hash is not None else _P.SCHEMA_HASH
+        return {"master_poll_hz": self._poll_hz, "schema_hash": h}
 
     def robot_frame_no(self):
         return self._fno
@@ -108,10 +114,11 @@ class _StepPolicy(Policy):
         return Action(motors=[MotorCommand(0, 0, req=REQ_DISABLE)])
 
 
-def _run(frames, rate, poll_hz=POLL_HZ, have_master=True):
+def _run(frames, rate, poll_hz=POLL_HZ, have_master=True, schema_hash=None):
     """Run the runner against a scripted link; return (link, stdout, exit_code|None)."""
     import run_policy
-    link = _FakeLink(frames, poll_hz=poll_hz, have_master=have_master)
+    link = _FakeLink(frames, poll_hz=poll_hz, have_master=have_master,
+                     schema_hash=schema_hash)
     out = io.StringIO()
     code = None
     with mock.patch.object(run_policy, "MasterLink", lambda *a, **k: link), \
@@ -181,6 +188,13 @@ class RunPolicyRefusals(unittest.TestCase):
         link, out, code = _run([(0, 1)], rate=200, have_master=False)
         self.assertIsInstance(code, str)
         self.assertIn("MasterStatus", code)
+
+    def test_schema_hash_mismatch_refuses(self):
+        link, out, code = _run([(0, 1)], rate=200, schema_hash=0xDEADBEEF)
+        self.assertIsInstance(code, str)
+        self.assertIn("schema", code.lower())
+        self.assertIn("0xDEADBEEF", code)                    # names the live value
+        self.assertEqual(_StepPolicy.steps, [])              # never stepped
 
     def test_stall_exits_clean(self):
         link, out, code = _run([(0, 1), (1, 1)], rate=200)   # then frames run out → stall

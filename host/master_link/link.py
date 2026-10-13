@@ -126,10 +126,11 @@ class MotorSnap:
 @dataclass(frozen=True)
 class LinkState:
     motors: dict            # (slave, local) -> MotorSnap
-    master: dict | None     # robot_state, slave_alive, uptime_ms, link_errors, rx_frames, rates
+    master: dict | None     # schema_hash, slave_proto_mismatch, uptime_ms, link_errors, rates
     slaves: dict            # slave_id -> dict(motors_alive, crc_errors, cmd_crc_errors, seq_gaps)
     robot: dict | None      # tele_robot_t meta: cycle_id, last_cmd_seq_rx, cmd_seq_active,
-                            #   cmd_on_time/late/missing/duplicate, ...
+                            #   cmd_on_time/late/missing/duplicate, robot_state,
+                            #   chain_link {slave: CHAIN_LINK_*}, ...
     stamp_ns: int
 
     def armed_motors(self):
@@ -256,6 +257,8 @@ class MasterLink:
                                    cmd_on_time=d["cmd_on_time"], cmd_late=d["cmd_late"],
                                    cmd_missing=d["cmd_missing"], cmd_duplicate=d["cmd_duplicate"],
                                    n_chains=d["n_chains"], robot_state=d["robot_state"],
+                                   chain_link={ch["chain_id"]: ch["link"]
+                                               for ch in d["chains"]},
                                    recv_ns=recv_ns)
                 self._cycle_id = d["cycle_id"]
                 for ch in d["chains"]:
