@@ -81,9 +81,21 @@ def main(argv=None):
         sys.exit(str(e))
     print(f"port {link.port}  |  logging to {link.log_path}")
 
-    # Don't act on the stale burst that drains at port open: wait until every configured
-    # motor's telemetry is confirmed live before setup()/the first step().
-    ok, missing = link.wait_until_live(timeout=2.0)
+    # Don't act on the stale burst that drains at port open: wait until the telemetry of
+    # every motor this run will COMMAND is confirmed live before setup()/the first step().
+    # A policy's "--motors s.l,..." narrows the wait — a bench policy driving one chain
+    # must not require an unrelated (absent or version-mismatched) slave to be up. With
+    # no subset given, every configured motor must be live.
+    live_keys = None
+    mspec = getattr(args, "motors", None)
+    if mspec and mspec != "all":
+        live_keys = set()
+        for tok in mspec.split(","):
+            tok = tok.strip()
+            if tok:
+                s_str, l_str = tok.split(".")
+                live_keys.add((int(s_str), int(l_str)))
+    ok, missing = link.wait_until_live(keys=live_keys, timeout=2.0)
     if not ok:
         link.log_event("error:no_live_telemetry")
         link.close()
