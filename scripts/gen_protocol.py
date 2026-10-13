@@ -39,6 +39,8 @@ SCHEMA_PATH = os.path.join(REPO_ROOT, "firmware", "common", "protocol.yaml")
 
 OUT_C = os.path.join(REPO_ROOT, "firmware", "common", "include", "protocol_gen.h")
 OUT_PY = os.path.join(REPO_ROOT, "host", "master_link", "_protocol_gen.py")
+OUT_CPP = os.path.join(REPO_ROOT, "generated", "cpp", "robot_wire_gen.hpp")
+OUT_FIXTURES = os.path.join(REPO_ROOT, "generated", "cpp", "fixtures")
 
 # Scalar wire types: name -> (size, C type, python struct-format char)
 WIRE_TYPES = {
@@ -642,12 +644,211 @@ def emit_python(schema, layout, derived, shash):
     return "\n".join(L) + "\n"
 
 
+# ── C++ emitter ──────────────────────────────────────────────────────────────
+
+CPP_TYPES = {"u8": "std::uint8_t", "u16": "std::uint16_t",
+             "u32": "std::uint32_t", "i16": "std::int16_t"}
+
+
+def emit_cpp(schema, layout, derived, shash):
+    L = []
+    o = L.append
+    o("// AUTO-GENERATED — DO NOT EDIT.")
+    o("// Source:      firmware/common/protocol.yaml")
+    o("// Regenerate:  python3 scripts/gen_protocol.py")
+    o("//")
+    o(f"// SCHEMA_HASH 0x{shash:08X}: CRC-32 of the schema's canonical wire")
+    o("// projection (parsed YAML minus doc/unit/hex keys, compact sorted-key")
+    o("// JSON, UTF-8) — see gen_protocol.py. Doc-only edits do not change it.")
+    o("//")
+    o("// Header-only mirror of the soccer wire protocol for C++ consumers")
+    o("// (soccer-software pins this file + generated/cpp/fixtures/). Packed")
+    o("// little-endian structs; encode/decode are whole-struct memcpy, so a")
+    o("// LITTLE-ENDIAN host is assumed (same assumption as the firmware side).")
+    o("// Never take references or pointers to the packed members — use the")
+    o("// to_bytes/from_bytes helpers and whole-field loads/stores.")
+    o("#ifndef ROBOT_WIRE_GEN_HPP")
+    o("#define ROBOT_WIRE_GEN_HPP")
+    o("")
+    o("#include <array>")
+    o("#include <cstddef>   // offsetof for the layout guards")
+    o("#include <cstdint>")
+    o("#include <cstring>")
+    o("")
+    o("namespace robot_wire {")
+    o("")
+    o(f"constexpr std::uint8_t  PROTO_VERSION = {schema['meta']['proto_version']}u;")
+    o(f"constexpr std::uint32_t PROTO_SCHEMA_HASH = 0x{shash:08X}u;")
+    o("")
+    o("// ── wire constants ──")
+    for c in schema["constants"]:
+        ctype = "std::uint32_t" if c["value"] > 0xFFFF else "std::uint16_t"
+        o(f"constexpr {ctype} {c['name']} = "
+          f"{fmt_int_c(c['value'], c.get('hex'))};")
+    o("")
+    for e in schema["enums"]:
+        if e.get("doc"):
+            for l in wrap_comment(e["doc"]):
+                o(f"// {l}")
+        o(f"enum class {e['name']} : {CPP_TYPES[e['wire_type']]} {{")
+        w = max(len(v["name"]) for v in e["values"])
+        for v in e["values"]:
+            doc = f"  // {v['doc']}" if v.get("doc") else ""
+            o(f"    {v['name']:<{w}} = {fmt_int_c(v['value'], v.get('hex'))},{doc}")
+        o("};")
+        o("")
+    for g in schema["flags"]:
+        o(f"// ── {g['doc'] if g.get('doc') else g['name']} ──")
+        for b in g["bits"]:
+            if b.get("reserved"):
+                o(f"// bit {b['bit']} reserved — {b.get('doc', '')}")
+            else:
+                doc = f"  // {b['doc']}" if b.get("doc") else ""
+                o(f"constexpr std::uint8_t {b['name']} = 1u << {b['bit']}u;{doc}")
+        o("")
+    o("// ── fixed-point scales ──")
+    for sc in schema["scales"]:
+        parts = [p for p in (sc.get("unit"), sc.get("doc")) if p]
+        doc = f"  // {'; '.join(parts)}" if parts else ""
+        o(f"constexpr float {sc['name']} = {fmt_float_c(sc['value'])};{doc}")
+    o("")
+    o("#pragma pack(push, 1)")
+    o("")
+    for st in schema["structs"]:
+        if st.get("doc"):
+            for l in wrap_comment(st["doc"]):
+                o(f"// {l}")
+        o(f"struct {st['name']} {{")
+        for fld in st["fields"]:
+            t = fld["type"]
+            ctype = CPP_TYPES[t] if t in CPP_TYPES else t
+            decl = f"{ctype} {fld['name']}"
+            if "count" in fld:
+                decl += f"[{fld['count']}]"
+            ann = [fld.get(k) for k in ("enum", "flags", "scale")]
+            parts = [a for a in ann if a]
+            if fld.get("truncate_by"):
+                parts.append(f"transmitted prefix sized by {fld['truncate_by']}")
+            if fld.get("doc"):
+                parts.append(fld["doc"])
+            doc = f"  // {'; '.join(parts)}" if parts else ""
+            o(f"    {decl + ';':<34}{doc}".rstrip())
+        o("};")
+        o("")
+    o("#pragma pack(pop)")
+    o("")
+    o("// ── derived wire constants ──")
+    for d in schema["derived"]:
+        o(f"constexpr std::uint16_t {d['name']} = {derived[d['name']]}u;"
+          f"  // {d['expr']}")
+    o("")
+    o("// ── layout guards ──")
+    for st in schema["structs"]:
+        lay = layout[st["name"]]
+        o(f"static_assert(sizeof({st['name']}) == {lay['size']}u, "
+          f"\"{st['name']} size\");")
+        for fl in lay["fields"]:
+            o(f"static_assert(offsetof({st['name']}, {fl['name']}) == "
+              f"{fl['offset']}u, \"{st['name']}.{fl['name']} offset\");")
+    o("")
+    o("// ── encode/decode: whole-struct memcpy (no packed-member references) ──")
+    o("template <typename T>")
+    o("inline std::array<std::uint8_t, sizeof(T)> to_bytes(const T& v) {")
+    o("    std::array<std::uint8_t, sizeof(T)> out{};")
+    o("    std::memcpy(out.data(), &v, sizeof(T));")
+    o("    return out;")
+    o("}")
+    o("")
+    o("template <typename T>")
+    o("inline T from_bytes(const std::uint8_t* buf) {")
+    o("    T v{};")
+    o("    std::memcpy(&v, buf, sizeof(T));")
+    o("    return v;")
+    o("}")
+    o("")
+    o("}  // namespace robot_wire")
+    o("")
+    o("#endif  // ROBOT_WIRE_GEN_HPP")
+    return "\n".join(L) + "\n"
+
+
+# ── golden fixtures (byte files the C++ test and soccer-software pin) ─────────
+# RAW wire values mirroring firmware/common/test/gen_fixture.c exactly — the
+# host test byte-compares these files against gen_fixture.c's output.
+
+FIXTURES = {
+    "robot_cmd.bin": ("cmd_robot_t", {
+        "cycle_id": 7, "cmd_seq": 42, "n_chains": 1,
+        "reserved": 0xDE,          # master test sentinel, exercised on purpose
+        "chains": [{
+            "chain_id": 0, "n_motors": 1,
+            "motors": [{"drive_req": 1, "pos": 5000, "vel": -125, "kp": 150,
+                        "kd": 100, "tau_ff": 30, "flags": 1}],
+        }],
+    }),
+    "robot_tele.bin": ("tele_robot_t", {
+        "cycle_id": 9, "master_time_us": 123456, "last_cmd_seq_rx": 42,
+        "cmd_seq_active": 41, "cmd_on_time": 1000, "cmd_late": 7,
+        "cmd_missing": 3, "cmd_duplicate": 2, "n_chains": 1, "robot_state": 1,
+        "chains": [{
+            "chain_id": 0, "n_motors": 1, "spi_seq_echo": 0x2A,
+            "slave_time_us": 7777, "cmd_crc_errors": 3, "can_tx_errors": 1,
+            "spi_tx_arm_fails": 4,
+            "motors": [{"pos": 5000, "vel": -125, "tau": 30, "temp_c": 42,
+                        "drive_state": 5, "drive_fault": 0, "rs_mode": 2,
+                        "rs_fault_bits": 0x0A, "flags": 4, "fb_age_ms": 250,
+                        "rs_fault_word": 0xDEADBEEF,
+                        "last_applied_seq": 0x1234}],
+        }],
+    }),
+}
+
+
+def pack_fixture(schema, struct_name, values):
+    import struct as pystruct
+    consts = {c["name"]: c["value"] for c in schema["constants"]}
+    by_name = {st["name"]: st for st in schema["structs"]}
+
+    def pack(st_name, vals):
+        out = bytearray()
+        for fld in by_name[st_name]["fields"]:
+            t = fld["type"]
+            count = resolve_count(fld, consts)
+            if t in WIRE_TYPES:
+                ch = WIRE_TYPES[t][2]
+                fmt = "<" + ((str(count) + ch) if count else ch)
+                v = vals.get(fld["name"], 0)
+                out += (pystruct.pack(fmt, *v) if isinstance(v, (list, tuple))
+                        else pystruct.pack(fmt, v))
+            else:
+                elems = vals.get(fld["name"], [])
+                for i in range(count or 1):
+                    out += pack(t, elems[i] if i < len(elems) else {})
+        return bytes(out)
+
+    return pack(struct_name, values)
+
+
+def write_fixtures(schema, layout):
+    os.makedirs(OUT_FIXTURES, exist_ok=True)
+    for fname, (st_name, values) in FIXTURES.items():
+        data = pack_fixture(schema, st_name, values)
+        if len(data) != layout[st_name]["size"]:
+            fail(f"fixture {fname}: packed {len(data)} B, expected "
+                 f"{layout[st_name]['size']} B")
+        with open(os.path.join(OUT_FIXTURES, fname), "wb") as f:
+            f.write(data)
+        print(f"gen_protocol: wrote "
+              f"{os.path.relpath(os.path.join(OUT_FIXTURES, fname), REPO_ROOT)} "
+              f"({len(data)} B)")
+
+
 # ── main ─────────────────────────────────────────────────────────────────────
 
 EMITTERS = {
     "c": (emit_c, OUT_C),
     "python": (emit_python, OUT_PY),
-    # "cpp": step 3
+    "cpp": (emit_cpp, OUT_CPP),
 }
 
 
@@ -675,10 +876,13 @@ def main():
             return 1
         emit_fn, out_path = EMITTERS[name]
         text = emit_fn(schema, layout, derived, shash)
+        os.makedirs(os.path.dirname(out_path), exist_ok=True)
         with open(out_path, "w", encoding="utf-8") as f:
             f.write(text)
         print(f"gen_protocol: wrote {os.path.relpath(out_path, REPO_ROOT)} "
               f"(schema 0x{shash:08X})")
+        if name == "cpp":
+            write_fixtures(schema, layout)
     return 0
 
 

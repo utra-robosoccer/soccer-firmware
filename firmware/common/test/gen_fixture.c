@@ -26,6 +26,7 @@ int main(void)
     c.cycle_id = 7u;
     c.cmd_seq  = 42u;
     c.n_chains = 1u;
+    c.reserved = 0xDEu;   /* master test sentinel — pinned in the fixtures on purpose */
     c.chains[0].chain_id = 0u;
     c.chains[0].n_motors = 1u;
     cmd_motor_t *m = &c.chains[0].motors[0];

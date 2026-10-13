@@ -159,7 +159,7 @@ class CrossLanguageFixture(unittest.TestCase):
         chains = [{"chain_id": 0, "motors": [
             {"drive_req": P.DRV_REQ_ENABLE, "pos": 0.5, "vel": -1.25, "kp": 15.0,
              "kd": 1.0, "tau_ff": 0.3, "flags": P.CMD_FLAG_VALID}]}]
-        py_cmd = P.pack_robot_cmd(7, 42, chains)
+        py_cmd = P.pack_robot_cmd(7, 42, chains, reserved=0xDE)
         self.assertEqual(py_cmd, got["ROBOTCMD"], "cmd_robot_t layout drift C↔Python")
 
         pr, _ = P.enc_i16(0.5, P.POS_SCALE)
