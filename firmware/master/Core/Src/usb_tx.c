@@ -14,13 +14,9 @@
    paths now recover any OUT hiccup, and validation watches the resync/error
    counters to confirm whole-frame IN does not starve OUT. */
 #define NUM_SLOTS     16u
-#define TX_SLOT_MAX   512u   /* ≥ largest frame = MSG_HEADER_SIZE + sizeof(tele_robot_t) */
+#define TX_SLOT_MAX   USB_TX_SLOT_MAX  /* schema constant; largest-frame-fits assert
+                                          is generated in protocol_gen.h */
 #define USB_FS_MPS    64u    /* bulk IN max packet size */
-
-/* The largest frame the master ever enqueues is a tele_robot_t (16 B header + 488 B =
-   504 B at PROTO_VERSION 6). If it ever outgrows a slot, raise TX_SLOT_MAX. */
-_Static_assert(MSG_HEADER_SIZE + sizeof(tele_robot_t) <= TX_SLOT_MAX,
-               "tele_robot_t frame must fit one TX slot");
 
 static uint8_t  tx_slot[NUM_SLOTS][TX_SLOT_MAX];
 static uint16_t tx_len[NUM_SLOTS];

@@ -2,7 +2,7 @@
  * Source:      firmware/common/protocol.yaml
  * Regenerate:  python3 scripts/gen_protocol.py
  *
- * SCHEMA_HASH 0xC9A8CFCE: CRC-32 of the schema's canonical wire
+ * SCHEMA_HASH 0xBC39C97D: CRC-32 of the schema's canonical wire
  * projection (parsed YAML minus doc/unit/hex keys, compact sorted-key
  * JSON, UTF-8) — see gen_protocol.py. Doc-only edits do not change it.
  */
@@ -24,7 +24,7 @@
 /* Wire-contract version. Carried in MsgHeader.ver_flags low byte; both
  * ends drop and count any frame whose version != this. */
 #define PROTO_VERSION 9u
-#define PROTO_SCHEMA_HASH 0xC9A8CFCEu
+#define PROTO_SCHEMA_HASH 0xBC39C97Du
 
 /* ── wire constants ─────────────────────────────────────────────────── */
 /* cmd_seq sentinel: "no host command applied yet"
@@ -49,6 +49,10 @@
 #define SPI_CMD_HDR_BYTES 6u
 /* CRC16 trailer on both SPI frame directions. */
 #define SPI_CRC_BYTES 2u
+/* Master USB TX slot size (usb_tx.c slot ring). Every full USB frame (header
+ * + payload) must fit one slot — checked at generation time and by a
+ * generated static assert (USB_MAX_FRAME_SIZE <= USB_TX_SLOT_MAX). */
+#define USB_TX_SLOT_MAX 512u
 
 /* ── NodeId (u8 on the wire) ── */
 /* node identifiers */
@@ -275,6 +279,8 @@ typedef struct PROTO_PACKED {
 #define SPI_TELE_FRAME_SIZE ((uint16_t)120u)   /* sizeof(tele_chain_t) + SPI_CRC_BYTES */
 /* full-duplex SPI transfer length = the larger of the two frames */
 #define SPI_XFER_SIZE 120u   /* max(SPI_CMD_FRAME_SIZE, SPI_TELE_FRAME_SIZE) */
+/* largest full USB frame (header + largest payload); must fit one TX slot */
+#define USB_MAX_FRAME_SIZE 508u   /* sizeof(MsgHeader) + sizeof(tele_robot_t) */
 
 /* ── layout guards (catch C↔schema drift at compile time) ───────────── */
 #if defined(__STDC_VERSION__) && (__STDC_VERSION__ >= 201112L)
@@ -366,6 +372,8 @@ _Static_assert(ROBOT_HOST_LOST <= 255u, "RobotState fits u8");
 _Static_assert(DRV_REQ_RESET <= 255u, "DriveReq fits u8");
 _Static_assert(DRV_FAULT <= 255u, "DriveState fits u8");
 _Static_assert(DRVF_WOUND <= 255u, "DriveFault fits u8");
+/* Every full USB frame must fit one master TX slot (usb_tx.c ring). */
+_Static_assert(USB_MAX_FRAME_SIZE <= USB_TX_SLOT_MAX, "USB frame fits one TX slot");
 #endif
 
 #endif /* PROTOCOL_GEN_H */

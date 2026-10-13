@@ -64,6 +64,12 @@ constants:
   - name: SPI_CRC_BYTES
     value: 2
     doc: CRC16 trailer on both SPI frame directions.
+  - name: USB_TX_SLOT_MAX
+    value: 512
+    doc: >
+      Master USB TX slot size (usb_tx.c slot ring). Every full USB frame
+      (header + payload) must fit one slot — checked at generation time and
+      by a generated static assert (USB_MAX_FRAME_SIZE <= USB_TX_SLOT_MAX).
 
 enums:
   - name: NodeId
@@ -374,3 +380,6 @@ derived:
   - name: SPI_XFER_SIZE
     expr: max(SPI_CMD_FRAME_SIZE, SPI_TELE_FRAME_SIZE)
     doc: full-duplex SPI transfer length = the larger of the two frames
+  - name: USB_MAX_FRAME_SIZE
+    expr: sizeof(MsgHeader) + sizeof(tele_robot_t)
+    doc: largest full USB frame (header + largest payload); must fit one TX slot

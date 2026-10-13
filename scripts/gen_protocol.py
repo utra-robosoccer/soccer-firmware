@@ -323,6 +323,14 @@ def compute_derived(schema, layout):
     out = {}
     for d in schema["derived"]:
         out[d["name"]] = eval_derived(d["expr"], consts, layout, out)
+    # Transport budgets — fail generation, don't wait for the compiler.
+    if "USB_MAX_FRAME_SIZE" in out:
+        if "USB_TX_SLOT_MAX" not in consts:
+            fail("USB_MAX_FRAME_SIZE defined but USB_TX_SLOT_MAX is not")
+        if out["USB_MAX_FRAME_SIZE"] > consts["USB_TX_SLOT_MAX"]:
+            fail(f"largest USB frame ({out['USB_MAX_FRAME_SIZE']} B) exceeds "
+                 f"USB_TX_SLOT_MAX ({consts['USB_TX_SLOT_MAX']} B) — grow the "
+                 f"slot or shrink the frame")
     return out
 
 
@@ -488,6 +496,10 @@ def emit_c(schema, layout, derived, shash):
         bound = (1 << (8 * WIRE_TYPES[e["wire_type"]][0])) - 1
         o(f"_Static_assert({vmax_name} <= {bound}u, "
           f"\"{e['name']} fits {e['wire_type']}\");")
+    if "USB_MAX_FRAME_SIZE" in derived:
+        o("/* Every full USB frame must fit one master TX slot (usb_tx.c ring). */")
+        o("_Static_assert(USB_MAX_FRAME_SIZE <= USB_TX_SLOT_MAX, "
+          "\"USB frame fits one TX slot\");")
     o("#endif")
     o("")
     o("#endif /* PROTOCOL_GEN_H */")
@@ -852,12 +864,46 @@ EMITTERS = {
 }
 
 
+def check_outputs(schema, layout, derived, shash, emit_names):
+    """Regenerate in memory and compare with the committed outputs. Returns the
+    list of stale paths (empty = everything up to date)."""
+    stale = []
+
+    def compare(path, want_bytes):
+        try:
+            with open(path, "rb") as f:
+                have = f.read()
+        except FileNotFoundError:
+            have = None
+        if have != want_bytes:
+            stale.append(os.path.relpath(path, REPO_ROOT))
+
+    for name in emit_names:
+        emit_fn, out_path = EMITTERS[name]
+        compare(out_path, emit_fn(schema, layout, derived, shash).encode("utf-8"))
+        if name == "cpp":
+            for fname, (st_name, values) in FIXTURES.items():
+                compare(os.path.join(OUT_FIXTURES, fname),
+                        pack_fixture(schema, st_name, values))
+    return stale
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--emit", default=",".join(EMITTERS),
                     help=f"comma list of emitters (default: all implemented: "
                          f"{','.join(EMITTERS)})")
+    ap.add_argument("--check", action="store_true",
+                    help="regenerate in memory and exit non-zero if any "
+                         "committed output differs (drift gate; writes nothing)")
     args = ap.parse_args()
+
+    emit_names = [n.strip() for n in args.emit.split(",")]
+    for name in emit_names:
+        if name not in EMITTERS:
+            print(f"gen_protocol: unknown emitter {name!r} "
+                  f"(have: {', '.join(EMITTERS)})", file=sys.stderr)
+            return 1
 
     try:
         schema = load_schema()
@@ -868,12 +914,18 @@ def main():
         print(f"gen_protocol: schema error: {e}", file=sys.stderr)
         return 1
 
-    for name in args.emit.split(","):
-        name = name.strip()
-        if name not in EMITTERS:
-            print(f"gen_protocol: unknown emitter {name!r} "
-                  f"(have: {', '.join(EMITTERS)})", file=sys.stderr)
+    if args.check:
+        stale = check_outputs(schema, layout, derived, shash, emit_names)
+        if stale:
+            print("gen_protocol --check: STALE outputs (re-run "
+                  "scripts/gen_protocol.py and commit):", file=sys.stderr)
+            for p in stale:
+                print(f"  {p}", file=sys.stderr)
             return 1
+        print(f"gen_protocol --check: outputs up to date (schema 0x{shash:08X})")
+        return 0
+
+    for name in emit_names:
         emit_fn, out_path = EMITTERS[name]
         text = emit_fn(schema, layout, derived, shash)
         os.makedirs(os.path.dirname(out_path), exist_ok=True)

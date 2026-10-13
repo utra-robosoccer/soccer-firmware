@@ -2,7 +2,7 @@
 // Source:      firmware/common/protocol.yaml
 // Regenerate:  python3 scripts/gen_protocol.py
 //
-// SCHEMA_HASH 0xC9A8CFCE: CRC-32 of the schema's canonical wire
+// SCHEMA_HASH 0xBC39C97D: CRC-32 of the schema's canonical wire
 // projection (parsed YAML minus doc/unit/hex keys, compact sorted-key
 // JSON, UTF-8) — see gen_protocol.py. Doc-only edits do not change it.
 //
@@ -23,7 +23,7 @@
 namespace robot_wire {
 
 constexpr std::uint8_t  PROTO_VERSION = 9u;
-constexpr std::uint32_t PROTO_SCHEMA_HASH = 0xC9A8CFCEu;
+constexpr std::uint32_t PROTO_SCHEMA_HASH = 0xBC39C97Du;
 
 // ── wire constants ──
 constexpr std::uint16_t CMD_SEQ_NONE = 0u;
@@ -35,6 +35,7 @@ constexpr std::uint16_t SPI_OP_NOP = 0x00u;
 constexpr std::uint16_t SPI_OP_ROBOT_CMD = 0x01u;
 constexpr std::uint16_t SPI_CMD_HDR_BYTES = 6u;
 constexpr std::uint16_t SPI_CRC_BYTES = 2u;
+constexpr std::uint16_t USB_TX_SLOT_MAX = 512u;
 
 // node identifiers
 enum class NodeId : std::uint8_t {
@@ -250,6 +251,7 @@ constexpr std::uint16_t SPI_CMD_FRAME_SIZE = 70u;  // SPI_CMD_HDR_BYTES + sizeof
 constexpr std::uint16_t SPI_TELE_CRC_OFF = 118u;  // sizeof(tele_chain_t)
 constexpr std::uint16_t SPI_TELE_FRAME_SIZE = 120u;  // sizeof(tele_chain_t) + SPI_CRC_BYTES
 constexpr std::uint16_t SPI_XFER_SIZE = 120u;  // max(SPI_CMD_FRAME_SIZE, SPI_TELE_FRAME_SIZE)
+constexpr std::uint16_t USB_MAX_FRAME_SIZE = 508u;  // sizeof(MsgHeader) + sizeof(tele_robot_t)
 
 // ── layout guards ──
 static_assert(sizeof(MsgHeader) == 16u, "MsgHeader size");

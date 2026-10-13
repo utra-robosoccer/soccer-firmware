@@ -3,7 +3,7 @@
 Source:      firmware/common/protocol.yaml
 Regenerate:  python3 scripts/gen_protocol.py
 
-SCHEMA_HASH 0xC9A8CFCE: CRC-32 of the schema's canonical wire projection
+SCHEMA_HASH 0xBC39C97D: CRC-32 of the schema's canonical wire projection
 (parsed YAML minus doc/unit/hex keys, compact sorted-key JSON, UTF-8) — see
 gen_protocol.py. Doc-only edits do not change it.
 
@@ -15,7 +15,7 @@ API and re-exports from here; consumers should not import this directly."""
 import struct as _struct
 
 PROTO_VERSION = 9
-SCHEMA_HASH = 0xC9A8CFCE
+SCHEMA_HASH = 0xBC39C97D
 
 # ── wire constants ──
 CMD_SEQ_NONE = 0
@@ -27,6 +27,7 @@ SPI_OP_NOP = 0x00
 SPI_OP_ROBOT_CMD = 0x01
 SPI_CMD_HDR_BYTES = 6
 SPI_CRC_BYTES = 2
+USB_TX_SLOT_MAX = 512
 
 # ── NodeId (u8 on the wire) ──
 NODE_JETSON = 1
@@ -140,6 +141,7 @@ SPI_CMD_FRAME_SIZE = 70   # SPI_CMD_HDR_BYTES + sizeof(cmd_chain_t) + SPI_CRC_BY
 SPI_TELE_CRC_OFF = 118   # sizeof(tele_chain_t)
 SPI_TELE_FRAME_SIZE = 120   # sizeof(tele_chain_t) + SPI_CRC_BYTES
 SPI_XFER_SIZE = 120   # max(SPI_CMD_FRAME_SIZE, SPI_TELE_FRAME_SIZE)
+USB_MAX_FRAME_SIZE = 508   # sizeof(MsgHeader) + sizeof(tele_robot_t)
 
 # ── generic pack/unpack (field tables + recursive helpers) ──
 # STRUCTS[name] = [(field, 'scalar', fmt) | (field, 'array', struct, n)]
