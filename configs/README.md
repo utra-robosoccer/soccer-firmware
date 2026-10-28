@@ -69,9 +69,19 @@ An explicit path still works and ignores the active switch
 - `firmware/common/include/system_config.h` — master's system view across all
   slaves (`NUM_SLAVES`, per-slave motor counts + CAN-id LUTs, global transport
   bounds).
-- `tools/motor_config_gen.py` — Python constants imported by `test_client.py`
-  (`SLAVES`, `MOTORS`, `MODEL_RANGES`, default gains, soft limits).
+- `host/master_link/motor_config_gen.py` — Python constants imported by the host
+  tools (`SLAVES`, `MOTORS`, `MODEL_RANGES`, default gains, soft limits).
 
-After editing a YAML, regenerate and rebuild the firmware. The firmware build
-does not run Python, so the generated files are committed alongside the source.
-The generated banners record which setup/slave they came from.
+The generated files — and the `configs/active` pointer — are per-bench outputs
+and are NOT committed (gitignored). The committed source of truth is the YAML
+under `configs/<setup>/`. They materialize automatically:
+
+- `scripts/build.sh` regenerates `system_config.h` + `motor_config_gen.py`
+  before every build, and `motor_config.h` via `--config <slaveN>` (a missing
+  header defaults to slave0 so master builds work on a fresh clone).
+- importing `master_link` regenerates a missing `motor_config_gen.py`; the
+  runner's `check_config_fresh()` still warns when it is stale vs
+  `configs/active`.
+
+On a fresh clone, set the bench's setup once: `echo 1s_5m > configs/active`.
+The generated banners record which setup/slave each file came from.
