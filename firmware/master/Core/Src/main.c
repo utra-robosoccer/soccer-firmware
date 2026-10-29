@@ -22,7 +22,7 @@
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
-#include "spi_master.h"
+#include "master_app.h"
 #include "usb_link.h"
 #include "master_cycle.h"
 #include "imu.h"   /* optional BMI088 IMU on I2C1 (merged from the IMU PR) */
@@ -139,7 +139,7 @@ int main(void)
      HAL_Delay) here, BEFORE the TIM2 cycle starts, so it never steals cycle time;
      if the IMU is absent the init fails fast (I2C timeouts) and the master runs on. */
   (void)ImuService_Init(&hi2c1);
-  MotorMaster_Init(&hspi1, &huart4);
+  master_app_init(&hspi1, &huart4);
   HAL_GPIO_WritePin(GREEN_LED_GPIO_Port, GREEN_LED_Pin, GPIO_PIN_SET);
   HAL_Delay(3000);
   HAL_GPIO_WritePin(GREEN_LED_GPIO_Port, GREEN_LED_Pin, GPIO_PIN_RESET);
@@ -159,7 +159,7 @@ int main(void)
 
     /* USER CODE BEGIN 3 */
 
-	MotorMaster_ProcessLoop();
+	master_app_loop();
   }
   /* USER CODE END 3 */
 }
