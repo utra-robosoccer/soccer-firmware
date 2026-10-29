@@ -97,3 +97,75 @@ void usb_tx_pump_responses(void)
 
 uint8_t usb_tx_busy(void) { return 0u; }  /* not used externally */
 void    usb_tx_cplt_cb(void) {}           /* no-op: pump polls TxState */
+
+/* ── USB RX ring: CDC ISR produces, main loop consumes (SPSC, lock-free) ───── */
+#define USB_RX_RING_SIZE 1024u                       /* power of two               */
+#define USB_RX_RING_MASK (USB_RX_RING_SIZE - 1u)
+static volatile uint8_t  usb_rx_ring[USB_RX_RING_SIZE];
+static volatile uint16_t usb_rx_head = 0;            /* written by ISR only        */
+static volatile uint16_t usb_rx_tail = 0;            /* written by main only       */
+
+uint32_t usb_rx_frames      = 0;
+uint32_t usb_rx_scan_errors = 0;
+uint32_t usb_rx_resyncs     = 0;
+uint32_t usb_rx_discarded   = 0;
+uint32_t usb_rx_overflows   = 0;
+
+void usb_rx_from_isr(const uint8_t *buf, uint16_t len)
+{
+    uint16_t head = usb_rx_head;
+    for (uint16_t i = 0; i < len; i++) {
+        uint16_t next = (uint16_t)((head + 1u) & USB_RX_RING_MASK);
+        if (next == usb_rx_tail) { usb_rx_overflows++; break; }  /* full → drop rest */
+        usb_rx_ring[head] = buf[i];
+        head = next;
+    }
+    usb_rx_head = head;
+}
+
+/* Drain the RX ring and hand every complete frame to on_frame (main-loop context).
+   Uses the resynchronizing proto_frame_scan: junk/misaligned bytes are dropped one
+   at a time (counted), so a stray byte or lost packet can't desync us permanently. */
+void usb_rx_process(usb_rx_frame_cb on_frame)
+{
+    static uint8_t  scan[768];     /* ≥ 2 × max frame (16 + 480) for headroom */
+    static uint16_t scan_len = 0;
+    static uint8_t  in_resync = 0;
+
+    /* Drain ring → scan buffer (consumer side; tail is ours). */
+    while (scan_len < sizeof(scan) && usb_rx_tail != usb_rx_head) {
+        scan[scan_len++] = usb_rx_ring[usb_rx_tail];
+        usb_rx_tail = (uint16_t)((usb_rx_tail + 1u) & USB_RX_RING_MASK);
+    }
+
+    uint16_t off = 0;
+    while ((uint16_t)(scan_len - off) >= MSG_HEADER_SIZE) {
+        ProtoScanResult r;
+        ProtoScanStatus st = proto_frame_scan(scan + off, (uint16_t)(scan_len - off), &r);
+
+        if (st == PROTO_SCAN_NEED_MORE) break;         /* plausible header; await body */
+
+        if (st == PROTO_SCAN_RESYNC) {                 /* junk → drop byte(s), count run */
+            if (!in_resync) { usb_rx_resyncs++; in_resync = 1u; }
+            usb_rx_discarded += r.consumed;
+            usb_rx_scan_errors++;
+            off += r.consumed;
+            continue;
+        }
+
+        in_resync = 0u;                                /* PROTO_SCAN_FRAME */
+        usb_rx_frames++;
+        if (on_frame != NULL) on_frame(&r);
+        off += r.consumed;
+    }
+
+    if (off > 0u) {                                    /* slide unconsumed tail down */
+        scan_len = (uint16_t)(scan_len - off);
+        if (scan_len > 0u) memmove(scan, scan + off, scan_len);
+    } else if (scan_len == sizeof(scan)) {             /* defensive: never wedge full */
+        if (!in_resync) { usb_rx_resyncs++; in_resync = 1u; }
+        usb_rx_discarded++;
+        scan_len--;
+        memmove(scan, scan + 1, scan_len);
+    }
+}

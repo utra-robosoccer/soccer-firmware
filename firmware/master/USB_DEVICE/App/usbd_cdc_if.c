@@ -264,9 +264,9 @@ static int8_t CDC_Receive_FS(uint8_t* Buf, uint32_t *Len)
 {
   /* USER CODE BEGIN 6 */
   /* Keep the USB ISR minimal: copy this packet into the RX ring and re-arm the
-     endpoint. The main loop (MotorMaster_ProcessUsbRx) runs the resynchronizing
+     endpoint. The main loop (usb_rx_process) runs the resynchronizing
      proto_frame_scan and dispatches frames — no parsing/CRC/dispatch in ISR. */
-  MotorMaster_UsbRxFromISR(Buf, (uint16_t)(*Len));
+  usb_rx_from_isr(Buf, (uint16_t)(*Len));
 
   USBD_CDC_SetRxBuffer(&hUsbDeviceFS, &Buf[0]);
   USBD_CDC_ReceivePacket(&hUsbDeviceFS);

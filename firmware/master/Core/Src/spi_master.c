@@ -50,38 +50,15 @@ static uint8_t       g_fresh_fault_reset  = 0;   /* a fresh fault-reset command 
 static HostWatchdog  g_host_wd;
 static HostLinkAction g_host_action = HOST_LINK_OK;
 
-/* ── master status counters ──────────────────────────────────────────────── */
+/* ── master status counters (USB transport counters live in usb_link) ─────── */
 uint32_t master_link_errors = 0;
-uint32_t master_rx_frames   = 0;
 uint32_t master_proto_ver_mismatch = 0;
-uint32_t master_rx_resyncs  = 0;   /* USB RX resync events (contiguous discard runs) */
-uint32_t master_rx_discarded = 0;  /* bytes dropped while resyncing                  */
-uint32_t master_rx_overflows = 0;  /* RX ring overruns (producer outran consumer)    */
 #ifdef SPI_INJECT_TEST
 volatile uint8_t g_spi_inject = 0; /* test-only: clock one short SPI exchange to desync the slave */
 #endif
 #ifdef USB_TX_TEST
 static volatile uint8_t g_txtest = 0; /* test-only: armed by a 0xB0 cmd.reserved sentinel */
 #endif
-
-/* ── USB RX ring: CDC ISR produces, main loop consumes (SPSC, lock-free) ───── */
-#define USB_RX_RING_SIZE 1024u                       /* power of two               */
-#define USB_RX_RING_MASK (USB_RX_RING_SIZE - 1u)
-static volatile uint8_t  usb_rx_ring[USB_RX_RING_SIZE];
-static volatile uint16_t usb_rx_head = 0;            /* written by ISR only        */
-static volatile uint16_t usb_rx_tail = 0;            /* written by main only       */
-
-void MotorMaster_UsbRxFromISR(const uint8_t *buf, uint16_t len)
-{
-    uint16_t head = usb_rx_head;
-    for (uint16_t i = 0; i < len; i++) {
-        uint16_t next = (uint16_t)((head + 1u) & USB_RX_RING_MASK);
-        if (next == usb_rx_tail) { master_rx_overflows++; break; }  /* full → drop rest */
-        usb_rx_ring[head] = buf[i];
-        head = next;
-    }
-    usb_rx_head = head;
-}
 
 /* ── per-slave runtime state ─────────────────────────────────────────────── */
 static uint8_t      slave_alive[NUM_SLAVES];
@@ -247,14 +224,14 @@ static void emit_master_status(uint32_t now_ms)
         if (slave_mismatch[s]) pay.slave_proto_mismatch |= (uint8_t)(1u << s);
     }
     pay.uptime_ms      = now_ms;
-    pay.link_errors    = master_link_errors;
-    pay.rx_frames      = master_rx_frames;
+    pay.link_errors    = master_link_errors + usb_rx_scan_errors; /* app + scan rejects */
+    pay.rx_frames      = usb_rx_frames;
     pay.master_poll_hz = MASTER_POLL_HZ;         /* configured rates (motor_config.h) */
     pay.telemetry_hz   = TELEMETRY_HZ;
     pay.slave_tick_hz  = SLAVE_TICK_HZ;
     pay.host_cmd_hz    = HOST_CMD_HZ;
-    pay.rx_resyncs        = master_rx_resyncs;
-    pay.rx_discarded_bytes = master_rx_discarded;
+    pay.rx_resyncs        = usb_rx_resyncs;
+    pay.rx_discarded_bytes = usb_rx_discarded;
 
     uint8_t frame[MSG_HEADER_SIZE + sizeof(MasterStatus)];
     uint16_t n = proto_build(frame, sizeof(frame),
@@ -408,65 +385,25 @@ static void mailbox_swap(void)
     }
 }
 
-/* Drain the USB RX ring and dispatch every complete frame (main-loop context).
-   Uses the resynchronizing proto_frame_scan: junk/misaligned bytes are dropped one
-   at a time (counted), so a stray byte or lost packet can't desync us permanently. */
-void MotorMaster_ProcessUsbRx(void)
+/* Frame dispatch: usb_link's RX scanner delivers complete frames here (main-loop
+   context). WHAT a frame means is decided here, not in the transport. */
+static void on_usb_frame(const ProtoScanResult *r)
 {
-    static uint8_t  scan[768];     /* ≥ 2 × max frame (16 + 480) for headroom */
-    static uint16_t scan_len = 0;
-    static uint8_t  in_resync = 0;
-
-    /* Drain ring → scan buffer (consumer side; tail is ours). */
-    while (scan_len < sizeof(scan) && usb_rx_tail != usb_rx_head) {
-        scan[scan_len++] = usb_rx_ring[usb_rx_tail];
-        usb_rx_tail = (uint16_t)((usb_rx_tail + 1u) & USB_RX_RING_MASK);
-    }
-
-    uint16_t off = 0;
-    while ((uint16_t)(scan_len - off) >= MSG_HEADER_SIZE) {
-        ProtoScanResult r;
-        ProtoScanStatus st = proto_frame_scan(scan + off, (uint16_t)(scan_len - off), &r);
-
-        if (st == PROTO_SCAN_NEED_MORE) break;         /* plausible header; await body */
-
-        if (st == PROTO_SCAN_RESYNC) {                 /* junk → drop byte(s), count run */
-            if (!in_resync) { master_rx_resyncs++; in_resync = 1u; }
-            master_rx_discarded += r.consumed;
+    if (r->type == MSG_ROBOT_CMD) {
+        if (r->pay_len >= sizeof(cmd_robot_t)) {
+            cmd_robot_t cmd;
+            memcpy(&cmd, r->payload, sizeof(cmd));
+            MotorMaster_HandleRobotCmd(&cmd);
+        } else {
             master_link_errors++;
-            off += r.consumed;
-            continue;
         }
-
-        in_resync = 0u;                                /* PROTO_SCAN_FRAME */
-        master_rx_frames++;
-        if (r.type == MSG_ROBOT_CMD) {
-            if (r.pay_len >= sizeof(cmd_robot_t)) {
-                cmd_robot_t cmd;
-                memcpy(&cmd, r.payload, sizeof(cmd));
-                MotorMaster_HandleRobotCmd(&cmd);
-            } else {
-                master_link_errors++;
-            }
-        } else if (r.type == MSG_PING) {
-            MsgHeader h;                               /* echo the request's seq/src */
-            memcpy(&h, r.payload - MSG_HEADER_SIZE, MSG_HEADER_SIZE);
-            uint8_t frame[MSG_HEADER_SIZE];
-            uint16_t n = proto_build(frame, sizeof(frame), MSG_PING, h.seq,
-                                     NODE_MASTER, (uint8_t)h.src, HAL_GetTick(), NULL, 0u);
-            if (n > 0u) usb_tx_write(frame, n);
-        }
-        off += r.consumed;
-    }
-
-    if (off > 0u) {                                    /* slide unconsumed tail down */
-        scan_len = (uint16_t)(scan_len - off);
-        if (scan_len > 0u) memmove(scan, scan + off, scan_len);
-    } else if (scan_len == sizeof(scan)) {             /* defensive: never wedge full */
-        if (!in_resync) { master_rx_resyncs++; in_resync = 1u; }
-        master_rx_discarded++;
-        scan_len--;
-        memmove(scan, scan + 1, scan_len);
+    } else if (r->type == MSG_PING) {
+        MsgHeader h;                               /* echo the request's seq/src */
+        memcpy(&h, r->payload - MSG_HEADER_SIZE, MSG_HEADER_SIZE);
+        uint8_t frame[MSG_HEADER_SIZE];
+        uint16_t n = proto_build(frame, sizeof(frame), MSG_PING, h.seq,
+                                 NODE_MASTER, (uint8_t)h.src, HAL_GetTick(), NULL, 0u);
+        if (n > 0u) usb_tx_write(frame, n);
     }
 }
 
@@ -649,7 +586,7 @@ void MotorMaster_ProcessLoop(void)
 
     /* Drain the USB RX ring (scan + dispatch host frames) and pump the TX ring
        every iteration — both single-producer here in the main loop. */
-    MotorMaster_ProcessUsbRx();
+    usb_rx_process(on_usb_frame);
     usb_tx_pump_responses();
     usb_tx_pump();
 
