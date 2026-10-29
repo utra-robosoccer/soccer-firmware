@@ -46,14 +46,14 @@ class FixedPoint(unittest.TestCase):
 class CmdRoundTrip(unittest.TestCase):
     def test_pack_parse(self):
         chains = [{"chain_id": 0, "motors": [
-            {"mode_req": P.REQ_MIT, "pos": 0.5, "vel": -1.25, "kp": 15.0, "kd": 1.0,
-             "tau_ff": 0.3, "flags": P.CMD_FLAG_VALID}]}]
+            {"drive_req": P.DRV_REQ_ENABLE, "pos": 0.5, "vel": -1.25, "kp": 15.0,
+             "kd": 1.0, "tau_ff": 0.3, "flags": P.CMD_FLAG_VALID}]}]
         b = P.pack_robot_cmd(7, 42, chains)
         self.assertEqual(len(b), P.SZ_CMD_ROBOT)
         d = P.parse_robot_cmd(b)
         self.assertEqual((d["cycle_id"], d["cmd_seq"], d["n_chains"]), (7, 42, 1))
         m = d["chains"][0]["motors"][0]
-        self.assertEqual(m["mode_req"], P.REQ_MIT)
+        self.assertEqual(m["drive_req"], P.DRV_REQ_ENABLE)
         self.assertAlmostEqual(m["pos"], 0.5, places=3)
         self.assertAlmostEqual(m["vel"], -1.25, places=2)
         self.assertAlmostEqual(m["kp"], 15.0, places=1)
@@ -65,10 +65,11 @@ class TeleRoundTrip(unittest.TestCase):
         pr, _ = P.enc_i16(0.5, P.POS_SCALE)
         vr, _ = P.enc_i16(-1.25, P.VEL_SCALE)
         tr, _ = P.enc_i16(0.3, P.TAU_SCALE)
-        motor = dict(pos_raw=pr, vel_raw=vr, tau_raw=tr, temp_c=42, state=P.LIFE_MIT,
-                     cause=P.CAUSE_NONE, motor_mode=2, motor_fault=0x0A,
-                     flags=P.TELE_FLAG_TO_ZERO_ARRIVED, fb_age_ms=250,
-                     fault_word=0xDEADBEEF, last_applied_seq=0x1234)
+        motor = dict(pos_raw=pr, vel_raw=vr, tau_raw=tr, temp_c=42,
+                     drive_state=P.DRV_ENABLED,
+                     drive_fault=P.DRVF_NONE, rs_mode=2, rs_fault_bits=0x0A,
+                     flags=P.TELE_FLAG_SATURATED, fb_age_ms=250,
+                     rs_fault_word=0xDEADBEEF, last_applied_seq=0x1234)
         chains = [dict(chain_id=0, spi_seq_echo=0x2A, slave_time_us=7777,
                        cmd_crc_errors=3, can_tx_errors=1, spi_tx_arm_fails=4, motors=[motor])]
         b = P.pack_robot_tele(9, 123456, 42, 41, P.ROBOT_STATE_NAMES and 1, chains,
@@ -84,16 +85,16 @@ class TeleRoundTrip(unittest.TestCase):
         mo = ch["motors"][0]
         self.assertAlmostEqual(mo.pos, 0.5, places=3)
         self.assertAlmostEqual(mo.vel, -1.25, places=2)
-        self.assertEqual(mo.lifecycle_name, "MIT")
-        self.assertEqual(mo.motor_mode_name, "NORMAL")
+        self.assertEqual(mo.drive_state_name, "ENABLED")
+        self.assertEqual(mo.rs_mode_name, "NORMAL")
         self.assertEqual(mo.last_applied_seq, 0x1234)
-        self.assertTrue(mo.to_zero_arrived)
+        self.assertTrue(mo.saturated)
 
 
 class FrameCodec(unittest.TestCase):
     def test_round_trip(self):
         payload = P.pack_robot_cmd(1, 1, [{"chain_id": 0, "motors": [
-            {"mode_req": P.REQ_HOLD, "flags": P.CMD_FLAG_VALID}]}])
+            {"drive_req": P.DRV_REQ_ENABLE, "flags": P.CMD_FLAG_VALID}]}])
         fr = P.encode_frame(P.MSG_ROBOT_CMD, P.NODE_JETSON, P.NODE_MASTER, payload)
         r = P.decode_frame(bytearray(fr))
         self.assertIsNotNone(r)
@@ -156,18 +157,19 @@ class CrossLanguageFixture(unittest.TestCase):
         got = self._build_and_run()
 
         chains = [{"chain_id": 0, "motors": [
-            {"mode_req": P.REQ_MIT, "pos": 0.5, "vel": -1.25, "kp": 15.0, "kd": 1.0,
-             "tau_ff": 0.3, "flags": P.CMD_FLAG_VALID}]}]
-        py_cmd = P.pack_robot_cmd(7, 42, chains)
+            {"drive_req": P.DRV_REQ_ENABLE, "pos": 0.5, "vel": -1.25, "kp": 15.0,
+             "kd": 1.0, "tau_ff": 0.3, "flags": P.CMD_FLAG_VALID}]}]
+        py_cmd = P.pack_robot_cmd(7, 42, chains, reserved=0xDE)
         self.assertEqual(py_cmd, got["ROBOTCMD"], "cmd_robot_t layout drift C↔Python")
 
         pr, _ = P.enc_i16(0.5, P.POS_SCALE)
         vr, _ = P.enc_i16(-1.25, P.VEL_SCALE)
         tr, _ = P.enc_i16(0.3, P.TAU_SCALE)
-        motor = dict(pos_raw=pr, vel_raw=vr, tau_raw=tr, temp_c=42, state=P.LIFE_MIT,
-                     cause=P.CAUSE_NONE, motor_mode=2, motor_fault=0x0A,
-                     flags=P.TELE_FLAG_TO_ZERO_ARRIVED, fb_age_ms=250,
-                     fault_word=0xDEADBEEF, last_applied_seq=0x1234)
+        motor = dict(pos_raw=pr, vel_raw=vr, tau_raw=tr, temp_c=42,
+                     drive_state=P.DRV_ENABLED,
+                     drive_fault=P.DRVF_NONE, rs_mode=2, rs_fault_bits=0x0A,
+                     flags=P.TELE_FLAG_SATURATED, fb_age_ms=250,
+                     rs_fault_word=0xDEADBEEF, last_applied_seq=0x1234)
         tchains = [dict(chain_id=0, spi_seq_echo=0x2A, slave_time_us=7777,
                         cmd_crc_errors=3, can_tx_errors=1, spi_tx_arm_fails=4, motors=[motor])]
         py_tele = P.pack_robot_tele(9, 123456, 42, 41, 1, tchains,

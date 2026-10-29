@@ -117,27 +117,48 @@ fi
 printf "CubeIDE: %s\n" "$CUBEIDE"
 printf "Project: %s  config: %s\n" "$PROJ_NAME" "$BUILD_CONFIG"
 
-# ── optional per-slave config regeneration ───────────────────────────────────
-# --config <slaveN> regenerates the slave's motor_config.h from the active setup
-# (configs/<setup>/<slaveN>.yaml) so one shared source tree builds a per-slave
-# binary. The active setup comes from --setup, else $SOCCER_SETUP, else the
-# configs/active pointer file.
+# ── config regeneration ──────────────────────────────────────────────────────
+# The generated config files (system_config.h, motor_config.h, and the host's
+# motor_config_gen.py) are untracked per-bench outputs, so every build
+# regenerates them from the active setup. The setup comes from --setup, else
+# $SOCCER_SETUP, else the configs/active pointer file.
+SETUP="${SETUP_OVERRIDE:-${SOCCER_SETUP:-}}"
+if [ -z "$SETUP" ] && [ -f "$REPO_ROOT/configs/active" ]; then
+    SETUP="$(tr -d '[:space:]' < "$REPO_ROOT/configs/active")"
+fi
+if [ -z "$SETUP" ]; then
+    printf "error: no active setup; write configs/active (e.g. 'echo 1s_5m > configs/active') or pass --setup <name>\n" >&2
+    exit 1
+fi
+
+# system_config.h + motor_config_gen.py cover ALL slaves — always regenerate.
+printf "Config: setup '%s' — regenerating system_config.h + motor_config_gen.py\n" "$SETUP"
+SOCCER_SETUP="$SETUP" python3 "$REPO_ROOT/scripts/gen_motor_config.py" --system || exit 1
+
+# motor_config.h is PER-SLAVE: --config <slaveN> selects the section. Without it,
+# an existing header is left alone (sticky, like the old committed file) and a
+# missing one defaults to slave0 so a master build works on a fresh clone.
+MOTOR_CONFIG_H="$REPO_ROOT/firmware/common/include/motor_config.h"
+if [ -z "$CONFIG_SLAVE" ] && [ ! -f "$MOTOR_CONFIG_H" ]; then
+    CONFIG_SLAVE="slave0"
+    printf "Config: motor_config.h missing and no --config given — defaulting to slave0 (slave builds must pass --config <slaveN>)\n"
+fi
 if [ -n "$CONFIG_SLAVE" ]; then
-    SETUP="${SETUP_OVERRIDE:-${SOCCER_SETUP:-}}"
-    if [ -z "$SETUP" ] && [ -f "$REPO_ROOT/configs/active" ]; then
-        SETUP="$(tr -d '[:space:]' < "$REPO_ROOT/configs/active")"
-    fi
-    if [ -z "$SETUP" ]; then
-        printf "error: no active setup; write configs/active (e.g. 'echo bench > configs/active') or pass --setup <name>\n" >&2
+    FW_CONFIG="$REPO_ROOT/configs/$SETUP/firmware_config.yaml"
+    LEGACY_YAML="$REPO_ROOT/configs/$SETUP/${CONFIG_SLAVE}.yaml"
+    if [ -f "$FW_CONFIG" ]; then
+        # Single-file artifact (preferred): select the slave section by bare name.
+        printf "Config: setup '%s' — regenerating motor_config.h from firmware_config.yaml (section %s)\n" "$SETUP" "$CONFIG_SLAVE"
+        SOCCER_SETUP="$SETUP" python3 "$REPO_ROOT/scripts/gen_motor_config.py" --slave "$CONFIG_SLAVE" || exit 1
+    elif [ -f "$LEGACY_YAML" ]; then
+        printf "Config: setup '%s' — regenerating motor_config.h from configs/%s/%s.yaml\n" "$SETUP" "$SETUP" "$CONFIG_SLAVE"
+        python3 "$REPO_ROOT/scripts/gen_motor_config.py" --slave "$LEGACY_YAML" || exit 1
+    else
+        printf "error: no firmware_config.yaml or %s.yaml for setup '%s' (in configs/%s/)\n" "$CONFIG_SLAVE" "$SETUP" "$SETUP" >&2
         exit 1
     fi
-    CONFIG_YAML="$REPO_ROOT/configs/$SETUP/${CONFIG_SLAVE}.yaml"
-    if [ ! -f "$CONFIG_YAML" ]; then
-        printf "error: config '%s' not found for setup '%s' (looked for %s)\n" "$CONFIG_SLAVE" "$SETUP" "$CONFIG_YAML" >&2
-        exit 1
-    fi
-    printf "Config: setup '%s' — regenerating motor_config.h from configs/%s/%s.yaml\n" "$SETUP" "$SETUP" "$CONFIG_SLAVE"
-    python3 "$REPO_ROOT/scripts/gen_motor_config.py" --slave "$CONFIG_YAML" || exit 1
+else
+    printf "Config: keeping existing motor_config.h (pass --config <slaveN> to retarget it)\n"
 fi
 
 # ── run headless build ───────────────────────────────────────────────────────

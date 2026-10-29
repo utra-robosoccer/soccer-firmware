@@ -42,7 +42,7 @@ class SessionLoggerTest(unittest.TestCase):
     def test_tele_and_cmd_rows_roundtrip(self):
         with tempfile.TemporaryDirectory() as d:
             lg = SessionLogger(log_dir=d, flush_interval=10.0, clock=lambda: 42.5)
-            lg.log_tele(motor=2, state=7, cause=1, flags=0x0A,
+            lg.log_tele(motor=2, drive_state=7, drive_fault=1, flags=0x0A,
                         pos=0.5, vel=-1.25, tau=0.3, slave=0, local=2,
                         master_ts_ms=123456)
             lg.log_cmd("MIT", motor=1, slave=0, local=1,
@@ -56,8 +56,8 @@ class SessionLoggerTest(unittest.TestCase):
             t, c, a = rows
             self.assertEqual(t["kind"], "T")
             self.assertEqual(t["motor"], "2")
-            self.assertEqual(t["state"], "7")
-            self.assertEqual(t["cause"], "1")
+            self.assertEqual(t["drive_state"], "7")
+            self.assertEqual(t["drive_fault"], "1")
             self.assertEqual(t["flags"], "10")          # 0x0A
             self.assertEqual(float(t["pos"]), 0.5)
             self.assertEqual(float(t["tau"]), 0.3)
@@ -71,7 +71,7 @@ class SessionLoggerTest(unittest.TestCase):
             self.assertEqual(c["kind"], "C")
             self.assertEqual(c["opcode"], "MIT")
             self.assertEqual(float(c["kp"]), 15.0)
-            self.assertEqual(c["state"], "")            # blank for command
+            self.assertEqual(c["drive_state"], "")            # blank for command
 
             self.assertEqual(a["opcode"], "ARM_HOLD")
             self.assertEqual(a["pos"], "")              # control cmd carries no MIT params
@@ -80,7 +80,7 @@ class SessionLoggerTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             lg = SessionLogger(log_dir=d, flush_interval=0.05, clock=lambda: 1.0)
             try:
-                lg.log_tele(motor=0, state=2, cause=0, flags=0,
+                lg.log_tele(motor=0, drive_state=2, drive_fault=0, flags=0,
                             pos=0.0, vel=0.0, tau=0.0)
                 # Wait for the background flusher (not close()) to write it out.
                 deadline = time.monotonic() + 2.0

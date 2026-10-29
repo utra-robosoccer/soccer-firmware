@@ -17,114 +17,133 @@ from dataclasses import dataclass
 import struct
 import time
 
+from . import _protocol_gen as _G
+
+# ── wire layout: everything below is sourced from the generated module ────────
+# (firmware/common/protocol.yaml → scripts/gen_protocol.py → _protocol_gen.py).
+# This module keeps the public API stable: same names, same plain-int values.
+
 # ── node ids ──────────────────────────────────────────────────────────────────
-NODE_JETSON  = 1
-NODE_MASTER  = 2
-NODE_SLAVE_0 = 3
+NODE_JETSON  = _G.NODE_JETSON
+NODE_MASTER  = _G.NODE_MASTER
+NODE_SLAVE_0 = _G.NODE_SLAVE_0
 
 # ── message types ─────────────────────────────────────────────────────────────
-MSG_PING          = 0x01
-MSG_MASTER_STATUS = 0x02
-MSG_SLAVE_STATUS  = 0x03
-MSG_ROBOT_CMD     = 0x08
-MSG_ROBOT_TELE    = 0x09
+MSG_PING          = _G.MSG_PING
+MSG_MASTER_STATUS = _G.MSG_MASTER_STATUS
+MSG_SLAVE_STATUS  = _G.MSG_SLAVE_STATUS
+MSG_ROBOT_CMD     = _G.MSG_ROBOT_CMD
+MSG_ROBOT_TELE    = _G.MSG_ROBOT_TELE
 
-MSG_NAMES = {
-    MSG_PING: "PING", MSG_MASTER_STATUS: "MASTER_STATUS",
-    MSG_SLAVE_STATUS: "SLAVE_STATUS", MSG_ROBOT_CMD: "ROBOT_CMD",
-    MSG_ROBOT_TELE: "ROBOT_TELE",
-}
 
-# ── hierarchy caps (mirror protocol.h) ────────────────────────────────────────
-MAX_MOTORS_PER_CHAIN = 5
-MAX_CHAINS           = 4
+def _names(value_names: dict, prefix: str) -> dict:
+    """Display dict from a generated {value: "FULL_NAME"} map, prefix stripped —
+    tracks the schema automatically when values are added."""
+    return {v: n[len(prefix):] for v, n in value_names.items()}
 
-# ── per-motor lifecycle (tele_motor_t.state) ──────────────────────────────────
-(LIFE_BOOT, LIFE_DISCOVERING, LIFE_IDLE, LIFE_HOLD, LIFE_MIT, LIFE_DAMPED,
- LIFE_TO_ZERO, LIFE_FAULT) = range(8)
-LIFECYCLE_NAMES = {
-    0: "BOOT", 1: "DISCOVERING", 2: "IDLE", 3: "HOLD", 4: "MIT",
-    5: "DAMPED", 6: "TO_ZERO", 7: "FAULT",
-}
 
-# ── host→slave mode requests (cmd_motor_t.mode_req) ───────────────────────────
-(REQ_IDLE, REQ_HOLD, REQ_MIT, REQ_DAMPED, REQ_TO_ZERO) = range(5)
-MODE_REQ_NAMES = {0: "IDLE", 1: "HOLD", 2: "MIT", 3: "DAMPED", 4: "TO_ZERO"}
+MSG_NAMES = _names(_G.MSG_TYPE_VALUE_NAMES, "MSG_")
 
-# ── RS motor run_mode reported in Type-2 (tele_motor_t.motor_mode) ────────────
+# ── hierarchy caps ────────────────────────────────────────────────────────────
+MAX_MOTORS_PER_CHAIN = _G.MAX_MOTORS_PER_CHAIN
+MAX_CHAINS           = _G.MAX_CHAINS
+
+# ── RS motor run_mode reported in Type-2 (tele_motor_t.rs_mode) ────────────
+# Vendor-reported values (RobStride Type-2 status), not part of the schema.
 MOTOR_MODE_NAMES = {0: "RESET", 1: "CAL", 2: "NORMAL"}
 
-# ── fault cause (tele_motor_t.cause, latched) ─────────────────────────────────
-(CAUSE_NONE, CAUSE_OVERTORQUE, CAUSE_CAN_TIMEOUT, CAUSE_WATCHDOG,
- CAUSE_MOTOR_FAULT, CAUSE_ZERO_TIMEOUT, CAUSE_NOT_ENABLED, CAUSE_WOUND,
- CAUSE_MASTER_LOST) = range(9)
-CAUSE_NAMES = {
-    0: "NONE", 1: "OVERTORQUE", 2: "CAN_TIMEOUT", 3: "WATCHDOG", 4: "MOTOR_FAULT",
-    5: "ZERO_TIMEOUT", 6: "NOT_ENABLED", 7: "WOUND", 8: "MASTER_LOST",
-}
+ROBOT_INIT      = _G.ROBOT_INIT
+ROBOT_READY     = _G.ROBOT_READY
+ROBOT_DEGRADED  = _G.ROBOT_DEGRADED
+ROBOT_HOST_LOST = _G.ROBOT_HOST_LOST
+ROBOT_PROTO_MISMATCH = _G.ROBOT_PROTO_MISMATCH   # SPI version gate tripped (v9.1)
+ROBOT_STATE_NAMES = _names(_G.ROBOT_STATE_VALUE_NAMES, "ROBOT_")
 
-(ROBOT_INIT, ROBOT_READY, ROBOT_DEGRADED, ROBOT_HOST_LOST) = range(4)
-ROBOT_STATE_NAMES = {0: "INIT", 1: "READY", 2: "DEGRADED", 3: "HOST_LOST"}
+# ── per-chain SPI link state (tele_chain_t.link, master-authored) ──────────────
+CHAIN_LINK_LOST     = _G.CHAIN_LINK_LOST
+CHAIN_LINK_ALIVE    = _G.CHAIN_LINK_ALIVE
+CHAIN_LINK_MISMATCH = _G.CHAIN_LINK_MISMATCH
+CHAIN_LINK_NAMES = _names(_G.CHAIN_LINK_VALUE_NAMES, "CHAIN_LINK_")
+
+# ── schema hash (wire-contract fingerprint; MasterStatus.schema_hash mirror) ───
+SCHEMA_HASH = _G.SCHEMA_HASH
+
+# ═══ protocol v9 — drive-state × streamed-tuple split (docs/protocol_v9.md) ═══
+
+# ── host→slave drive request (cmd_motor_t.drive_req) ──────────────────────────
+DRV_REQ_DISABLE = _G.DRV_REQ_DISABLE
+DRV_REQ_ENABLE  = _G.DRV_REQ_ENABLE
+DRV_REQ_STOP    = _G.DRV_REQ_STOP
+DRV_REQ_RESET   = _G.DRV_REQ_RESET
+DRIVE_REQ_NAMES = _names(_G.DRIVE_REQ_VALUE_NAMES, "DRV_REQ_")
+
+# ── per-motor drive state (tele_motor_t.drive_state, v9) ──────────────────────
+DRV_BOOT        = _G.DRV_BOOT
+DRV_DISCOVERING = _G.DRV_DISCOVERING
+DRV_ABSENT      = _G.DRV_ABSENT
+DRV_DISABLED    = _G.DRV_DISABLED
+DRV_ENABLING    = _G.DRV_ENABLING
+DRV_ENABLED     = _G.DRV_ENABLED
+DRV_STOPPING    = _G.DRV_STOPPING
+DRV_CLEARING    = _G.DRV_CLEARING
+DRV_FAULT       = _G.DRV_FAULT
+DRIVE_STATE_NAMES = _names(_G.DRIVE_STATE_VALUE_NAMES, "DRV_")
+
+# ── drive fault (tele_motor_t.drive_fault, v9; latched at detection) ──────────
+DRVF_NONE           = _G.DRVF_NONE
+DRVF_CAN_TIMEOUT    = _G.DRVF_CAN_TIMEOUT
+DRVF_MASTER_LOST    = _G.DRVF_MASTER_LOST
+DRVF_ENABLE_FAILED  = _G.DRVF_ENABLE_FAILED
+DRVF_NOT_ENABLED    = _G.DRVF_NOT_ENABLED
+DRVF_OVERTORQUE     = _G.DRVF_OVERTORQUE
+DRVF_MOTOR_REPORTED = _G.DRVF_MOTOR_REPORTED
+DRVF_WOUND          = _G.DRVF_WOUND
+DRIVE_FAULT_NAMES = _names(_G.DRIVE_FAULT_VALUE_NAMES, "DRVF_")
 
 # ── cmd_motor_t.flags ─────────────────────────────────────────────────────────
-CMD_FLAG_VALID            = 1 << 0
-CMD_FLAG_USE_CONFIG_GAINS = 1 << 1
-CMD_FLAG_FAULT_RESET      = 1 << 2
+CMD_FLAG_VALID            = _G.CMD_FLAG_VALID    # tuple live; drive_req always applies
+CMD_FLAG_USE_CONFIG_GAINS = _G.CMD_FLAG_USE_CONFIG_GAINS
+# bit2 was CMD_FLAG_FAULT_RESET (v8); RESET is a drive request in v9
 
 # ── tele_motor_t.flags ────────────────────────────────────────────────────────
-TELE_FLAG_REQUEST_REJECTED = 1 << 0
-TELE_FLAG_TO_ZERO_ARRIVED  = 1 << 1
-TELE_FLAG_SATURATED        = 1 << 2
-TELE_FLAG_CLAMPED_POS      = 1 << 3
-TELE_FLAG_CLAMPED_TAU      = 1 << 4
-TELE_FLAG_CMD_STALE        = 1 << 5
+TELE_FLAG_REQUEST_REJECTED = _G.TELE_FLAG_REQUEST_REJECTED
+# bit1 was TELE_FLAG_TO_ZERO_ARRIVED (v8); TO_ZERO is host-side in v9
+TELE_FLAG_SATURATED        = _G.TELE_FLAG_SATURATED
+TELE_FLAG_CLAMPED_POS      = _G.TELE_FLAG_CLAMPED_POS
+TELE_FLAG_CLAMPED_TAU      = _G.TELE_FLAG_CLAMPED_TAU
+TELE_FLAG_CMD_STALE        = _G.TELE_FLAG_CMD_STALE
+TELE_FLAG_CLAMPED_GAIN     = _G.TELE_FLAG_CLAMPED_GAIN
 
-# ── fixed-point scales (mirror protocol.h exactly) ────────────────────────────
-POS_SCALE = 10000.0   # rad   → i16 (home-frame ±π)
-VEL_SCALE = 100.0     # rad/s → i16
-TAU_SCALE = 100.0     # N·m   → i16
-KP_SCALE  = 10.0      # Kp    → u16
-KD_SCALE  = 100.0     # Kd    → u16
+# ── fixed-point scales ────────────────────────────────────────────────────────
+POS_SCALE = _G.PROTO_POS_SCALE   # rad   → i16 (home-frame ±π)
+VEL_SCALE = _G.PROTO_VEL_SCALE   # rad/s → i16
+TAU_SCALE = _G.PROTO_TAU_SCALE   # N·m   → i16
+KP_SCALE  = _G.PROTO_KP_SCALE    # Kp    → u16
+KD_SCALE  = _G.PROTO_KD_SCALE    # Kd    → u16
 
 # ── wire-contract version ─────────────────────────────────────────────────────
-PROTO_VERSION = 8   # v8: tele_chain_t += spi_tx_arm_fails (slave TX-arm DMA failures).
-                    # v7: dead-man watchdogs — ROBOT_HOST_LOST + CAUSE_MASTER_LOST, slave
-                    #     watchdog no longer refreshed by NOP keepalives (behavior change).
-                    # v6: tele_robot_t cmd_seq_active + cmd_on_time/late/missing/duplicate.
-                    # v4: MAX_CHAINS 6→4 (4 slave chains) shrank the robot frames
+PROTO_VERSION = _G.PROTO_VERSION
 
-# ── wire layouts (little-endian, packed) ──────────────────────────────────────
-HDR_FMT  = "<HHBBIHHH"          # type,seq,src,dst,ts_ms,len,ver_flags,crc  → 16 B
-HDR_SIZE = struct.calcsize(HDR_FMT)
+# ── wire layouts (little-endian, packed; formats generated from the schema) ───
+HDR_FMT  = _G.FMT_MSG_HEADER
+HDR_SIZE = _G.SZ_MSG_HEADER
 
-FMT_MASTER_STATUS = "<BBIIIHHHHII" # +4 u16 rates +rx_resyncs,rx_discarded_bytes → 30 B
-FMT_SLAVE_STATUS  = "<BBIIII"     # slave_id,motors_alive,uptime,crc,cmd_crc,seq_gaps (18)
+FMT_MASTER_STATUS = _G.FMT_MASTER_STATUS
+FMT_SLAVE_STATUS  = _G.FMT_SLAVE_STATUS
 
-FMT_CMD_MOTOR     = "<BhhHHhB"    # mode_req,pos,vel,kp,kd,tau_ff,flags → 12 B
-SZ_CMD_MOTOR      = struct.calcsize(FMT_CMD_MOTOR)
-FMT_CMD_CHAIN_HDR = "<BB"         # chain_id,n_motors
-SZ_CMD_CHAIN      = 2 + SZ_CMD_MOTOR * MAX_MOTORS_PER_CHAIN          # 62
-FMT_CMD_ROBOT_HDR = "<HHBB"       # cycle_id,cmd_seq,n_chains,reserved
-SZ_CMD_ROBOT      = 6 + SZ_CMD_CHAIN * MAX_CHAINS                    # 254 (6 + 62*4)
+FMT_CMD_MOTOR     = _G.FMT_CMD_MOTOR
+SZ_CMD_MOTOR      = _G.SZ_CMD_MOTOR
+FMT_CMD_CHAIN_HDR = _G.FMT_CMD_CHAIN_PREFIX    # chain_id,n_motors
+SZ_CMD_CHAIN      = _G.SZ_CMD_CHAIN
+FMT_CMD_ROBOT_HDR = _G.FMT_CMD_ROBOT_PREFIX    # cycle_id,cmd_seq,n_chains,reserved
+SZ_CMD_ROBOT      = _G.SZ_CMD_ROBOT
 
-FMT_TELE_MOTOR    = "<hhhBBBBBBBIHH"  # pos,vel,tau,temp,state,cause,mode,fault,flags,fb_age,fault_word,last_applied_seq,reserved → 21
-SZ_TELE_MOTOR     = struct.calcsize(FMT_TELE_MOTOR)
-FMT_TELE_CHAIN_HDR = "<BBBBIHHB"  # chain_id,n_motors,spi_seq_echo,spi_resyncs,slave_time_us,
-                                  # cmd_crc_errors,can_tx_errors,spi_tx_arm_fails
-SZ_TELE_CHAIN     = struct.calcsize(FMT_TELE_CHAIN_HDR) + SZ_TELE_MOTOR * MAX_MOTORS_PER_CHAIN  # 118
-FMT_TELE_ROBOT_HDR = "<HIHHHHHHBB"  # cycle_id,master_time_us,last_cmd_seq_rx,cmd_seq_active,
-                                    # cmd_on_time,cmd_late,cmd_missing,cmd_duplicate,n_chains,robot_state
-SZ_TELE_ROBOT     = struct.calcsize(FMT_TELE_ROBOT_HDR) + SZ_TELE_CHAIN * MAX_CHAINS  # 488 (20 + 117*4)
-
-assert HDR_SIZE == 16, HDR_SIZE
-assert SZ_CMD_MOTOR == 12, SZ_CMD_MOTOR
-assert SZ_CMD_CHAIN == 62, SZ_CMD_CHAIN
-assert SZ_CMD_ROBOT == 254, SZ_CMD_ROBOT
-assert SZ_TELE_MOTOR == 21, SZ_TELE_MOTOR
-assert SZ_TELE_CHAIN == 118, SZ_TELE_CHAIN
-assert SZ_TELE_ROBOT == 492, SZ_TELE_ROBOT
-assert struct.calcsize(FMT_MASTER_STATUS) == 30
-assert struct.calcsize(FMT_SLAVE_STATUS) == 18
+FMT_TELE_MOTOR     = _G.FMT_TELE_MOTOR
+SZ_TELE_MOTOR      = _G.SZ_TELE_MOTOR
+FMT_TELE_CHAIN_HDR = _G.FMT_TELE_CHAIN_PREFIX
+SZ_TELE_CHAIN      = _G.SZ_TELE_CHAIN
+FMT_TELE_ROBOT_HDR = _G.FMT_TELE_ROBOT_PREFIX
+SZ_TELE_ROBOT      = _G.SZ_TELE_ROBOT
 
 
 def seq_ge(a: int, b: int) -> bool:
@@ -167,13 +186,13 @@ class TeleMotor:
     vel_raw: int
     tau_raw: int
     temp_c: int
-    state: int
-    cause: int
-    motor_mode: int
-    motor_fault: int
+    drive_state: int
+    drive_fault: int
+    rs_mode: int
+    rs_fault_bits: int
     flags: int
     fb_age_ms: int
-    fault_word: int
+    rs_fault_word: int
     last_applied_seq: int
     reserved: int
 
@@ -190,18 +209,14 @@ class TeleMotor:
     @property
     def temp(self) -> float: return float(self.temp_c)
     @property
-    def lifecycle(self) -> int: return self.state
+    def drive_state_name(self) -> str: return DRIVE_STATE_NAMES.get(self.drive_state, f"?{self.drive_state}")
     @property
-    def lifecycle_name(self) -> str: return LIFECYCLE_NAMES.get(self.state, f"?{self.state}")
+    def drive_fault_name(self) -> str: return DRIVE_FAULT_NAMES.get(self.drive_fault, f"?{self.drive_fault}")
     @property
-    def cause_name(self) -> str: return CAUSE_NAMES.get(self.cause, f"?{self.cause}")
-    @property
-    def motor_mode_name(self) -> str: return MOTOR_MODE_NAMES.get(self.motor_mode, f"?{self.motor_mode}")
+    def rs_mode_name(self) -> str: return MOTOR_MODE_NAMES.get(self.rs_mode, f"?{self.rs_mode}")
 
     @property
     def request_rejected(self) -> bool: return bool(self.flags & TELE_FLAG_REQUEST_REJECTED)
-    @property
-    def to_zero_arrived(self) -> bool: return bool(self.flags & TELE_FLAG_TO_ZERO_ARRIVED)
     @property
     def saturated(self) -> bool: return bool(self.flags & TELE_FLAG_SATURATED)
     @property
@@ -210,10 +225,12 @@ class TeleMotor:
     def clamped_tau(self) -> bool: return bool(self.flags & TELE_FLAG_CLAMPED_TAU)
     @property
     def cmd_stale(self) -> bool: return bool(self.flags & TELE_FLAG_CMD_STALE)
+    @property
+    def clamped_gain(self) -> bool: return bool(self.flags & TELE_FLAG_CLAMPED_GAIN)
 
 
 # ── command pack ──────────────────────────────────────────────────────────────
-def pack_cmd_motor(mode_req: int, pos: float = 0.0, vel: float = 0.0,
+def pack_cmd_motor(drive_req: int, pos: float = 0.0, vel: float = 0.0,
                    kp: float = 0.0, kd: float = 0.0, tau_ff: float = 0.0,
                    flags: int = 0) -> bytes:
     """Pack one cmd_motor_t (12 B); sets TELE-side saturation is the slave's job,
@@ -223,14 +240,14 @@ def pack_cmd_motor(mode_req: int, pos: float = 0.0, vel: float = 0.0,
     kpi, _ = enc_u16(kp, KP_SCALE)
     kdi, _ = enc_u16(kd, KD_SCALE)
     t, _ = enc_i16(tau_ff, TAU_SCALE)
-    return struct.pack(FMT_CMD_MOTOR, mode_req & 0xFF, p, v, kpi, kdi, t, flags & 0xFF)
+    return struct.pack(FMT_CMD_MOTOR, drive_req & 0xFF, p, v, kpi, kdi, t, flags & 0xFF)
 
 
 def pack_robot_cmd(cycle_id: int, cmd_seq: int, chains: list, reserved: int = 0) -> bytes:
     """Build a full cmd_robot_t (254 B).
 
     ``chains`` is a list (≤ MAX_CHAINS) of dicts:
-        {"chain_id": int, "motors": [ {mode_req, pos, vel, kp, kd, tau_ff, flags}, ... ]}
+        {"chain_id": int, "motors": [ {drive_req, pos, vel, kp, kd, tau_ff, flags}, ... ]}
     Unused chain/motor slots are zero-filled (invalid). ``reserved`` carries the master
     test sentinels (0xDE arm SPI-desync, 0xB0 arm USB-TX test; 0 in normal operation)."""
     out = bytearray()
@@ -246,7 +263,7 @@ def pack_robot_cmd(cycle_id: int, cmd_seq: int, chains: list, reserved: int = 0)
                 if mi < len(motors):
                     m = motors[mi]
                     out += pack_cmd_motor(
-                        m.get("mode_req", REQ_IDLE), m.get("pos", 0.0), m.get("vel", 0.0),
+                        m.get("drive_req", DRV_REQ_DISABLE), m.get("pos", 0.0), m.get("vel", 0.0),
                         m.get("kp", 0.0), m.get("kd", 0.0), m.get("tau_ff", 0.0),
                         m.get("flags", 0))
                 else:
@@ -271,9 +288,9 @@ def parse_robot_cmd(p: bytes) -> dict:
         mbase = base + 2
         motors = []
         for mi in range(min(n_motors, MAX_MOTORS_PER_CHAIN)):
-            mode_req, pos, vel, kp, kd, tau, flags = \
+            drive_req, pos, vel, kp, kd, tau, flags = \
                 struct.unpack_from(FMT_CMD_MOTOR, p, mbase + mi * SZ_CMD_MOTOR)
-            motors.append(dict(mode_req=mode_req, pos=dec_i16(pos, POS_SCALE),
+            motors.append(dict(drive_req=drive_req, pos=dec_i16(pos, POS_SCALE),
                                vel=dec_i16(vel, VEL_SCALE), kp=dec_u16(kp, KP_SCALE),
                                kd=dec_u16(kd, KD_SCALE), tau_ff=dec_i16(tau, TAU_SCALE),
                                flags=flags))
@@ -283,14 +300,14 @@ def parse_robot_cmd(p: bytes) -> dict:
 
 # ── telemetry pack (mirror of the firmware builder; for tests/simulation) ─────
 def pack_tele_motor(pos_raw: int, vel_raw: int, tau_raw: int, temp_c: int,
-                    state: int, cause: int, motor_mode: int, motor_fault: int,
-                    flags: int, fb_age_ms: int, fault_word: int,
+                    drive_state: int, drive_fault: int, rs_mode: int, rs_fault_bits: int,
+                    flags: int, fb_age_ms: int, rs_fault_word: int,
                     last_applied_seq: int, reserved: int = 0) -> bytes:
     """Pack one tele_motor_t (21 B) from RAW wire values (ints, already scaled)."""
     return struct.pack(FMT_TELE_MOTOR, pos_raw, vel_raw, tau_raw, temp_c & 0xFF,
-                       state & 0xFF, cause & 0xFF, motor_mode & 0xFF,
-                       motor_fault & 0xFF, flags & 0xFF, fb_age_ms & 0xFF,
-                       fault_word & 0xFFFFFFFF, last_applied_seq & 0xFFFF,
+                       drive_state & 0xFF, drive_fault & 0xFF, rs_mode & 0xFF,
+                       rs_fault_bits & 0xFF, flags & 0xFF, fb_age_ms & 0xFF,
+                       rs_fault_word & 0xFFFFFFFF, last_applied_seq & 0xFFFF,
                        reserved & 0xFFFF)
 
 
@@ -298,10 +315,10 @@ def pack_robot_tele(cycle_id: int, master_time_us: int, last_cmd_seq_rx: int,
                     cmd_seq_active: int, robot_state: int, chains: list, *,
                     cmd_on_time: int = 0, cmd_late: int = 0,
                     cmd_missing: int = 0, cmd_duplicate: int = 0) -> bytes:
-    """Build a full tele_robot_t (488 B). ``chains`` (≤ MAX_CHAINS) is a list of
-    dicts {chain_id, spi_seq_echo, slave_time_us, cmd_crc_errors, can_tx_errors,
-    motors:[raw-field dict ...]}; unused slots zero-filled. The four cmd_* counters
-    are keyword-only (default 0)."""
+    """Build a full tele_robot_t (496 B). ``chains`` (≤ MAX_CHAINS) is a list of
+    dicts {chain_id, link, spi_seq_echo, slave_time_us, cmd_crc_errors,
+    can_tx_errors, motors:[raw-field dict ...]}; unused slots zero-filled. The
+    four cmd_* counters are keyword-only (default 0)."""
     out = bytearray()
     n_chains = len(chains)
     out += struct.pack(FMT_TELE_ROBOT_HDR, cycle_id & 0xFFFF,
@@ -314,7 +331,9 @@ def pack_robot_tele(cycle_id: int, master_time_us: int, last_cmd_seq_rx: int,
             ch = chains[ci]
             motors = ch["motors"]
             out += struct.pack(FMT_TELE_CHAIN_HDR, ch["chain_id"] & 0xFF,
-                               len(motors) & 0xFF, ch.get("spi_seq_echo", 0) & 0xFF,
+                               len(motors) & 0xFF,
+                               ch.get("link", CHAIN_LINK_ALIVE) & 0xFF,
+                               ch.get("spi_seq_echo", 0) & 0xFF,
                                ch.get("spi_resyncs", 0) & 0xFF,
                                ch.get("slave_time_us", 0) & 0xFFFFFFFF,
                                ch.get("cmd_crc_errors", 0) & 0xFFFF,
@@ -350,12 +369,12 @@ def parse_robot_tele(p: bytes) -> dict:
         if ci >= n_chains:
             break
         base = base0 + ci * SZ_TELE_CHAIN
-        chain_id, n_motors, spi_seq_echo, spi_resyncs, slave_us, cmd_crc, can_tx, \
-            spi_tx_arm_fails = struct.unpack_from(FMT_TELE_CHAIN_HDR, p, base)
+        chain_id, n_motors, link, spi_seq_echo, spi_resyncs, slave_us, cmd_crc, \
+            can_tx, spi_tx_arm_fails = struct.unpack_from(FMT_TELE_CHAIN_HDR, p, base)
         mbase = base + struct.calcsize(FMT_TELE_CHAIN_HDR)
         motors = [TeleMotor.unpack(p, mbase + mi * SZ_TELE_MOTOR)
                   for mi in range(min(n_motors, MAX_MOTORS_PER_CHAIN))]
-        chains.append(dict(chain_id=chain_id, n_motors=n_motors,
+        chains.append(dict(chain_id=chain_id, n_motors=n_motors, link=link,
                            spi_seq_echo=spi_seq_echo, spi_resyncs=spi_resyncs,
                            slave_time_us=slave_us,
                            cmd_crc_errors=cmd_crc, can_tx_errors=can_tx,
@@ -477,9 +496,10 @@ def decode_frame(buf: bytearray, on_reject=None, on_frame=None):
 def parse_master_status(p: bytes) -> dict:
     if len(p) < struct.calcsize(FMT_MASTER_STATUS):
         return {}
-    rs, sa, up, le, rf, poll_hz, tele_hz, tick_hz, host_hz, resyncs, discarded = \
-        struct.unpack_from(FMT_MASTER_STATUS, p)
-    return dict(robot_state=rs, slave_alive=sa, uptime_ms=up, link_errors=le,
+    (schema_hash, mismatch, up, le, rf, poll_hz, tele_hz, tick_hz, host_hz,
+     resyncs, discarded) = struct.unpack_from(FMT_MASTER_STATUS, p)
+    return dict(schema_hash=schema_hash, slave_proto_mismatch=mismatch,
+                uptime_ms=up, link_errors=le,
                 rx_frames=rf, master_poll_hz=poll_hz, telemetry_hz=tele_hz,
                 slave_tick_hz=tick_hz, host_cmd_hz=host_hz,
                 rx_resyncs=resyncs, rx_discarded_bytes=discarded)

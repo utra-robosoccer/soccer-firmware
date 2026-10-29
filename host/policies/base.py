@@ -13,8 +13,25 @@ from dataclasses import dataclass, field
 # Re-exported for policy authors: build these in step().
 from master_link.link import (  # noqa: F401
     MotorCommand, LinkState,
-    MODE_IDLE, MODE_HOLD, MODE_MIT, MODE_DAMPED, MODE_TO_ZERO,
+    REQ_DISABLE, REQ_ENABLE, REQ_STOP, REQ_RESET,
 )
+
+# v9 activation window defaults (seconds into the arm window).
+ARM_DISABLE_S = 0.15   # DISABLE: known-off baseline (no-op when already DISABLED)
+ARM_RESET_S   = 0.30   # RESET: clear any latched fault (no-op when clean)
+
+
+def arm_command(slave, local, el, pos):
+    """One motor's command during the activation window (protocol v9 reference
+    flow): DISABLE → RESET → ENABLE while streaming a hold tuple at `pos` with
+    config gains. Streaming the tuple through ENABLING closes the limp window —
+    the slave latches it and applies it on the ENABLING→ENABLED edge."""
+    if el < ARM_DISABLE_S:
+        return MotorCommand(slave, local, req=REQ_DISABLE)
+    if el < ARM_RESET_S:
+        return MotorCommand(slave, local, req=REQ_RESET)
+    return MotorCommand(slave, local, req=REQ_ENABLE, valid=True, pos=pos,
+                        use_config_gains=True)
 
 
 @dataclass

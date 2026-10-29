@@ -1,9 +1,10 @@
 """bench_sine — headless sine bench policy (the canonical measurement driver).
 
-Arms every selected motor to HOLD (one-shot fault-reset) for a short settle, then starts a
-MIT sine CENTERED ON 0: a minimum-jerk move from the motor's current position to the nearest
-peak (±A), then the sine from that peak's phase — so position and velocity are continuous
-from HOLD through the move into the sine (no step, no overtorque). If ±A would exceed a
+Enables every selected motor (DISABLE → RESET → ENABLE while streaming a hold tuple, the
+v9 reference flow) for a short settle, then starts a MIT sine CENTERED ON 0: a minimum-jerk
+move from the motor's current position to the nearest peak (±A), then the sine from that
+peak's phase — so position and velocity are continuous from the hold through the move into
+the sine (no step, no overtorque). If ±A would exceed a
 motor's soft limits the run is refused with a clear message (never clamped silently).
 
 All timing comes from the injected master-clock t_ns (telemetry-driven loop), so a logged
@@ -16,14 +17,13 @@ import math
 
 from master_link.motor_config_gen import MOTORS, MOTOR_SOFT_MIN, MOTOR_SOFT_MAX
 
-from .base import Policy, Action, MotorCommand, MODE_HOLD, MODE_MIT, MODE_IDLE, LinkState
+from .base import Policy, Action, MotorCommand, REQ_DISABLE, REQ_ENABLE, LinkState, arm_command
 from .sine_start import SineStart, fits_soft_limits
 
 DEFAULT_AMP_RAD   = 0.2
 DEFAULT_FREQ_HZ   = 0.4
 DEFAULT_MOVE_SPEED = 0.5   # rad/s, min-jerk peak speed cap for the HOLD→peak move
 ARM_SECONDS       = 1.5
-FAULT_RESET_S     = 0.3
 
 
 def _parse_motors(spec):
@@ -108,12 +108,11 @@ class BenchSinePolicy(Policy):
         if self._dur is not None and el > self._arm_s + self._dur:
             raise KeyboardInterrupt            # clean stop via run_policy's shutdown
         cmds = []
-        if el < self._arm_s:                   # arm: HOLD current position
+        if el < self._arm_s:                   # activation window: DISABLE→RESET→ENABLE+hold
             for k in self._motors:
                 snap = state.motors.get(k) if state and state.motors else None
                 p = snap.pos if snap else 0.0
-                cmds.append(MotorCommand(k[0], k[1], mode=MODE_HOLD, pos=p,
-                                         use_config_gains=True, fault_reset=(el < FAULT_RESET_S)))
+                cmds.append(arm_command(k[0], k[1], el, p))
             return Action(motors=cmds)
 
         if not self._mit_begun:                # MIT start: read p0, plan each move
@@ -128,9 +127,9 @@ class BenchSinePolicy(Policy):
                     and el >= self._arm_s + self._drop_at)
         for k in self._motors:
             if drop_now and k == self._drop:        # fault-isolation: CAN-disable one motor
-                cmds.append(MotorCommand(k[0], k[1], mode=MODE_IDLE))
+                cmds.append(MotorCommand(k[0], k[1], req=REQ_DISABLE))
                 continue
             pos, vel = self._traj[k].sample(t_ns)
-            cmds.append(MotorCommand(k[0], k[1], mode=MODE_MIT, pos=pos, vel=vel,
-                                     use_config_gains=True))
+            cmds.append(MotorCommand(k[0], k[1], req=REQ_ENABLE, valid=True,
+                                     pos=pos, vel=vel, use_config_gains=True))
         return Action(motors=cmds)

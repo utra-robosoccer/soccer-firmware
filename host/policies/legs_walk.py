@@ -57,7 +57,7 @@ import sys
 
 from master_link.motor_config_gen import MOTORS, MOTOR_SOFT_MIN, MOTOR_SOFT_MAX
 
-from .base import Policy, Action, MotorCommand, MODE_HOLD, MODE_MIT, LinkState
+from .base import Policy, Action, MotorCommand, REQ_ENABLE, LinkState, arm_command
 
 # Defaults are the Desmos reference gait. Lengths may be in ANY consistent unit
 # — the IK output is angles, so only the ratios step:height:lift:l1:l2 matter.
@@ -70,7 +70,6 @@ DEFAULT_FREQ_HZ = 0.5     # gait cycles/s (one cycle steps each leg once)
 DEFAULT_PHASE   = 0.0     # gait phase at start (rad); 0 = the Desmos t_0 frame
 DEFAULT_BLEND_S = 2.0     # min-jerk ramp from HOLD into the gait
 ARM_SECONDS     = 2.0
-FAULT_RESET_S   = 0.5
 
 REACH_MARGIN = 1e-3       # relative margin kept from full extension / full fold
 N_SWEEP      = 1024       # per-cycle sweep for reach + joint-range checks
@@ -372,8 +371,7 @@ class LegsWalkPolicy(Policy):
             for k in self._all:
                 snap = state.motors.get(k) if state and state.motors else None
                 p = snap.pos if snap else 0.0
-                cmds.append(MotorCommand(k[0], k[1], mode=MODE_HOLD, pos=p,
-                                         use_config_gains=True, fault_reset=(el < FAULT_RESET_S)))
+                cmds.append(arm_command(k[0], k[1], el, p))
             return Action(motors=cmds)
 
         if not self._mit_begun:                # MIT start: capture p0, centre the gait
@@ -401,11 +399,11 @@ class LegsWalkPolicy(Policy):
                 q0 = self._cmd(k, emit - VEL_DT)
                 q1 = self._cmd(k, emit)
                 q2 = self._cmd(k, emit + VEL_DT)
-                cmds.append(MotorCommand(k[0], k[1], mode=MODE_MIT, pos=q1,
+                cmds.append(MotorCommand(k[0], k[1], req=REQ_ENABLE, valid=True, pos=q1,
                                          vel=(q2 - q0) / (2.0 * VEL_DT),
                                          use_config_gains=True))
             else:                              # held joint: stiff at the captured pose
-                cmds.append(MotorCommand(k[0], k[1], mode=MODE_MIT, pos=self._p0[k], vel=0.0,
+                cmds.append(MotorCommand(k[0], k[1], req=REQ_ENABLE, valid=True, pos=self._p0[k], vel=0.0,
                                          use_config_gains=True))
         return Action(motors=cmds)
 

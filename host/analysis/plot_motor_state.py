@@ -21,7 +21,7 @@ import sys
 from collections import defaultdict
 
 import convert_log  # sibling module (host/analysis on sys.path when run as a script)
-from master_link.protocol import CAUSE_NAMES, LIFECYCLE_NAMES  # single source of truth
+from master_link.protocol import DRIVE_FAULT_NAMES, DRIVE_STATE_NAMES  # single source of truth
 
 
 def _f(x):
@@ -111,7 +111,7 @@ def _load_state(folder):
         if t is None:
             continue
         state[r["motor"]].append((t, _f(r["pos"]), _f(r["vel"]), _f(r["tau"]),
-                                  int(_f(r["cause"]) or 0), int(_f(r.get("state")) or 0)))
+                                  int(_f(r["drive_fault"]) or 0), int(_f(r.get("drive_state")) or 0)))
     return state, offset, ("master_ts_ms" if use_master else "host_ts")
 
 
@@ -230,14 +230,14 @@ def main(argv=None):
         for t, st in _mode_transitions(samples):
             for ax in axes:
                 ax.axvline(t - t0, color="steelblue", ls="-", lw=0.8, alpha=0.5)
-            axes[0].annotate(LIFECYCLE_NAMES.get(st, f"?{st}"),
+            axes[0].annotate(DRIVE_STATE_NAMES.get(st, f"?{st}"),
                              xy=(t - t0, 0.02), xycoords=("data", "axes fraction"),
                              color="steelblue", fontsize=7, rotation=90, va="bottom", ha="right")
         # Fault onsets: red verticals labeled with the cause (top).
         for t, cause in _fault_onsets(samples):
             for ax in axes:
                 ax.axvline(t - t0, color="red", ls="--", lw=1.0, alpha=0.8)
-            axes[0].annotate(CAUSE_NAMES.get(cause, f"?{cause}"),
+            axes[0].annotate(DRIVE_FAULT_NAMES.get(cause, f"?{cause}"),
                              xy=(t - t0, 1.0), xycoords=("data", "axes fraction"),
                              color="red", fontsize=8, rotation=90, va="top", ha="right")
 

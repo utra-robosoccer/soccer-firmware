@@ -67,30 +67,30 @@ class _LiveDetector:
 
 # ── command / state types (owned here; policies import them) ──────────────────
 # Mode-request constants mirror protocol.MotorModeReq (re-exported for policies).
-MODE_IDLE    = P.REQ_IDLE
-MODE_HOLD    = P.REQ_HOLD
-MODE_MIT     = P.REQ_MIT
-MODE_DAMPED  = P.REQ_DAMPED
-MODE_TO_ZERO = P.REQ_TO_ZERO
+REQ_DISABLE = P.DRV_REQ_DISABLE
+REQ_ENABLE  = P.DRV_REQ_ENABLE
+REQ_STOP    = P.DRV_REQ_STOP
+REQ_RESET   = P.DRV_REQ_RESET
 
-# Armed lifecycles (tele_motor_t.state): HOLD/MIT/DAMPED/TO_ZERO.
-_ARMED_STATES = (P.LIFE_HOLD, P.LIFE_MIT, P.LIFE_DAMPED, P.LIFE_TO_ZERO)
+# Armed drive states (tele_motor_t.drive_state): the motor may produce torque.
+_ARMED_STATES = (P.DRV_ENABLING, P.DRV_ENABLED, P.DRV_STOPPING)
 
 
 @dataclass
 class MotorCommand:
-    """One motor's level-triggered mode request + targets for a tick. Built by a
-    policy and sent (with every other motor's) as one cmd_robot_t per tick."""
+    """One motor's level-triggered drive request + MIT tuple for a tick (protocol
+    v9). The request always applies; the tuple only under valid=True — an enabled
+    motor with no valid tuple yet is LIMP, so streaming starts with the ENABLE."""
     slave: int
     local: int
-    mode: int = P.REQ_IDLE            # MotorModeReq
+    req: int = P.DRV_REQ_DISABLE      # DriveReq
+    valid: bool = False               # the MIT tuple below is live
     pos: float = 0.0
     vel: float = 0.0
     kp: float = 0.0
     kd: float = 0.0
     tau_ff: float = 0.0
     use_config_gains: bool = True     # ignore wire kp/kd, use the slave's config
-    fault_reset: bool = False         # clear a latched fault this tick
 
 
 @dataclass(frozen=True)
@@ -98,16 +98,16 @@ class MotorSnap:
     slave: int
     local: int
     gidx: int | None
-    state: int          # MotorLifecycle (LIFE_*)
-    cause: int          # MotorFaultCause
+    drive_state: int    # DriveState (DRV_*)
+    drive_fault: int    # MotorFaultCause
     pos: float
     vel: float
     tau: float
     temp: float
-    motor_mode: int     # RS Type-2 run mode (0 reset/1 cal/2 normal)
-    motor_fault: int
+    rs_mode: int        # RS Type-2 run mode (0 reset/1 cal/2 normal)
+    rs_fault_bits: int
     flags: int          # TELE_FLAG_*
-    fault_word: int
+    rs_fault_word: int
     fb_age: int
     last_applied_seq: int
     master_ts_ms: int   # MsgHeader.ts_ms (master tick at emit)
@@ -116,27 +116,26 @@ class MotorSnap:
     @property
     def request_rejected(self) -> bool: return bool(self.flags & P.TELE_FLAG_REQUEST_REJECTED)
     @property
-    def to_zero_arrived(self) -> bool: return bool(self.flags & P.TELE_FLAG_TO_ZERO_ARRIVED)
-    @property
     def saturated(self) -> bool: return bool(self.flags & P.TELE_FLAG_SATURATED)
     @property
-    def state_name(self) -> str: return P.LIFECYCLE_NAMES.get(self.state, f"?{self.state}")
+    def drive_state_name(self) -> str: return P.DRIVE_STATE_NAMES.get(self.drive_state, f"?{self.drive_state}")
     @property
-    def cause_name(self) -> str: return P.CAUSE_NAMES.get(self.cause, f"?{self.cause}")
+    def drive_fault_name(self) -> str: return P.DRIVE_FAULT_NAMES.get(self.drive_fault, f"?{self.drive_fault}")
 
 
 @dataclass(frozen=True)
 class LinkState:
     motors: dict            # (slave, local) -> MotorSnap
-    master: dict | None     # robot_state, slave_alive, uptime_ms, link_errors, rx_frames, rates
+    master: dict | None     # schema_hash, slave_proto_mismatch, uptime_ms, link_errors, rates
     slaves: dict            # slave_id -> dict(motors_alive, crc_errors, cmd_crc_errors, seq_gaps)
     robot: dict | None      # tele_robot_t meta: cycle_id, last_cmd_seq_rx, cmd_seq_active,
-                            #   cmd_on_time/late/missing/duplicate, ...
+                            #   cmd_on_time/late/missing/duplicate, robot_state,
+                            #   chain_link {slave: CHAIN_LINK_*}, ...
     stamp_ns: int
 
     def armed_motors(self):
         """(slave, local) of motors currently in an armed lifecycle."""
-        return [k for k, m in self.motors.items() if m.state in _ARMED_STATES]
+        return [k for k, m in self.motors.items() if m.drive_state in _ARMED_STATES]
 
 
 class MasterLink:
@@ -258,6 +257,8 @@ class MasterLink:
                                    cmd_on_time=d["cmd_on_time"], cmd_late=d["cmd_late"],
                                    cmd_missing=d["cmd_missing"], cmd_duplicate=d["cmd_duplicate"],
                                    n_chains=d["n_chains"], robot_state=d["robot_state"],
+                                   chain_link={ch["chain_id"]: ch["link"]
+                                               for ch in d["chains"]},
                                    recv_ns=recv_ns)
                 self._cycle_id = d["cycle_id"]
                 for ch in d["chains"]:
@@ -266,10 +267,11 @@ class MasterLink:
                         key = (sid, local)
                         self._motors[key] = MotorSnap(
                             slave=sid, local=local, gidx=self._gidx.get(key),
-                            state=mo.state, cause=mo.cause, pos=mo.pos, vel=mo.vel,
-                            tau=mo.tau, temp=mo.temp, motor_mode=mo.motor_mode,
-                            motor_fault=mo.motor_fault, flags=mo.flags,
-                            fault_word=mo.fault_word, fb_age=mo.fb_age_ms,
+                            drive_state=mo.drive_state, drive_fault=mo.drive_fault,
+                            pos=mo.pos, vel=mo.vel,
+                            tau=mo.tau, temp=mo.temp, rs_mode=mo.rs_mode,
+                            rs_fault_bits=mo.rs_fault_bits, flags=mo.flags,
+                            rs_fault_word=mo.rs_fault_word, fb_age=mo.fb_age_ms,
                             last_applied_seq=mo.last_applied_seq,
                             master_ts_ms=ts_ms, recv_ns=recv_ns)
                         det = self._live.get(key)
@@ -411,20 +413,26 @@ class MasterLink:
             with self._lock:
                 cycle_id = self._cycle_id
 
-        # Group by slave → chains, motors ordered by local index.
+        # Group by slave → chains. Each command is placed AT ITS LOCAL SLOT (the
+        # slave applies motors[i] to motor i); un-commanded slots on an addressed
+        # slave are zero-filled, i.e. DISABLE with no tuple — a cmd_robot_t
+        # addresses whole slaves, and motors a policy does not drive stay off.
         by_slave: dict = {}
         for c in cmds:
-            by_slave.setdefault(c.slave, []).append(c)
+            by_slave.setdefault(c.slave, {})[c.local] = c
         chains = []
         for sid in sorted(by_slave):
+            slots = by_slave[sid]
             motors = []
-            for c in sorted(by_slave[sid], key=lambda m: m.local):
-                flags = P.CMD_FLAG_VALID
+            for local in range(max(slots) + 1):
+                c = slots.get(local)
+                if c is None:
+                    motors.append(dict(drive_req=P.DRV_REQ_DISABLE, flags=0))
+                    continue
+                flags = P.CMD_FLAG_VALID if c.valid else 0
                 if c.use_config_gains:
                     flags |= P.CMD_FLAG_USE_CONFIG_GAINS
-                if c.fault_reset:
-                    flags |= P.CMD_FLAG_FAULT_RESET
-                motors.append(dict(mode_req=c.mode, pos=c.pos, vel=c.vel,
+                motors.append(dict(drive_req=c.req, pos=c.pos, vel=c.vel,
                                    kp=c.kp, kd=c.kd, tau_ff=c.tau_ff, flags=flags))
             chains.append(dict(chain_id=sid, motors=motors))
 

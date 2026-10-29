@@ -39,16 +39,25 @@ def active_config_name() -> str | None:
     return env_override() or active_file_name()
 
 
+def _fw_config_path(name: str) -> str:
+    return os.path.join(_CONFIGS, name, "firmware_config.yaml")
+
+
 def _yaml_paths(name: str) -> list[str]:
     return sorted(glob.glob(os.path.join(_CONFIGS, name, "slave*.yaml")),
                   key=os.path.basename)
 
 
 def config_yaml(name: str | None = None) -> dict[str, str]:
-    """{filename: contents} for a setup's slave YAMLs (for the log header)."""
+    """{filename: contents} for a setup's config (for the log header). Prefers the single
+    firmware_config.yaml artifact; falls back to the legacy per-slave YAMLs."""
     name = name or active_config_name()
     if not name:
         return {}
+    fw = _fw_config_path(name)
+    if os.path.isfile(fw):
+        with open(fw) as fh:
+            return {"firmware_config.yaml": fh.read()}
     out = {}
     for p in _yaml_paths(name):
         with open(p) as fh:
@@ -57,10 +66,18 @@ def config_yaml(name: str | None = None) -> dict[str, str]:
 
 
 def config_hash(name: str | None = None) -> str | None:
-    """sha256 over a setup's slave YAMLs, sorted by filename (matches the generator)."""
+    """The setup's config hash, matching scripts/gen_motor_config.py's CONFIG_HASH:
+    the firmware_config.yaml artifact's embedded content_sha256 when present, else the
+    legacy sha256 over the slave*.yaml contents (sorted by filename)."""
     name = name or active_config_name()
     if not name:
         return None
+    fw = _fw_config_path(name)
+    if os.path.isfile(fw):
+        import yaml  # local import: only the single-file path needs a YAML parser
+        with open(fw) as fh:
+            doc = yaml.safe_load(fh) or {}
+        return doc.get("content_sha256")
     paths = _yaml_paths(name)
     if not paths:
         return None
@@ -102,7 +119,7 @@ def check_config_fresh() -> tuple[bool, str]:
     live_hash = config_hash(file_name)
     if live_hash is None:
         return False, (f"configs/active names {file_name!r} but configs/{file_name}/ "
-                       "has no slave*.yaml")
+                       "has no firmware_config.yaml or slave*.yaml")
 
     env = env_override()
     env_note = ""
@@ -141,10 +158,23 @@ def git_info() -> dict:
     return info
 
 
+def protocol_yaml_text() -> str | None:
+    """The full wire-schema text (firmware/common/protocol.yaml), or None when the
+    host runs without the firmware tree."""
+    p = os.path.join(_REPO_ROOT, "firmware", "common", "protocol.yaml")
+    if os.path.isfile(p):
+        with open(p, encoding="utf-8") as fh:
+            return fh.read()
+    return None
+
+
 def build_log_meta(producer: str) -> dict:
     """Binary-log header metadata. Records the config the RUNTIME actually uses (the
     generated module) plus the configs/active file and any $SOCCER_SETUP override, so
-    a divergence is captured in the log itself."""
+    a divergence is captured in the log itself. Since v10 it also embeds the FULL
+    wire schema + its hash, so the log stays decodable after the protocol moves on
+    (convert_log falls back to the embedded schema on a hash mismatch)."""
+    from . import protocol as P   # local import: avoid a cycle at package import
     gi = git_info()
     file_name = active_file_name()
     gen_name, gen_hash = generated_config()
@@ -157,4 +187,6 @@ def build_log_meta(producer: str) -> dict:
         "configs_active": file_name,      # the persistent pointer
         "soccer_setup": env_override(),   # env override, if any
         "config_yaml": config_yaml(file_name),
+        "schema_hash": P.SCHEMA_HASH,     # the wire contract this session spoke
+        "protocol_yaml": protocol_yaml_text(),
     }

@@ -16,12 +16,14 @@ import time
 
 from master_link import config_meta
 from master_link import motor_config_gen as mc
-from master_link.link import MasterLink, MotorCommand, MODE_IDLE
+from master_link import protocol as P
+from master_link.link import MasterLink, MotorCommand, REQ_DISABLE
 from policies.listen_policy import ListenPolicy
 from policies.man_1s_1m_policy import Man1s1mPolicy
 from policies.bench_sine import BenchSinePolicy
 from policies.legs_sine import LegsSinePolicy
 from policies.legs_walk import LegsWalkPolicy
+from policies.arm_timing import ArmTimingPolicy
 
 POLICIES = {
     "listen": ListenPolicy,
@@ -29,6 +31,7 @@ POLICIES = {
     "bench_sine": BenchSinePolicy,
     "legs_sine": LegsSinePolicy,
     "legs_walk": LegsWalkPolicy,
+    "arm_timing": ArmTimingPolicy,
 }
 
 
@@ -78,9 +81,21 @@ def main(argv=None):
         sys.exit(str(e))
     print(f"port {link.port}  |  logging to {link.log_path}")
 
-    # Don't act on the stale burst that drains at port open: wait until every configured
-    # motor's telemetry is confirmed live before setup()/the first step().
-    ok, missing = link.wait_until_live(timeout=2.0)
+    # Don't act on the stale burst that drains at port open: wait until the telemetry of
+    # every motor this run will COMMAND is confirmed live before setup()/the first step().
+    # A policy's "--motors s.l,..." narrows the wait — a bench policy driving one chain
+    # must not require an unrelated (absent or version-mismatched) slave to be up. With
+    # no subset given, every configured motor must be live.
+    live_keys = None
+    mspec = getattr(args, "motors", None)
+    if mspec and mspec != "all":
+        live_keys = set()
+        for tok in mspec.split(","):
+            tok = tok.strip()
+            if tok:
+                s_str, l_str = tok.split(".")
+                live_keys.add((int(s_str), int(l_str)))
+    ok, missing = link.wait_until_live(keys=live_keys, timeout=2.0)
     if not ok:
         link.log_event("error:no_live_telemetry")
         link.close()
@@ -97,6 +112,13 @@ def main(argv=None):
         link.log_event("error:no_master_status"); link.close()
         sys.exit("no MasterStatus within 0.5 s — cannot verify the master cycle rate "
                  "(is the master firmware up to date?).")
+    live_hash = mstat.get("schema_hash", 0)
+    if live_hash != P.SCHEMA_HASH:
+        link.log_event("error:schema_mismatch"); link.close()
+        sys.exit(f"wire-schema mismatch: host SCHEMA_HASH 0x{P.SCHEMA_HASH:08X}, but the "
+                 f"master reports 0x{live_hash:08X}. Host and firmware were generated from "
+                 f"different protocol.yaml revisions — reflash the boards or update the "
+                 f"host checkout; refusing to run on a mismatched wire contract.")
     live_hz = mstat.get("master_poll_hz", 0)
     if live_hz != mc.MASTER_POLL_HZ:
         link.log_event("error:rate_mismatch"); link.close()
@@ -198,7 +220,7 @@ def _shutdown(link, policy, stop_reason, rate, N, cycle_us, seq,
     try:
         armed = link.latest_state().armed_motors()
         if armed:
-            link.send_robot_cmd([MotorCommand(s, l, mode=MODE_IDLE) for (s, l) in armed])
+            link.send_robot_cmd([MotorCommand(s, l, req=REQ_DISABLE) for (s, l) in armed])
             print(f"disabled {len(armed)} armed motor(s): {armed}")
     except Exception:
         pass

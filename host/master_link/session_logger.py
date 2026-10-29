@@ -22,9 +22,9 @@ Row schema (one row per telemetry frame and per command sent):
   slave    slave id | ''
   local    local motor index within the slave | ''
   opcode   command name for 'C' rows (MIT / ARM_HOLD / GOTO_ZERO / DISABLE / PING)
-  state    lifecycle+cause byte's lifecycle (T rows)
-  cause    fault cause (T rows)
-  flags    motor_fault bits (T rows)
+  drive_state  per-motor lifecycle (T rows)
+  drive_fault  latched fault cause (T rows)
+  flags        rs_fault_bits (T rows)
   pos vel tau   measured (T) or commanded (C, MIT)
   kp kd    commanded gains (C, MIT)
 """
@@ -36,7 +36,7 @@ import time
 from datetime import datetime
 
 FIELDS = ["host_ts", "master_ts_ms", "kind", "motor", "slave", "local", "opcode",
-          "state", "cause", "flags", "pos", "vel", "tau", "kp", "kd", "cmd_seq"]
+          "drive_state", "drive_fault", "flags", "pos", "vel", "tau", "kp", "kd", "cmd_seq"]
 
 # Buffer size cap: if the background flusher stalls (slow/full disk), the in-memory
 # buffer is bounded here rather than growing without limit. Rows over the cap are
@@ -70,13 +70,13 @@ class SessionLogger:
 
     # ── producer side (called from serial RX / write threads) ──────────────────
 
-    def log_tele(self, motor, state, cause, flags, pos, vel, tau,
+    def log_tele(self, motor, drive_state, drive_fault, flags, pos, vel, tau,
                  slave=None, local=None, host_ts=None, master_ts_ms=None):
         self._append({
             "host_ts": self._clock() if host_ts is None else host_ts,
             "master_ts_ms": master_ts_ms,
             "kind": "T", "motor": motor, "slave": slave, "local": local,
-            "state": state, "cause": cause, "flags": flags,
+            "drive_state": drive_state, "drive_fault": drive_fault, "flags": flags,
             "pos": pos, "vel": vel, "tau": tau,
         })
 

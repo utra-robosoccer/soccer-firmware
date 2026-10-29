@@ -307,14 +307,22 @@ int main(void)
       data_receive_flag = 0;
       __enable_irq();
 
-      /* Verify the command-frame CRC + extract the header and cmd_chain_t. On a CRC
-         failure apply nothing (a corrupt command must not refresh watchdogs or move a
-         motor), count it, and resync the DMA — send nothing this exchange. */
+      /* Verify the command-frame CRC + version trailer, extract the header and
+         cmd_chain_t. On a CRC failure apply nothing (a corrupt command must not
+         refresh watchdogs or move a motor), count it, and resync the DMA — send
+         nothing this exchange. On a VERSION MISMATCH (CRC-intact frame from a
+         master built against a different wire contract) apply nothing and count
+         it, but do NOT resync: the link itself is framed correctly, and with no
+         fresh commands ever applied the master-loss watchdog keeps the motors
+         safe until someone reflashes. */
       SpiCmdHdr   hdr;
       cmd_chain_t chain;
-      if (!spi_proto_parse_cmd(cmd_local, &hdr, &chain)) {
+      uint8_t parse = spi_proto_parse_cmd(cmd_local, &hdr, &chain);
+      if (parse == SPI_PARSE_BAD) {
         cmd_crc_errors++;
         slave_spi_resync(&hspi1);
+      } else if (parse == SPI_PARSE_MISMATCH) {
+        cmd_crc_errors++;             /* counted with CRC rejects (both = "refused") */
       } else {
         spi_echo_seq = hdr.spi_seq;   /* echo the SPI link-health seq */
         uint8_t cmd_fresh = (hdr.opcode == SPI_OP_ROBOT_CMD) ? 1u : 0u;
@@ -330,10 +338,9 @@ int main(void)
             motor_runtime_apply_cmd(_i, &chain.motors[_i], hdr.cmd_seq);
           }
         }
-        /* apply_cmd → arm_enable can BLOCK ~25 ms (CAN enable handshake + settle delays),
-           so refresh the time base before servicing. Otherwise the watchdog/fault checks
-           run against the pre-arm `now` while watchdog_ms was just set to a later tick, and
-           (now - watchdog_ms) underflows u32 → a spurious WATCHDOG trip right after arming. */
+        /* The arm handshake is async now (arm_sm.h) so apply_cmd no longer blocks; the
+           time-base refresh stays as cheap insurance that watchdog/fault checks never
+           run against a `now` captured before a slow apply. */
         now     = HAL_GetTick();
         now_cyc = DWT->CYCCNT;
         /* Forward service: drive the applied command (cmd_fresh) or, on a NOP, hold/ramp.

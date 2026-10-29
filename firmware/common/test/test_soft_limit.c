@@ -34,6 +34,85 @@ int main(void)
     p = -0.90f; CHECK(!soft_clamp_pos(&p, -0.90f, LO, HI) && EQ(p, -0.90f),
                       "hold at shaft (low, outside) unclamped");
 
+    /* ── soft_clamp_mit: full MIT-tuple clamp (pos + outward ff cancel + |tau_ff| bound) ── */
+    {
+        float v, t;
+        uint8_t c;
+        #define VEL_LIM 10.0f
+        #define TAU_LIM 0.8f
+
+        /* In range, feedforward within bound: everything passes through untouched. */
+        p = 0.5f; v = 1.0f; t = 0.3f;
+        c = soft_clamp_mit(&p, &v, &t, 0.4f, LO, HI, VEL_LIM, TAU_LIM);
+        CHECK(c == 0u && EQ(p, 0.5f) && EQ(v, 1.0f) && EQ(t, 0.3f), "mit: in-range passthrough");
+
+        /* |tau_ff| bound alone (no position clamp): clamped to ±TAU_LIM, FF bit set. */
+        p = 0.0f; v = 0.0f; t = 2.0f;
+        c = soft_clamp_mit(&p, &v, &t, 0.0f, LO, HI, VEL_LIM, TAU_LIM);
+        CHECK(c == SOFT_CLAMPED_FF && EQ(t, TAU_LIM), "mit: tau_ff bound high");
+        p = 0.0f; v = 0.0f; t = -2.0f;
+        c = soft_clamp_mit(&p, &v, &t, 0.0f, LO, HI, VEL_LIM, TAU_LIM);
+        CHECK(c == SOFT_CLAMPED_FF && EQ(t, -TAU_LIM), "mit: tau_ff bound low");
+
+        /* Position clamped from above: outward (positive) vel AND tau_ff cancelled. */
+        p = 0.9f; v = 1.0f; t = 0.3f;
+        c = soft_clamp_mit(&p, &v, &t, 0.4f, LO, HI, VEL_LIM, TAU_LIM);
+        CHECK(c == (SOFT_CLAMPED_POS | SOFT_CLAMPED_FF) && EQ(p, HI) && EQ(v, 0.0f) && EQ(t, 0.0f),
+              "mit: over hi cancels outward ff");
+
+        /* Position clamped from above, but INWARD (negative) feedforward is kept. */
+        p = 0.9f; v = -1.0f; t = -0.3f;
+        c = soft_clamp_mit(&p, &v, &t, 0.4f, LO, HI, VEL_LIM, TAU_LIM);
+        CHECK(c == SOFT_CLAMPED_POS && EQ(p, HI) && EQ(v, -1.0f) && EQ(t, -0.3f),
+              "mit: over hi keeps inward ff");
+
+        /* Position clamped from below: outward (negative) vel and tau_ff cancelled. */
+        p = -0.9f; v = -1.0f; t = -0.3f;
+        c = soft_clamp_mit(&p, &v, &t, 0.0f, LO, HI, VEL_LIM, TAU_LIM);
+        CHECK(c == (SOFT_CLAMPED_POS | SOFT_CLAMPED_FF) && EQ(p, LO) && EQ(v, 0.0f) && EQ(t, 0.0f),
+              "mit: under lo cancels outward ff");
+
+        /* Shaft parked outside: holding at the shaft is unclamped; inward tau_ff kept. */
+        p = 0.89f; v = 0.0f; t = -0.2f;
+        c = soft_clamp_mit(&p, &v, &t, 0.89f, LO, HI, VEL_LIM, TAU_LIM);
+        CHECK(c == 0u && EQ(p, 0.89f) && EQ(t, -0.2f), "mit: parked outside, inward ff kept");
+
+        /* Shaft parked outside, commanded further out with outward tau_ff: both clamped. */
+        p = 0.95f; v = 0.0f; t = 0.2f;
+        c = soft_clamp_mit(&p, &v, &t, 0.89f, LO, HI, VEL_LIM, TAU_LIM);
+        CHECK(c == (SOFT_CLAMPED_POS | SOFT_CLAMPED_FF) && EQ(p, 0.89f) && EQ(t, 0.0f),
+              "mit: parked outside, outward ff cancelled");
+
+        /* Outward cancel and magnitude bound compose: inward tau over the bound while
+           position is clamped → kept inward but bounded. */
+        p = 0.9f; v = 0.0f; t = -2.0f;
+        c = soft_clamp_mit(&p, &v, &t, 0.4f, LO, HI, VEL_LIM, TAU_LIM);
+        CHECK(c == (SOFT_CLAMPED_POS | SOFT_CLAMPED_FF) && EQ(p, HI) && EQ(t, -TAU_LIM),
+              "mit: inward tau bounded while pos clamped");
+
+        /* |vel| bound (max_vel): clamped to ±VEL_LIM, FF bit set, both directions. */
+        p = 0.0f; v = 15.0f; t = 0.0f;
+        c = soft_clamp_mit(&p, &v, &t, 0.0f, LO, HI, VEL_LIM, TAU_LIM);
+        CHECK(c == SOFT_CLAMPED_FF && EQ(v, VEL_LIM), "mit: vel bound high");
+        p = 0.0f; v = -15.0f; t = 0.0f;
+        c = soft_clamp_mit(&p, &v, &t, 0.0f, LO, HI, VEL_LIM, TAU_LIM);
+        CHECK(c == SOFT_CLAMPED_FF && EQ(v, -VEL_LIM), "mit: vel bound low");
+        p = 0.0f; v = 9.9f; t = 0.0f;
+        c = soft_clamp_mit(&p, &v, &t, 0.0f, LO, HI, VEL_LIM, TAU_LIM);
+        CHECK(c == 0u && EQ(v, 9.9f), "mit: vel within bound untouched");
+        #undef VEL_LIM
+        #undef TAU_LIM
+    }
+
+    /* ── soft_clamp_range: plain [lo,hi] clamp (used for gains + the ff bounds) ── */
+    {
+        float x;
+        x = 600.0f; CHECK( soft_clamp_range(&x, 0.0f, 500.0f) && EQ(x, 500.0f), "range: over hi");
+        x = -1.0f;  CHECK( soft_clamp_range(&x, 0.0f, 500.0f) && EQ(x, 0.0f),   "range: under lo");
+        x = 250.0f; CHECK(!soft_clamp_range(&x, 0.0f, 500.0f) && EQ(x, 250.0f), "range: inside");
+        x = 500.0f; CHECK(!soft_clamp_range(&x, 0.0f, 500.0f) && EQ(x, 500.0f), "range: at hi edge");
+    }
+
     if (failures == 0) { printf("OK soft_limit\n"); return 0; }
     fprintf(stderr, "soft_limit: %d FAILURE(S)\n", failures);
     return 1;

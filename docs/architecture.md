@@ -33,7 +33,7 @@ docs an older `architecture.md` claimed to replace — `protocol.md`, `telemetry
 | **forward-on-command** | the slave services on receipt of each valid exchange, not on its own timer |
 | **cmd_seq** | `uint16` host command sequence, one per host tick (≥1, 0 = `CMD_SEQ_NONE`); echoed back as `last_applied_seq` |
 | **spi_seq** | `uint8` per-slave SPI link-health counter, echoed as `spi_seq_echo` — distinct from `cmd_seq` |
-| **arm (motor)** | enable a motor: the blocking CAN handshake on IDLE→HOLD (`arm_enable`, ~23 ms) |
+| **arm (motor)** | enable a motor: the async CAN handshake on IDLE→HOLD (`arm_sm.h`, ~11–13 cycles, non-blocking) |
 | **arm (SPI TX)** | load the slave's next telemetry frame into the TX DMA (`spi_arm_tx`) — unrelated to motor arming |
 | **mailbox (master)** | the double-buffered per-slave command store (`pend_*` → swap → `host_chain[]`) |
 | **late-arm** | the slave delays the SPI-TX arm to a TIM3 deadline so the fresh CAN reply rides the next exchange |
@@ -104,87 +104,48 @@ alive chains into a `tele_robot_t` (populated prefix only) → USB TX ring → h
 
 ## 2. Data structures
 
-All multi-byte wire fields are **little-endian, packed** (`PROTO_PACKED`). Fixed-point scales are
-shared (`protocol.h`): pos ×10000 (home-frame ±π, i16), vel ×100 (i16), tau ×100 (i16), Kp ×10
-(u16), Kd ×100 (u16). The C header and `host/master_link/protocol.py` are kept in lockstep by the
-cross-language fixture test (`firmware/common/test/gen_fixture.c` ↔ `host/tests/test_protocol.py`).
+All multi-byte wire fields are **little-endian, packed**. Since v10 every wire layout —
+constants, enums, flag bits, fixed-point scales, every struct, the derived frame sizes — is
+GENERATED from the single source of truth **`firmware/common/protocol.yaml`** by
+`scripts/gen_protocol.py` (see `docs/protocol.md` for the change workflow). Do not edit the
+generated files (`protocol_gen.h`, `_protocol_gen.py`, `robot_wire_gen.hpp`); the `--check`
+drift gate in the test suite rejects it.
 
-### 2.1 Wire structs (`firmware/common/include/protocol.h`, `_Static_assert` on every size)
+### 2.1 Wire structs (generated — see `protocol.yaml` for the authoritative layout)
 
-**`MsgHeader` — 16 B** (every USB frame; CRC covers header-with-crc=0 + payload)
-| field | type | meaning | writer | reader |
-|---|---|---|---|---|
-| `type` | u16 | `MsgType` | `proto_build` | `proto_frame_scan` / `decode_frame` |
-| `seq` | u16 | per-message counter (PING echoes it) | sender | diagnostics |
-| `src`,`dst` | u8,u8 | `NodeId` (JETSON 1, MASTER 2, SLAVE_0 3, SLAVE_1 4) | sender | — |
-| `ts_ms` | u32 | sender `HAL_GetTick()` (host live-detect reads the master's) | sender | host `_LiveDetector` |
-| `len` | u16 | payload bytes | `proto_build` | scanner |
-| `ver_flags` | u16 | low byte = `PROTO_VERSION` (8); high reserved 0 | `proto_build` | both ends drop+count on mismatch |
-| `crc16` | u16 | CRC16-CCITT | `proto_build` | scanner |
+The schema carries every field's type, order, scale and doc string; `protocol_gen.h` pins the
+layout with a `_Static_assert` on every struct size AND every field offset, and the golden
+fixtures (`gen_fixture.c` ↔ `test_protocol.py` ↔ `generated/cpp/fixtures/`) pin the bytes in
+all three languages. What follows is the semantic map only:
 
-**Command hierarchy (host→master→slave)**
-| struct | size | fields |
-|---|---|---|
-| `cmd_motor_t` | 12 B | `mode_req` (`MotorModeReq`), `pos/vel/kp/kd/tau_ff` (fixed-point), `flags` (`CMD_FLAG_*`) |
-| `cmd_chain_t` | 62 B | `chain_id`, `n_motors`, `cmd_motor_t[5]` |
-| `cmd_robot_t` | 254 B | `cycle_id` (host echo of last telemetry cycle), `cmd_seq`, `n_chains`, `reserved` (test sentinel 0xDE/0xB0), `cmd_chain_t[4]` |
-
-**Telemetry hierarchy (slave→master→host)**
-| struct | size | fields |
-|---|---|---|
-| `tele_motor_t` | 21 B | see 2.2 |
-| `tele_chain_t` | **118 B** | `chain_id`, `n_motors`, `spi_seq_echo`, `spi_resyncs` (u8, wraps), `slave_time_us` (u32), `cmd_crc_errors` (u16), `can_tx_errors` (u16), `spi_tx_arm_fails` (u8, wraps — added v8), `tele_motor_t[5]` |
-| `tele_robot_t` | **492 B** | `cycle_id`, `master_time_us` (u32), `last_cmd_seq_rx`, `cmd_seq_active`, `cmd_on_time`, `cmd_late`, `cmd_missing`, `cmd_duplicate` (all u16), `n_chains`, `robot_state`, `tele_chain_t[4]` |
-
-> The in-code size **comments** on `tele_chain_t` (“117”), `tele_robot_t` (“488”) and the SPI block
-> (“119 B”) are stale; the `_Static_assert`s (118 / 492) and `SPI_XFER_SIZE` are correct.
-
-**`tele_motor_t` — 21 B** (built by `motor_runtime_sample`, parsed into host `TeleMotor`)
-| off | field | type | units / encoding | writer | purpose |
-|---|---|---|---|---|---|
-| 0 | `pos` | i16 | rad ×10000, home-frame wrapped [−π,π] | slave | measured position |
-| 2 | `vel` | i16 | rad/s ×100 | slave | measured velocity |
-| 4 | `tau` | i16 | N·m ×100 | slave | measured torque |
-| 6 | `temp_c` | u8 | °C | slave | motor temperature |
-| 7 | `state` | u8 | `MotorLifecycle` (full byte) | slave mode SM | lifecycle |
-| 8 | `cause` | u8 | `MotorFaultCause` (latched) | slave | why faulted |
-| 9 | `motor_mode` | u8 | RS Type-2 run mode (0 reset/1 cal/2 normal) | slave (from CAN) | enable monitor source |
-| 10 | `motor_fault` | u8 | packed Type-2 fault bits | slave | motor self-faults |
-| 11 | `flags` | u8 | `TELE_FLAG_*` | slave | rejected/arrived/saturated/clamped/stale |
-| 12 | `fb_age_ms` | u8 | ms since last Type-2, sat 255 | slave | feedback freshness |
-| 13 | `fault_word` | u32 | 0 clear / 0xFFFFFFFF read-fail / raw 0x3022 | slave | RS fault register |
-| 17 | `last_applied_seq` | u16 | host `cmd_seq` last confirmed applied (0 = none) | slave (`cmd_seq_track`) | latency pairing |
-| 19 | `reserved` | u16 | 0 | — | growth slot |
-
-**`MasterStatus` — 30 B** (`emit_master_status`, 20 Hz)
-`robot_state`, `slave_alive` (bitmask), `uptime_ms`, `link_errors`, `rx_frames`, `master_poll_hz`,
-`telemetry_hz`, `slave_tick_hz`, `host_cmd_hz`, `rx_resyncs`, `rx_discarded_bytes`.
-> **There is no `missed_deadlines` field.** TIM2 overruns are counted internally
-> (`master_cycle_overruns()`) but are not currently on the wire.
-
-**`SlaveStatus` — 18 B** (`emit_slave_status`, 20 Hz, master-generated)
-`slave_id`, `motors_alive` (bitmask), `uptime_ms`, `crc_errors` (telemetry frames the master
-dropped), `cmd_crc_errors` (relayed from the slave), `seq_gaps` (master-observed echo stalls).
-
-**SPI frame (one exchange; `SPI_XFER_SIZE` = max of the two = 120 B)**
-| dir | layout | size |
-|---|---|---|
-| master→slave | `[opcode u8][spi_seq u8][cycle_id u16][cmd_seq u16][cmd_chain_t (62)][crc16]` | 70 B |
-| slave→master | `[tele_chain_t (118)][crc16]` | 120 B |
-
-**Enums / flags**
-| enum | values |
-|---|---|
-| `MsgType` | PING 0x01, MASTER_STATUS 0x02, SLAVE_STATUS 0x03, ROBOT_CMD 0x08, ROBOT_TELE 0x09 |
-| `MotorModeReq` (cmd) | IDLE 0, HOLD 1, MIT 2, DAMPED 3, TO_ZERO 4 |
-| `MotorLifecycle` (tele `state`) | BOOT 0, DISCOVERING 1, IDLE 2, HOLD 3, MIT 4, DAMPED 5, TO_ZERO 6, FAULT 7 |
-| `MotorFaultCause` | NONE 0, OVERTORQUE 1, CAN_TIMEOUT 2, WATCHDOG 3*, MOTOR_FAULT 4, ZERO_TIMEOUT 5, NOT_ENABLED 6, WOUND 7, MASTER_LOST 8 |
-| `RobotState` | INIT 0, READY 1, DEGRADED 2, HOST_LOST 3 |
-| `CMD_FLAG_*` | VALID b0, USE_CONFIG_GAINS b1, FAULT_RESET b2 |
-| `TELE_FLAG_*` | REQUEST_REJECTED b0, TO_ZERO_ARRIVED b1, SATURATED b2, CLAMPED_POS b3, CLAMPED_TAU b4, CMD_STALE b5 |
-
-\* `CAUSE_WATCHDOG` (3) is defined but **no longer raised** — the master-loss ramp uses
-`CAUSE_MASTER_LOST` (8) instead (see §7, §8).
+- **`MsgHeader` 16 B** — every USB frame; `ver_flags` low byte = `PROTO_VERSION` (10), CRC16
+  over header-with-crc=0 + payload; both ends drop + count wrong-version frames.
+- **Commands (host→master→slave)**: `cmd_motor_t` 12 B (`drive_req` + fixed-point MIT tuple +
+  flags; VALID gates the tuple, the request always applies) → `cmd_chain_t` 62 B →
+  `cmd_robot_t` 254 B (`reserved` carries the 0xDE/0xB0 test sentinels). Always transmitted
+  full-size.
+- **Telemetry (slave→master→host)**: `tele_motor_t` 21 B (measured pos/vel/tau/temp,
+  `drive_state`/`drive_fault`, RS mirrors, flags, `fb_age_ms`, `last_applied_seq` for latency
+  pairing) → `tele_chain_t` 119 B (link-health counters + the master-authored **`link`** byte:
+  `CHAIN_LINK_LOST/ALIVE/MISMATCH`) → `tele_robot_t` 496 B full-size (cycle/cmd-seq echoes,
+  the four host-timing counters, `robot_state`, chains). The master emits EVERY configured
+  chain every cycle at its fixed slot (`chains[s]` = slave s, `n_chains` = configured count)
+  and transmits the populated prefix; a non-ALIVE chain carries `n_motors = 0`. Consumers must
+  never remap chains by packing order.
+- **`MasterStatus` 33 B** (20 Hz) — `schema_hash` (host refuses on mismatch),
+  `slave_proto_mismatch` bitmask, uptime, USB link counters, configured rates. `robot_state`
+  and per-slave reachability ride telemetry, not status. (TIM2 overruns are counted
+  internally by `master_cycle_overruns()` but are not on the wire.)
+- **`SlaveStatus` 18 B** (20 Hz, master-generated) — per-slave `crc_errors` (telemetry frames
+  the master dropped), `cmd_crc_errors` (relayed; includes version-gate rejects), `seq_gaps`.
+- **SPI exchange** (`SPI_XFER_SIZE` 126 B): master→slave
+  `[opcode][spi_seq][cycle_id][cmd_seq][cmd_chain_t][spi_trailer_t][crc16]` = 75 B;
+  slave→master `[tele_chain_t][spi_trailer_t][crc16]` = 126 B. `spi_trailer_t`
+  (`proto_version` + `schema_hash`) is the symmetric version gate: a mismatched peer's
+  payload is refused, polling continues, recovery is automatic on reflash
+  (`docs/protocol_v9.md` §10).
+- **Enum values** (DriveReq/DriveState/DriveFault/RobotState/ChainLink/flags): see
+  `protocol.yaml` — one place, with docs per value.
 
 ### 2.2 Firmware internal state
 
@@ -256,18 +217,22 @@ dropped), `cmd_crc_errors` (relayed from the slave), `seq_gaps` (master-observed
   active set and counts a missing cycle. It classifies the four counters (§6).
 - **Poll:** `poll_one_slave` sends the active chain (`SPI_OP_ROBOT_CMD`), a `SPI_OP_NOP` keepalive if
   nothing was ever applied, or a master **override** (`REQ_DAMPED`/`REQ_IDLE`) when the host-death
-  watchdog has tripped. CRC-valid reply → `latest_tele[s]`, slave/motor alive masks, echo-stall
-  diagnostics. CRC-fail/absent → slave marked offline (its chain is then omitted from telemetry).
-- **Telemetry assembly + prefix truncation:** `emit_robot_tele` copies only currently-alive slaves'
-  chains and transmits only the **populated prefix** (`offsetof(chains)+nc·118`, 138 B payload for
-  one chain) instead of the full 492 B — the host parses by `n_chains`, so the truncation decodes
-  identically and keeps the 200 Hz stream small.
+  watchdog has tripped. CRC-valid reply + trailer match → `latest_tele[s]`, slave/motor alive
+  masks, echo-stall diagnostics. CRC-fail/absent → slave offline (chain reported `LOST`);
+  CRC-valid but trailer mismatch → version gate (chain `MISMATCH`, commands withheld, enables
+  refused robot-wide — docs/protocol_v9.md §10).
+- **Telemetry assembly + prefix truncation:** `emit_robot_tele` emits EVERY configured chain at
+  its fixed slot (`chains[s]` = slave s, master-authored `link` byte; a non-ALIVE chain carries
+  `n_motors = 0`) and transmits the **populated prefix** (`offsetof(chains) + n_chains·119`,
+  n_chains = configured count) instead of the full 496 B — the host parses by `n_chains`.
 - **Host-death watchdog:** `host_watchdog_step` (see §7c).
 
 ### 3c. Master ↔ slave (SPI)
 - **Exchange:** one blocking `HAL_SPI_TransmitReceive` per slave per cycle (master is SPI master,
-  CPOL0/CPHA0, MSB-first; CS on GPIOC `SLAVE_CS_0..3`). 120 B each way. Frame CRC doubles as integrity
-  and presence check (absent slave clocks back garbage → CRC fail).
+  CPOL0/CPHA0, MSB-first; CS on GPIOC `SLAVE_CS_0..3`). `SPI_XFER_SIZE` = 126 B each way (cmd
+  75 B + tele 126 B padded to the max). Frame CRC doubles as integrity and presence check
+  (absent slave clocks back garbage → CRC fail); the `spi_trailer_t` version gate rides between
+  payload and CRC in both directions.
 - **Prescaler:** generated `MASTER_SPI_PRESCALER_DIV` (= **16** → 4.5 MHz; APB2 72 MHz). A bench
   sweep found 64/32/16/8 all CRC-clean on short wiring; **re-validate on the robot harness** and drop
   the prescaler if CRC/resync counters climb.
@@ -290,8 +255,9 @@ dropped), `cmd_crc_errors` (relayed from the slave), `seq_gaps` (master-observed
 ### 3d. Slave internals
 - **Main loop (`main.c`):** on `data_receive_flag`, copy the command under a brief IRQ mask
   (`cmd_local`), CRC-check (`spi_proto_parse_cmd`); on a fresh `SPI_OP_ROBOT_CMD` refresh every
-  motor's watchdog, `motor_runtime_apply_cmd` per motor, then **re-capture `now`/DWT** (arming can
-  block ~23 ms) and `motor_runtime_update` (forward service). The fallback tick services only when
+  motor's watchdog, `motor_runtime_apply_cmd` per motor, then **re-capture `now`/DWT** (cheap
+  insurance — apply no longer blocks since the arm went async) and `motor_runtime_update`
+  (forward service). The fallback tick services only when
   exchanges have stopped (`slave_service_due`, `slave_service.h`).
 - **Feedback (`motor_runtime_on_feedback`):** on each CAN feedback (`can_feedback_count` change)
   mirror the Type-2 into `motors_rt`, step the enable monitor, and pair `cmd_seq` **now** (so the
@@ -300,12 +266,18 @@ dropped), `cmd_crc_errors` (relayed from the slave), `seq_gaps` (master-observed
   (`cmd_seq_on_mit_frame`); the next fresh Type-2 closes it crediting `last_applied`
   (`cmd_seq_on_reply`); any non-MIT frame closes it without crediting; arm/re-hold/to-zero/disable
   reset it (`reset_cmd_seq` from the mode SM). Host comparison is wrap-aware (`seq_ge`, RFC-1982).
-- **Soft-limit one-sided clamp (`soft_limit.h`):** `soft_clamp_pos` extends `[lo,hi]` to include the
+- **Soft-limit one-sided clamp (`soft_limit.h`):** `soft_clamp_mit` extends `[lo,hi]` to include the
   shaft's actual position, so a joint parked outside its range can hold / return but not be driven
-  further out (avoids a clamp-induced overtorque at arm). Sets `CLAMPED_POS`/`CLAMPED_TAU`.
+  further out (avoids a clamp-induced overtorque at arm). It also cancels outward feedforward
+  (`vel`, `tau_ff`) past a clamped position and bounds `|vel|` to `cfg->max_vel` and `|tau_ff|` to
+  `cfg->max_tau` (the overtorque trip threshold). Sets `CLAMPED_POS`/`CLAMPED_TAU`. Wire-sourced
+  kp/kd are clamped to the per-model CAN encode range (`clamp_gains` → `CLAMPED_GAIN`) instead of
+  being silently saturated by the encoder; config-default gains bypass the clamp. Per-joint gain
+  caps tighter than the encode range need the soccer-software model exporter to carry them in
+  `firmware_config.yaml` (follow-up).
 - **Master-loss watchdog (`master_watchdog.h`):** see §7c.
 - **Timebase:** DWT cycle counter (84 MHz); `ms_since(now,t)` is a signed subtraction so a
-  `watchdog_ms`/`armed_ms` set during the ~23 ms arm can't underflow into a spurious trip.
+  `watchdog_ms`/`armed_ms` stamped later in the same cycle can't underflow into a spurious trip.
 
 ### 3e. Slave ↔ motor (CAN, RobStride)
 - **Bus:** classic CAN 2.0, 1 Mbps (`Prescaler 2, BS1 16TQ, BS2 4TQ, SJW 1TQ` → 21 TQ, ~81 % sample
@@ -322,9 +294,13 @@ dropped), `cmd_crc_errors` (relayed from the slave), `seq_gaps` (master-observed
   `HAL_CAN_AddTxMessage`. With 5 motors, 2 sends/cycle find all 3 busy and spin — ~280 µs of wasted
   slave CPU per cycle. **The bus serializes frames regardless of mailbox count**, so this is a CPU
   cost, not a latency one (see §4, §11).
-- **Arm handshake (`arm_enable`, ~23 ms, blocking, once per IDLE→HOLD):** optional fault-clear
-  (`HAL_Delay(5)`) → write MIT run-mode + ≤10 ms ACK wait + `HAL_Delay(10)` → enable + ≤10 ms ACK
-  wait + `HAL_Delay(10)` → first MIT. Never writes mechanical zero.
+- **Arm handshake (ASYNC, `arm_sm.h`, once per IDLE→HOLD):** non-blocking phase machine stepped
+  one CAN action per cycle from `motor_runtime_update`'s IDLE path: optional fault-clear (wait
+  ~5 ms) → write MIT run-mode (wait ~20 ms) → enable (wait ~20 ms) → capture hold + first MIT
+  (`arm_finish` → HOLD). The motor stays IDLE on the wire until completion; HOLD re-requests are
+  idempotent, an IDLE request or master loss mid-handshake cancels. All motors arm concurrently
+  (one frame per motor per cycle — the IDLE-poll budget): **~11–13 cycles ≈ 55–65 ms total
+  regardless of motor count**, no loop stall. Never writes mechanical zero.
 - **`wrap_pi` / `pos_offset` and the boot-angle finding:** `pos` on the wire is the home-frame angle
   wrapped to [−π,π]; `pos_offset` holds the whole-turn remainder so a power-cycle single-turn reading
   can't command a long-way rotation. A shaft wound beyond `MOTOR_WOUND_OFFSET_MAX` (9.0 rad) is
@@ -344,7 +320,7 @@ bench and has not been re-measured.
 |---|---|---|
 | master cycle period / jitter | 5000 µs, σ ≈ 9 µs idle / 26 µs under load; 0 overruns *(1-slave baseline)* | TIM2 bring-up run |
 | poll + telemetry assembly | ≈ 2.55 ms/cycle (headroom to 5 ms) *(1-slave baseline)* | TIM2 bring-up run |
-| SPI exchange | ~0.05 ms (120 B @ 4.5 MHz + HAL overhead) | derived |
+| SPI exchange | ~0.05 ms (126 B @ 4.5 MHz + HAL overhead) | derived |
 | CAN per frame | ~130–140 µs (8-byte extended @ 1 Mbit) | §3e / can-investigation |
 | CAN first-send → last-reply (5 motors) | span mean **1413 µs**, max 1431; last reply max **1490 µs** | `logs/2026-10-02/20-25-16_bench_sine.bin` |
 | CAN per-motor reply time (from exchange) | m0 911 / m1 1051 / m2 1192 / m3 1333 / m4 1473 µs (~140 µs apart) | same |
@@ -383,7 +359,7 @@ for 6 motors on one bus; budget ~65 %.
 | `-O2` + `-fno-strict-aliasing` | speed without aliasing UB on the packed-struct casts | stable builds; no aliasing miscompiles |
 | configurable SPI prescaler | tune link speed vs margin per harness | div 16 (4.5 MHz) default, all of 64–8 CRC-clean on bench |
 | whole-frame USB TX + ZLP (`usb_tx.c`) | frames never interleave; multi-packet frames terminate | supersedes the old 64 B-per-call drain |
-| telemetry prefix truncation (`emit_robot_tele`) | the full 492 B @ 200 Hz swamped the Python host | ~138 B/frame for one chain; no host backlog |
+| telemetry prefix truncation (`emit_robot_tele`) | the full 496 B @ 200 Hz swamped the Python host | ~139 B/chain; no host backlog |
 | host C CRC (`binascii.crc_hqx`) | Python per-byte CRC too slow at 200 Hz | decode ≫ 200 Hz; RX no longer the bottleneck |
 | USB RX resync out of the ISR | ISR only rings bytes; scan+CRC in main | a stray byte/lost packet can't desync permanently |
 | double-buffered mailbox | deterministic apply-at-n+1, no torn command set | 0 superseded at 200 Hz telemetry-driven |
@@ -433,36 +409,40 @@ for 6 motors on one bus; budget ~65 %.
 
 ## 7. State machines (current implementation)
 
-> **The per-motor mode machine (§7a) is temporary** — a drive-state / control-mode redesign is under
-> consideration (§12).
+> **Protocol v9**: the per-motor machine is the drive-state × streamed-tuple split.
+> `docs/protocol_v9.md` is the authoritative spec (request × state matrix, fault latch rule,
+> timing constants); this section summarises the implementation.
 
-### 7a. Per-motor mode machine (slave, `mode_sm.c` `mode_sm_step`; CAN effects in `motor_runtime.c`)
-Pure decision from `(state, mode_req, valid, fault_reset, wound)` → `ModeDecision`
-(`do_arm/do_disable/capture_hold/enter_to_zero/clear_fault/set_cause_wound/rejected/reset_cmd_seq`).
-States: `BOOT, DISCOVERING, IDLE, HOLD, MIT, DAMPED, TO_ZERO, FAULT`. **Level-triggered** — the
-requested mode is re-applied every cycle.
-
-| from \ request | IDLE | HOLD | MIT | DAMPED | TO_ZERO |
-|---|---|---|---|---|---|
-| IDLE | IDLE | **arm**→HOLD (wound→FAULT/WOUND) | reject | reject | reject |
-| HOLD/MIT/DAMPED/TO_ZERO | disable→IDLE | re-capture→HOLD | MIT | DAMPED | enter→TO_ZERO |
-| FAULT | clear→IDLE | reject (fault_reset→eval as IDLE) | reject | reject | reject |
-| BOOT/DISCOVERING | IDLE | reject | reject | reject | reject |
+### 7a. Per-motor drive machine (pure `drive_sm.h`; CAN effects in `motor_runtime.c`)
+Three pure entry points: `drive_sm_on_request(state, req, wound, fault_latched)`,
+`drive_sm_on_fault(state, fault, fault_latched)`, `drive_sm_on_tick(state, inputs)`.
+States: `BOOT, DISCOVERING, ABSENT, DISABLED, ENABLING, ENABLED, STOPPING, CLEARING, FAULT`.
+Requests (`DISABLE/ENABLE/STOP/RESET`) are **level-triggered** and always apply; the MIT
+tuple travels independently under `CMD_FLAG_VALID`.
 
 Key rules:
-- **HOLD is the only arm-from-IDLE and the only enable.** On entry: `arm_enable` (handshake), capture
-  the home-frame position (`hold_pos`), load config gains.
-- **MIT** stores fixed-point targets and `target_cmd_seq`; `apply_soft_clamp` applies the one-sided
-  soft-limit clamp. **DAMPED** = Kp 0 + config Kd. **TO_ZERO** creeps to home 0, sets
-  `TO_ZERO_ARRIVED`, stalls → `CAUSE_ZERO_TIMEOUT`.
-- **Wound rejection:** IDLE→HOLD with `|offset| > MOTOR_WOUND_OFFSET_MAX` → FAULT/`CAUSE_WOUND`.
-- **Faults latch:** armed requests rejected until an IDLE request or `FAULT_RESET` clears, then the
-  same request is re-evaluated from IDLE.
-- **`last_applied_seq` resets to 0** on any of arm / re-hold / to-zero / disable (`reset_cmd_seq`).
-- The **arm handshake** (`arm_enable`) and the **enable monitor** interact: after enabling, the
-  monitor (§8) watches for `RS_MODE_NORMAL`; K not-NORMAL fresh frames → `CAUSE_NOT_ENABLED`.
-- Telemetry per state: `state` = the lifecycle; `cause` set on FAULT; `TELE_FLAG_REQUEST_REJECTED` on
-  an illegal request; `CMD_STALE` while running a held/watchdog setpoint.
+- **ENABLE is the only way on** (`DISABLED → ENABLING → ENABLED`); the handshake is
+  Type-4 clear → run-mode write → Type-3 enable (arm_sm sequencing, one CAN frame per
+  cycle) → zero-gain Type-1 polls until feedback confirms `rs_mode == Run` (early
+  advance; measured 40 ms) or `MOTOR_ENABLE_TIMEOUT_MS` → FAULT(`ENABLE_FAILED`).
+- **ENABLED is limp until the first VALID tuple** — no hold-at-capture; the host owns the
+  first word. A tuple streamed during ENABLING is latched and applied on the edge.
+  Every applied tuple goes through `apply_soft_clamp` (one-sided soft limits, vel/tau
+  bounds) and `clamp_gains`.
+- **STOP / comms-intact faults** share one stop ramp (`STOPPING`: Kp 0 + config Kd for
+  `MASTER_LOST_DAMP_MS`, then disable). A requested stop ends DISABLED; a fault-triggered
+  stop ends FAULT — `drive_fault` latches at **detection**, first wins, so a DISABLE
+  mid-ramp cannot launder a fault into DISABLED.
+- **RESET → CLEARING** (only from FAULT): clears `drive_fault`, sends the wire Type-4
+  Byte0=1, then judges the reply — clean → DISABLED, dirty → FAULT(`MOTOR_REPORTED`,
+  re-latched), silent past `MOTOR_CLEAR_TIMEOUT_MS` → ABSENT. Never enables.
+- **Presence:** DISABLED ⇄ ABSENT on feedback timeout, with a `MOTOR_ABSENT_PING_MS`
+  poll while ABSENT. *alive* = `drive_state > ABSENT` (replaces the old alive flag).
+- **Wound rejection:** ENABLE with `|offset| > MOTOR_WOUND_OFFSET_MAX` → FAULT/`DRVF_WOUND`,
+  never enables.
+- **`last_applied_seq` resets to 0** on ENABLE begin and every path out of ENABLED.
+- Telemetry: `drive_state`/`drive_fault`; `TELE_FLAG_REQUEST_REJECTED` on an illegal
+  request; `CMD_STALE` while ENABLED executes a held tuple with no fresh command.
 
 ### 7b. Master/robot state (`compute_robot_state`, `emit_*`)
 `ROBOT_INIT` (no slave alive) → `ROBOT_READY` (every alive slave's full motor mask alive) /
@@ -471,13 +451,15 @@ Key rules:
 
 ### 7c. Watchdog state machines
 - **Master host-death (`host_watchdog.h`, per cycle):** `HOST_LINK_OK` → (armed && cycles-since-fresh
-  ≥ `HOST_LOST_CYCLES` 12 = 60 ms) → `HOST_LINK_DAMPED` (master sends DAMPED, config Kd) → (after
-  `HOST_LOST_DAMP_CYCLES` 60 = 300 ms) → `HOST_LINK_IDLE` (master sends IDLE), **latched**; recovery
-  only via a fresh command carrying `FAULT_RESET`. Gated on any motor armed.
-- **Slave master-loss (`master_watchdog.h`, on a no-fresh-command cycle):** from ms since the last
-  `ROBOT_CMD` (`watchdog_ms`; NOP keepalives do **not** refresh it) — `[0,grace)` HOLD with v/tau
-  zeroed, `[grace,grace+damp)` DAMPED (config Kd, `CAUSE_MASTER_LOST`), beyond → IDLE. Thresholds
-  `MASTER_LOST_GRACE_MS` 50, `MASTER_LOST_DAMP_MS` 300.
+  ≥ `HOST_LOST_CYCLES`) → `HOST_LINK_STOPPED`, **latched**: the master forces STOP into every
+  slot and the slave owns the ramp (ends DISABLED, `drive_fault` NONE; `robot_state =
+  HOST_LOST` is the record). Recovery only via a fresh command carrying a RESET request.
+  Armed = any motor in ENABLING/ENABLED/STOPPING.
+- **Slave master-loss (on a no-fresh-command cycle):** from ms since the last `ROBOT_CMD`
+  (`watchdog_ms`; NOP keepalives do **not** refresh it) — `[0,grace)` ENABLING continues /
+  ENABLED holds with v/tau zeroed; past the grace → FAULT(`MASTER_LOST`) via the stop ramp
+  (ENABLED) or an immediate abort (ENABLING). Thresholds `MASTER_LOST_GRACE_MS` 50,
+  `MASTER_LOST_DAMP_MS` 300.
 
 ### 7d. Slave SPI-TX arm cycle (`slave_spi.c`, `tx_arm_timer.c`)
 `TxRxCplt` (exchange complete) → hand RX half to main, start TIM3 → (main stages telemetry on CAN
@@ -486,8 +468,8 @@ feedback, sets ready flag) → TIM3 deadline → `spi_arm_tx` swaps + arms the T
 masks TIM3, resets DMA, re-arms (see §3c).
 
 ### 7e. Chain lifecycle + host side
-- **Slave:** `BOOT` → `discover()` (3× ping, ≤300 ms each) → `IDLE` (alive) or `FAULT` (absent). Then
-  the forward-on-command loop.
+- **Slave:** `BOOT` → `discover()` (3× ping, ≤300 ms each) → `DISABLED` (present) or `ABSENT`
+  (silent; kept pinged at `MOTOR_ABSENT_PING_MS`). Then the forward-on-command loop.
 - **Host (`run_policy.py`):** connect (auto VID:PID) → `wait_until_live` (telemetry live-detect, 2 s)
   → `wait_master_status` + **rate verify-or-refuse** (`master_poll_hz` == config) → step on
   `cycle_id % N == 0` (N = `MASTER_POLL_HZ/rate`), late-step/dropped-step accounting → telemetry-stall
@@ -508,25 +490,25 @@ with unchanged latency (§4 bench).
 
 ## 8. Safety and fault handling
 
-| watchdog / check | where | trigger | effect |
+| watchdog / check | where | trigger | reaction (`docs/protocol_v9.md` §4) |
 |---|---|---|---|
-| host-death | master `host_watchdog.h` | no fresh host command ≥ `HOST_LOST_CYCLES` while armed | DAMPED → IDLE, latched; `ROBOT_HOST_LOST`; recover via `FAULT_RESET` |
-| master-loss | slave `master_watchdog.h` | SPI `ROBOT_CMD` exchanges stopped | HOLD(grace) → DAMPED → IDLE; `CAUSE_MASTER_LOST` |
-| CAN feedback timeout | slave `motor_runtime_update` | Type-2 stale ≥ `MOTOR_CAN_FB_TIMEOUT_MS` (100 ms) while driving | `CAUSE_CAN_TIMEOUT` |
-| enable monitor | slave `enable_monitor.c` | armed motor not `RS_MODE_NORMAL` for K=3 fresh frames | `CAUSE_NOT_ENABLED` |
-| overtorque | slave | `|tau| > cfg->max_tau` (0.8 N·m) while driving | `CAUSE_OVERTORQUE` |
-| motor self-fault | slave | Type-2 fault bits set | `CAUSE_MOTOR_FAULT` + 0x3022 read |
-| zero stall | slave (TO_ZERO) | no homing progress ≥ `MOTOR_ZERO_STALL_MS` (1500 ms) | damp + `CAUSE_ZERO_TIMEOUT` |
-| wound arm | slave `mode_sm` | IDLE→HOLD with `|offset| > MOTOR_WOUND_OFFSET_MAX` | `CAUSE_WOUND` (refuse arm) |
+| host-death | master `host_watchdog.h` | no fresh host command ≥ `HOST_LOST_CYCLES` while armed | forced STOP, latched (`HOST_LINK_STOPPED`); slave ramps to DISABLED, fault NONE; `ROBOT_HOST_LOST`; recover via a RESET request |
+| master-loss | slave | SPI `ROBOT_CMD` exchanges stopped past `MASTER_LOST_GRACE_MS` | ENABLED → stop ramp, ENABLING → abort; both → FAULT(`MASTER_LOST`) |
+| CAN feedback timeout | slave `motor_runtime_update` | Type-2 stale ≥ `MOTOR_CAN_FB_TIMEOUT_MS` (100 ms) while ENABLED/STOPPING | immediate Type-4 → FAULT(`CAN_TIMEOUT`); while DISABLED → ABSENT |
+| enable timeout | slave | ENABLING without `rs_mode == Run` ≥ `MOTOR_ENABLE_TIMEOUT_MS` | immediate Type-4 → FAULT(`ENABLE_FAILED`) |
+| enable monitor | slave `enable_monitor.c` | ENABLED motor not Run for K=3 fresh frames | immediate Type-4 → FAULT(`NOT_ENABLED`) |
+| overtorque | slave | `|tau| > cfg->max_tau` (0.8 N·m) while ENABLED | stop ramp → FAULT(`OVERTORQUE`) |
+| motor self-fault | slave | Type-2 fault bits set (armed; in DISABLED behind `MOTOR_FAULT_CHECK_DISABLED`) | immediate Type-4 → FAULT(`MOTOR_REPORTED`) + 0x3022 read |
+| wound enable | slave `drive_sm` | ENABLE with `|offset| > MOTOR_WOUND_OFFSET_MAX` | FAULT(`WOUND`), never enables |
 
-- **All causes latch** until an IDLE request or a `FAULT_RESET` flag clears them.
-- `CAUSE_WATCHDOG` (3) and `MOTOR_WATCHDOG_MS` (200 ms) are **defined but no longer used** — the
-  master-loss ramp replaced the old hard SPI watchdog.
-- **Failure responses:** host dies → master DAMPED→IDLE (host-death). Master resets/SPI dies → slave
-  HOLD→DAMPED→IDLE (master-loss). Slave SPI DMA wedges → persistent telemetry CRC → master marks it
-  offline, chain goes silent; recovery needs a slave reset. Motor disabled externally → enable monitor
-  → `CAUSE_NOT_ENABLED`. Joint parked outside its soft range at arm → one-sided clamp holds it, no
-  overtorque.
+- **`drive_fault` latches at detection, first wins**; only RESET (→ CLEARING) leaves FAULT,
+  and CLEARING clears the code on entry so a re-latch reports the current fault.
+- **Failure responses:** host dies → master forces STOP, slave ramps to DISABLED (blocked
+  until a RESET-bearing command). Master resets/SPI dies → slave grace → ramp →
+  FAULT(`MASTER_LOST`). Slave SPI DMA wedges → persistent telemetry CRC → master marks it
+  offline, chain goes silent; recovery needs a slave reset. Motor disabled externally →
+  enable monitor → FAULT(`NOT_ENABLED`). Joint parked outside its soft range at enable →
+  one-sided clamp holds it, no overtorque.
 - **CAN enable loss** (rare, ≤~0.2 %) is a consequence of one-shot TX (`AutoRetransmission=DISABLE`);
   caught by the enable monitor. Full study: `can-investigation.md`.
 
@@ -573,7 +555,7 @@ is compile-time on all three sides — there is **no in-band N check**.
 | connect | — | — | open port, `reset_input_buffer` |
 | live-detect | emits telemetry | services on exchange | `wait_until_live` (2 s) on master-ts advance |
 | rate check | reports `master_poll_hz` in status | — | refuse if `master_poll_hz` ≠ config |
-| arming | forwards HOLD | IDLE→HOLD per motor, `arm_enable` ~23 ms each (**~116 ms for 5 at once**) | policy requests HOLD |
+| arming | forwards HOLD | IDLE→HOLD per motor, async `arm_sm` phases (**~55–65 ms total, all motors concurrently, no stall**) | policy requests HOLD |
 | streaming | poll → telemetry each cycle | forward-on-command MIT | step on telemetry, send commands |
 | shutdown | — | — | Ctrl-C → disable armed motors, flush log, print summary |
 
@@ -583,7 +565,7 @@ is compile-time on all three sides — there is **no in-band N check**.
 
 | issue | impact |
 |---|---|
-| **Blocking arm handshake** | `arm_enable` blocks the slave ~23 ms/motor; arming 5 at once stalls the loop **~116 ms**. It does not trip MASTER_LOST (the post-arm service is cmd-fresh), but it is a visible stall. |
+| **Blocking arm handshake** | **FIXED (this branch)** — the arm is async (`arm_sm.h`); the loop never stalls. Remaining nit: the fixed phase waits are worst-case-sized (~55–65 ms to armed); a feedback-ACK early advance could roughly halve that. |
 | **Early all-replied TX arm — tracking bug** | the attempted early arm skipped `last_applied` values (~24 % superseded), most likely a per-cycle "replied this cycle" tracking bug (crediting the previous frame's reply), not timing. Reverted; deadline-only is used. Fix before enabling it for 400 Hz. |
 | **CAN TX busy-wait** | `can_tx` spins ~280 µs of slave CPU per cycle waiting for a free mailbox (5 motors). CPU waste only (bus-serialized anyway); fix with an interrupt-driven TX queue. |
 | **400 Hz deadline margin** | last reply max 1490 µs vs a 1.5 ms deadline → ~10 µs margin. Needs a tuned deadline / fixed early-arm / split CAN buses (§4). |
@@ -604,15 +586,19 @@ is compile-time on all three sides — there is **no in-band N check**.
   per cycle.
 - Trade-offs: more state; arming takes more cycles; must stay safe with absent motors.
 - Dependencies: enable monitor (exists); the drive-state machine below.
-- Status / notes:
+- Status / notes: **DONE (this branch)** — pure phase machine `arm_sm.h` (CLEAR→MODE→ENABLE→
+  FINISH, fixed waits = the blocking sequence's worst case), stepped from `motor_runtime_update`'s
+  IDLE path; `arm_begin`/`arm_finish` replace the blocking `arm_enable`. No stagger needed: all
+  motors arm concurrently at one frame/motor/cycle (~11–13 cycles total). NORMAL confirmation
+  stays with the enable monitor after HOLD entry. Tested: `test_arm_sm.c` (+ host wrapper).
 
 **Drive state / control mode split (CiA-402-style)**
 - Problem: the single mode machine conflates lifecycle and control mode.
-- Idea: joint drive state (OFF, ENABLING, ENABLED, STOPPING, DISABLING, FAULT, ABSENT) × control
-  mode (HOLD/MIT/DAMPED/TO_ZERO).
-- Trade-offs: a protocol/telemetry change; larger state table; migration.
-- Dependencies: async arm; wire-version bump.
-- Status / notes:
+- Idea: joint drive state × streamed MIT tuple; firmware stops making motion decisions.
+- Status / notes: **DONE — protocol v9** (`docs/protocol_v9.md`, `drive_sm.h`,
+  the motor_runtime swap and the host port). HOLD/TO_ZERO/DAMPED are host behaviors now;
+  ENABLED is limp until the first VALID tuple. Bench: single-motor enable 40 ms validated;
+  full acceptance checklist pending motor power + slave1 reflash.
 
 **Robot-level supervisor on the Jetson**
 - Problem: no orchestration (connect, gates, staggered enable, move to start, run, stop, safe).

@@ -11,6 +11,7 @@
  *       firmware/common/test/test_spi_proto.c .../spi_proto.c -o test_spi_proto
  */
 #include "spi_proto.h"
+#include "spi_gate.h"
 #include <stdio.h>
 #include <string.h>
 #include <stdint.h>
@@ -28,7 +29,7 @@ static void fill_cmd_chain(cmd_chain_t *c)
     c->chain_id = (uint8_t)(lcg() & 0xFFu);
     c->n_motors = (uint8_t)(1u + (lcg() % MAX_MOTORS_PER_CHAIN));
     for (uint8_t i = 0; i < MAX_MOTORS_PER_CHAIN; i++) {
-        c->motors[i].mode_req = (uint8_t)(lcg() % 5u);
+        c->motors[i].drive_req = (uint8_t)(lcg() % 4u);
         c->motors[i].pos      = (int16_t)(lcg() & 0xFFFFu);
         c->motors[i].vel      = (int16_t)(lcg() & 0xFFFFu);
         c->motors[i].kp       = (uint16_t)(lcg() & 0xFFFFu);
@@ -52,13 +53,13 @@ static void fill_tele_chain(tele_chain_t *t)
         t->motors[i].vel              = (int16_t)(lcg() & 0xFFFFu);
         t->motors[i].tau              = (int16_t)(lcg() & 0xFFFFu);
         t->motors[i].temp_c           = (uint8_t)(lcg() & 0xFFu);
-        t->motors[i].state            = (uint8_t)(lcg() % 8u);
-        t->motors[i].cause            = (uint8_t)(lcg() % 8u);
-        t->motors[i].motor_mode       = (uint8_t)(lcg() % 3u);
-        t->motors[i].motor_fault      = (uint8_t)(lcg() & 0xFFu);
+        t->motors[i].drive_state      = (uint8_t)(lcg() % 9u);
+        t->motors[i].drive_fault      = (uint8_t)(lcg() % 8u);
+        t->motors[i].rs_mode          = (uint8_t)(lcg() % 3u);
+        t->motors[i].rs_fault_bits    = (uint8_t)(lcg() & 0xFFu);
         t->motors[i].flags            = (uint8_t)(lcg() & 0xFFu);
         t->motors[i].fb_age_ms        = (uint8_t)(lcg() & 0xFFu);
-        t->motors[i].fault_word       = lcg();
+        t->motors[i].rs_fault_word    = lcg();
         t->motors[i].last_applied_seq = (uint16_t)(lcg() & 0xFFFFu);
     }
 }
@@ -75,6 +76,15 @@ static void build_cmd_frame(uint8_t *frame, uint8_t opcode, uint8_t spi_seq,
     frame[4] = (uint8_t)(cmd_seq & 0xFFu);
     frame[5] = (uint8_t)(cmd_seq >> 8);
     memcpy(&frame[SPI_CMD_HDR_BYTES], chain, sizeof(cmd_chain_t));
+    spi_trailer_write(&frame[SPI_CMD_TRAILER_OFF]);   /* version gate (v9.1) */
+    uint16_t crc = proto_crc16(frame, SPI_CMD_CRC_OFF);
+    frame[SPI_CMD_CRC_OFF]     = (uint8_t)(crc & 0xFFu);
+    frame[SPI_CMD_CRC_OFF + 1] = (uint8_t)(crc >> 8);
+}
+
+/* Re-CRC a frame after a deliberate payload/trailer edit (CRC stays valid). */
+static void recrc_cmd_frame(uint8_t *frame)
+{
     uint16_t crc = proto_crc16(frame, SPI_CMD_CRC_OFF);
     frame[SPI_CMD_CRC_OFF]     = (uint8_t)(crc & 0xFFu);
     frame[SPI_CMD_CRC_OFF + 1] = (uint8_t)(crc >> 8);
@@ -89,6 +99,8 @@ static void test_build_tele(void)
         spi_proto_build_tele(frame, &t);
         CHECK(memcmp(frame, &t, sizeof(tele_chain_t)) == 0,
               "tele frame prefix != tele_chain_t");
+        CHECK(spi_trailer_match(&frame[SPI_TELE_TRAILER_OFF]) == 1u,
+              "tele trailer not this build's");
         uint16_t crc = proto_crc16(frame, SPI_TELE_CRC_OFF);
         CHECK(frame[SPI_TELE_CRC_OFF] == (uint8_t)(crc & 0xFFu) &&
               frame[SPI_TELE_CRC_OFF + 1] == (uint8_t)(crc >> 8), "tele CRC mismatch");
@@ -110,16 +122,39 @@ static void test_parse_cmd(void)
 
         SpiCmdHdr   hdr;
         cmd_chain_t out;
-        CHECK(spi_proto_parse_cmd(frame, &hdr, &out) == 1u, "valid cmd rejected");
+        CHECK(spi_proto_parse_cmd(frame, &hdr, &out) == SPI_PARSE_OK,
+              "valid cmd rejected");
         CHECK(hdr.opcode == opcode && hdr.spi_seq == spi_seq &&
               hdr.cycle_id == cyc && hdr.cmd_seq == cseq, "cmd header mismatch");
         CHECK(memcmp(&out, &c, sizeof(cmd_chain_t)) == 0, "cmd_chain_t mismatch");
+
+        /* CRC-intact frame from a differently-versioned master → MISMATCH and
+           zeroed outputs (the payload must never be applied). */
+        uint8_t mm[SPI_CMD_FRAME_SIZE];
+        memcpy(mm, frame, SPI_CMD_FRAME_SIZE);
+        mm[SPI_CMD_TRAILER_OFF] ^= 0x01u;       /* wrong proto_version */
+        recrc_cmd_frame(mm);
+        SpiCmdHdr   hdrm;
+        cmd_chain_t outm;
+        CHECK(spi_proto_parse_cmd(mm, &hdrm, &outm) == SPI_PARSE_MISMATCH,
+              "mismatched cmd not flagged");
+        CHECK(hdrm.opcode == 0u && hdrm.cmd_seq == 0u, "mismatch hdr not zeroed");
+        memcpy(mm, frame, SPI_CMD_FRAME_SIZE);
+        mm[SPI_CMD_TRAILER_OFF + 2] ^= 0x40u;   /* wrong schema hash byte */
+        recrc_cmd_frame(mm);
+        CHECK(spi_proto_parse_cmd(mm, &hdrm, &outm) == SPI_PARSE_MISMATCH,
+              "hash-mismatched cmd not flagged");
+
+        /* Recovery: the original matching frame parses OK again (stateless). */
+        CHECK(spi_proto_parse_cmd(frame, &hdr, &out) == SPI_PARSE_OK,
+              "recovery after mismatch failed");
 
         /* Corrupt a CRC-covered byte → must reject. */
         frame[0] ^= 0xFFu;
         SpiCmdHdr   hdr2;
         cmd_chain_t out2;
-        CHECK(spi_proto_parse_cmd(frame, &hdr2, &out2) == 0u, "corrupt cmd accepted");
+        CHECK(spi_proto_parse_cmd(frame, &hdr2, &out2) == SPI_PARSE_BAD,
+              "corrupt cmd accepted");
     }
 }
 
@@ -130,12 +165,14 @@ static void test_golden(void)
     memset(&t, 0, sizeof(t));
     t.chain_id = 0x03u; t.n_motors = 1u; t.spi_seq_echo = 0x2Au;
     t.slave_time_us = 7777u; t.cmd_crc_errors = 3u; t.can_tx_errors = 1u;
-    t.motors[0].pos = 5000; t.motors[0].state = LIFE_MIT; t.motors[0].motor_mode = 2u;
+    t.motors[0].pos = 5000; t.motors[0].drive_state = DRV_ENABLED; t.motors[0].rs_mode = 2u;
     t.motors[0].last_applied_seq = 0x1234u;
 
     uint8_t frame[SPI_TELE_FRAME_SIZE];
     spi_proto_build_tele(frame, &t);
-    CHECK(frame[0] == 0x03u && frame[1] == 0x01u && frame[2] == 0x2Au, "golden header bytes");
+    /* byte 2 is tele_chain_t.link (master-authored; the slave sends 0). */
+    CHECK(frame[0] == 0x03u && frame[1] == 0x01u && frame[2] == 0x00u &&
+          frame[3] == 0x2Au, "golden header bytes");
     uint16_t crc = proto_crc16(frame, SPI_TELE_CRC_OFF);
     CHECK(frame[SPI_TELE_CRC_OFF] == (uint8_t)(crc & 0xFFu) &&
           frame[SPI_TELE_CRC_OFF + 1] == (uint8_t)(crc >> 8), "golden CRC");

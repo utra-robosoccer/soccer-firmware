@@ -1,17 +1,18 @@
 """man_1s_1m — MANual, keyboard-driven bench policy (all motors together).
 
-Level-triggered: every tick it sends the CURRENT mode request for all configured
-motors (one cmd_robot_t). Same key feel as before, now over the mode state machine.
+Level-triggered (protocol v9): every tick it sends the CURRENT drive request +
+tuple for all configured motors (one cmd_robot_t). Under v9 the host decides the
+behavior: "hold", "sine" and "damp" are all ENABLE + a streamed MIT tuple.
 
 Keys (all motors together):
-    a   HOLD       → arm + hold current position (the only arm-from-IDLE path)
-    z   TO_ZERO    → creep to home-frame 0 and hold (arm with `a` first)
-    s   MIT        → stream an in-range sine (arm with `a` first)
-    x   DAMPED     → Kp=0 + damping Kd (backdrive by hand; arm first)
-    d   IDLE       → disarm
-    f   fault-reset→ clear a latched fault (sent once, with the current mode)
-    q   QUIT       → clean shutdown
+    a   HOLD   → ENABLE + hold the position captured at the keypress
+    s   SINE   → ENABLE + stream an in-range sine
+    x   DAMP   → ENABLE + Kp=0 / damping Kd tuple (backdrive by hand)
+    d   OFF    → DISABLE
+    f   RESET  → clear a latched fault (sent once)
+    q   QUIT   → clean shutdown
     ?   help
+    (z TO_ZERO was firmware-side; it returns as a host behavior in step 5)
 
 The sine is centred on 0 with amplitude A = min(|lo|, hi) - SINE_MARGIN, so it stays
 inside the soft limits (never engages the slave's clamp). On 's' it starts from the
@@ -34,7 +35,7 @@ from master_link.motor_config_gen import (
 
 from .base import (
     Policy, Action, MotorCommand, LinkState,
-    MODE_IDLE, MODE_HOLD, MODE_MIT, MODE_DAMPED, MODE_TO_ZERO,
+    REQ_DISABLE, REQ_ENABLE, REQ_RESET,
 )
 from .sine_start import SineStart
 
@@ -47,15 +48,13 @@ SINE_MARGIN_DEG = 5.0
 SINE_MARGIN_RAD = math.radians(SINE_MARGIN_DEG)
 MOVE_MAX_SPEED  = 0.5   # rad/s, min-jerk peak speed cap for the HOLD→peak move
 
-_MODE_OF = {
-    "a": MODE_HOLD, "z": MODE_TO_ZERO, "s": MODE_MIT, "x": MODE_DAMPED, "d": MODE_IDLE,
-}
-_MODE_NAME = {MODE_IDLE: "IDLE", MODE_HOLD: "HOLD", MODE_MIT: "MIT",
-              MODE_DAMPED: "DAMPED", MODE_TO_ZERO: "TO_ZERO"}
+_MODE_OF = {"a": "hold", "s": "sine", "x": "damp", "d": "off"}
+_MODE_NAME = {"off": "OFF (DISABLE)", "hold": "HOLD (enable + hold tuple)",
+              "sine": "SINE (enable + MIT sine)", "damp": "DAMP (enable + Kd tuple)"}
 
 _HELP = (
-    "  a HOLD   z TO_ZERO   s MIT/sine   x DAMPED   d IDLE\n"
-    "  f fault-reset        q QUIT       ? help\n"
+    "  a HOLD   s SINE   x DAMP   d OFF\n"
+    "  f RESET (fault)   q QUIT   ? help\n"
 )
 
 
@@ -68,11 +67,12 @@ class Man1s1mPolicy(Policy):
             lo, hi = MOTOR_SOFT_MIN[g], MOTOR_SOFT_MAX[g]
             amp = max(0.0, min(hi, -lo) - SINE_MARGIN_RAD)   # largest 0-centered amplitude
             self._motors.append((m["slave"], m["idx"], lo, hi, amp))
-        self._traj = {}     # (slave, local) -> SineStart, planned on MIT entry
+        self._traj = {}     # (slave, local) -> SineStart, planned on sine entry
+        self._hold = {}     # (slave, local) -> position captured once at hold entry
         self._lock = threading.Lock()
-        self._mode = MODE_IDLE
-        self._fault_reset_pending = False
-        self._mit_restart = False
+        self._mode = "off"
+        self._reset_pending = False
+        self._mode_entered = False
 
         self._stop = threading.Event()
         self._kb = None
@@ -102,11 +102,10 @@ class Man1s1mPolicy(Policy):
             self._old_term = None
 
     # ── keyboard thread ───────────────────────────────────────────────────────
-    def _set_mode(self, mode: int) -> None:
+    def _set_mode(self, mode: str) -> None:
         with self._lock:
             self._mode = mode
-            if mode == MODE_MIT:
-                self._mit_restart = True
+            self._mode_entered = True
         print(f"→ {_MODE_NAME[mode]} (all)", flush=True)
 
     def _kb_loop(self) -> None:
@@ -127,8 +126,11 @@ class Man1s1mPolicy(Policy):
                 self._set_mode(_MODE_OF[ch])
             elif ch == "f":
                 with self._lock:
-                    self._fault_reset_pending = True
-                print("→ fault-reset (once)", flush=True)
+                    self._reset_pending = True
+                print("→ RESET (once)", flush=True)
+            elif ch == "z":
+                print("→ TO_ZERO is a host behavior now (step 5); not available here",
+                      flush=True)
             elif ch in ("q", "\x03", "\x04"):
                 print("→ QUIT", flush=True)
                 os.kill(os.getpid(), signal.SIGINT)
@@ -140,14 +142,22 @@ class Man1s1mPolicy(Policy):
     def step(self, state: LinkState, t_ns: int) -> Action:
         with self._lock:
             mode = self._mode
-            restart = self._mit_restart
-            self._mit_restart = False
-            fault_reset = self._fault_reset_pending
-            self._fault_reset_pending = False
+            entered = self._mode_entered
+            self._mode_entered = False
+            reset = self._reset_pending
+            self._reset_pending = False
 
-        if mode == MODE_MIT and restart:
-            # Plan each motor's smooth start from its CURRENT position; refuse (revert to
-            # HOLD) if a 0-centered ±A would leave the soft limits — never clamp silently.
+        if entered and mode == "hold":
+            # Capture the hold targets ONCE at entry — re-sampling each tick would
+            # let a loaded joint sag (the target would follow measured position).
+            self._hold = {}
+            for (s, l, lo, hi, amp) in self._motors:
+                snap = state.motors.get((s, l)) if state and state.motors else None
+                self._hold[(s, l)] = snap.pos if snap else 0.0
+
+        if entered and mode == "sine":
+            # Plan each motor's smooth start from its CURRENT position; refuse (revert
+            # to hold) if a 0-centered ±A would leave the soft limits — never clamp.
             trajs = {}
             for (s, l, lo, hi, amp) in self._motors:
                 snap = state.motors.get((s, l)) if state and state.motors else None
@@ -156,10 +166,11 @@ class Man1s1mPolicy(Policy):
                 try:
                     tj.begin(p0, t_ns, lo, hi, who=f"s{s}.m{l}")
                 except ValueError as e:
-                    print(f"→ MIT refused: {e}", flush=True)
+                    print(f"→ SINE refused: {e}", flush=True)
                     with self._lock:
-                        self._mode = MODE_HOLD
-                    mode = MODE_HOLD
+                        self._mode = "hold"
+                        self._mode_entered = True   # capture holds next tick
+                    mode = "off"                    # this tick: keep motors off
                     trajs = {}
                     break
                 trajs[(s, l)] = tj
@@ -167,11 +178,27 @@ class Man1s1mPolicy(Policy):
 
         cmds = []
         for (s, l, lo, hi, amp) in self._motors:
-            pos = vel = 0.0
-            if mode == MODE_MIT:
+            if reset:
+                # One RESET tick: clears a latched fault; no-op on healthy motors.
+                cmds.append(MotorCommand(s, l, req=REQ_RESET))
+                continue
+            if mode == "off":
+                cmds.append(MotorCommand(s, l, req=REQ_DISABLE))
+            elif mode == "hold":
+                cmds.append(MotorCommand(s, l, req=REQ_ENABLE, valid=True,
+                                         pos=self._hold.get((s, l), 0.0),
+                                         use_config_gains=True))
+            elif mode == "damp":
+                kd = next((m.get("default_kd", 1.0) for m in MOTORS
+                           if (m["slave"], m["idx"]) == (s, l)), 1.0)
+                cmds.append(MotorCommand(s, l, req=REQ_ENABLE, valid=True,
+                                         pos=0.0, vel=0.0, kp=0.0, kd=kd,
+                                         use_config_gains=False))
+            else:  # sine
+                pos = vel = 0.0
                 tj = self._traj.get((s, l))
                 if tj is not None:
                     pos, vel = tj.sample(t_ns)
-            cmds.append(MotorCommand(s, l, mode=mode, pos=pos, vel=vel,
-                                     use_config_gains=True, fault_reset=fault_reset))
+                cmds.append(MotorCommand(s, l, req=REQ_ENABLE, valid=True,
+                                         pos=pos, vel=vel, use_config_gains=True))
         return Action(motors=cmds)

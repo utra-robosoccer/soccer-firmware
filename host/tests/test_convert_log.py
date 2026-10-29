@@ -23,9 +23,9 @@ def _rows(path):
 
 
 def _tele_frame(state=3, last_applied_seq=7):
-    motor = dict(pos_raw=5000, vel_raw=-125, tau_raw=30, temp_c=42, state=state,
-                 cause=0, motor_mode=2, motor_fault=0, flags=0, fb_age_ms=5,
-                 fault_word=0, last_applied_seq=last_applied_seq)
+    motor = dict(pos_raw=5000, vel_raw=-125, tau_raw=30, temp_c=42, drive_state=state,
+                 drive_fault=0, rs_mode=2, rs_fault_bits=0, flags=0, fb_age_ms=5,
+                 rs_fault_word=0, last_applied_seq=last_applied_seq)
     chains = [dict(chain_id=0, spi_seq_echo=0, slave_time_us=0,
                    cmd_crc_errors=0, can_tx_errors=0, motors=[motor])]
     payload = P.pack_robot_tele(1, 1000, last_applied_seq, 0, 1, chains)
@@ -34,7 +34,7 @@ def _tele_frame(state=3, last_applied_seq=7):
 
 def _cmd_frame():
     chains = [{"chain_id": 0, "motors": [
-        {"mode_req": P.REQ_MIT, "pos": 1.5, "vel": -2.0, "kp": 15.0, "kd": 1.0,
+        {"drive_req": P.DRV_REQ_ENABLE, "pos": 1.5, "vel": -2.0, "kp": 15.0, "kd": 1.0,
          "tau_ff": 0.0, "flags": P.CMD_FLAG_VALID}]}]
     payload = P.pack_robot_cmd(1, 1, chains)
     return P.encode_frame(P.MSG_ROBOT_CMD, P.NODE_JETSON, P.NODE_MASTER, payload)
@@ -85,7 +85,7 @@ class ConvertLog(unittest.TestCase):
             self.assertEqual(f, convert_log.MOTOR_STATE_FIELDS)
             self.assertEqual(len(rows), 1)
             self.assertEqual(rows[0]["slave"], "0")
-            self.assertEqual(rows[0]["state_name"], "HOLD")
+            self.assertEqual(rows[0]["drive_state_name"], "DISABLED")
             self.assertEqual(rows[0]["last_applied_seq"], "7")
             self.assertNotEqual(rows[0]["master_ts_ms"], "")
 
@@ -93,7 +93,7 @@ class ConvertLog(unittest.TestCase):
             f, rows = _rows(os.path.join(folder, "motor_cmd.csv"))
             self.assertEqual(f, convert_log.MOTOR_CMD_FIELDS)
             self.assertEqual(len(rows), 1)
-            self.assertEqual(rows[0]["mode_name"], "MIT")
+            self.assertEqual(rows[0]["drive_req_name"], "ENABLE")
             self.assertAlmostEqual(float(rows[0]["pos"]), 1.5, places=3)
             self.assertAlmostEqual(float(rows[0]["kp"]), 15.0, places=1)
             self.assertEqual(rows[0]["cmd_seq"], "1")
@@ -132,3 +132,97 @@ class ConvertLog(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class EmbeddedSchema(unittest.TestCase):
+    """Step-7 self-describing logs: the header meta embeds the wire schema, and
+    convert_log decodes with it when the log's hash differs from the host's."""
+
+    @staticmethod
+    def _yaml_text():
+        with open(os.path.join(ROOT, "firmware", "common", "protocol.yaml"),
+                  encoding="utf-8") as f:
+            return f.read()
+
+    def test_build_log_meta_embeds_schema(self):
+        from master_link import config_meta
+        meta = config_meta.build_log_meta("test")
+        self.assertEqual(meta["schema_hash"], P.SCHEMA_HASH)
+        self.assertEqual(meta["protocol_yaml"], self._yaml_text())
+
+    def test_log_without_embedded_schema_uses_current_module(self):
+        D, h = convert_log._decode_context({"meta": {"config_name": "x"}})
+        self.assertIs(D, P)
+        self.assertIsNone(h)
+
+    def test_matching_hash_uses_current_module(self):
+        D, h = convert_log._decode_context(
+            {"meta": {"protocol_yaml": self._yaml_text(),
+                      "schema_hash": P.SCHEMA_HASH}})
+        self.assertIs(D, P)
+
+    def _write_frames(self, path, meta):
+        w = BinaryLogWriter(path, meta, proto_version=P.PROTO_VERSION)
+        w.write(LOG.RX_FRAME, _tele_frame(state=5, last_applied_seq=9))
+        w.write(LOG.RX_FRAME, P.encode_frame(
+            P.MSG_MASTER_STATUS, P.NODE_MASTER, P.NODE_JETSON,
+            struct.pack(P.FMT_MASTER_STATUS, P.SCHEMA_HASH, 0, 1234, 0, 99,
+                        200, 200, 200, 50, 0, 0)))
+        w.write(LOG.RX_FRAME, P.encode_frame(
+            P.MSG_SLAVE_STATUS, P.NODE_MASTER, P.NODE_JETSON,
+            struct.pack(P.FMT_SLAVE_STATUS, 0, 1, 1234, 0, 0, 0)))
+        w.write(LOG.TX_FRAME, _cmd_frame())
+        w.close()
+
+    def test_embedded_decode_equals_module_decode(self):
+        """Same frames converted twice: once on the fast path, once FORCED onto
+        the embedded-schema path (hash in meta != host) with the current schema
+        text embedded. All CSVs must agree row-for-row (host_ts excluded — the
+        two logs are written at different wall times)."""
+        with tempfile.TemporaryDirectory() as d:
+            fast = os.path.join(d, "fast_x.bin")
+            emb = os.path.join(d, "emb_x.bin")
+            self._write_frames(fast, {"schema_hash": P.SCHEMA_HASH,
+                                      "protocol_yaml": self._yaml_text()})
+            self._write_frames(emb, {"schema_hash": 0,   # force the embedded path
+                                     "protocol_yaml": self._yaml_text()})
+            ffold, _ = convert_log.convert(fast)
+            efold, _ = convert_log.convert(emb)
+            for name in self._FILES_CMP:
+                ff, frows = _rows(os.path.join(ffold, name))
+                ef, erows = _rows(os.path.join(efold, name))
+                self.assertEqual(ff, ef, name)
+                # host_ts and master_ts_ms are stamped at WRITE time (the two
+                # logs are built moments apart); everything else must agree.
+                strip = lambda rows: [{k: v for k, v in r.items()
+                                       if k not in ("host_ts", "master_ts_ms")}
+                                      for r in rows]
+                self.assertEqual(strip(frows), strip(erows), name)
+            # Sanity: the embedded path really decoded (non-empty motor rows).
+            _, mrows = _rows(os.path.join(efold, "motor_state.csv"))
+            self.assertEqual(len(mrows), 1)
+            self.assertEqual(mrows[0]["drive_state_name"], "ENABLED")
+            self.assertEqual(mrows[0]["last_applied_seq"], "9")
+
+    _FILES_CMP = ("motor_state.csv", "motor_cmd.csv", "status.csv",
+                  "events.csv", "loop_timing.csv")
+
+    def test_old_proto_version_decodes_via_embedded_schema(self):
+        """A log whose frames carry a DIFFERENT proto version decodes with its
+        embedded schema (version from the schema), not as VERSION_MISMATCH."""
+        yaml_text = self._yaml_text().replace("proto_version: 10",
+                                              "proto_version: 77")
+        old_ver = P.PROTO_VERSION
+        with tempfile.TemporaryDirectory() as d:
+            binp = os.path.join(d, "old_x.bin")
+            try:
+                P.PROTO_VERSION = 77          # write frames as a "v77" host did
+                self._write_frames(binp, {"schema_hash": 0,
+                                          "protocol_yaml": yaml_text})
+            finally:
+                P.PROTO_VERSION = old_ver
+            folder, c = convert_log.convert(binp)
+            self.assertEqual(c["version_frames"], 0)
+            _, mrows = _rows(os.path.join(folder, "motor_state.csv"))
+            self.assertEqual(len(mrows), 1)
+            self.assertEqual(mrows[0]["drive_state_name"], "ENABLED")
