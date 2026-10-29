@@ -66,9 +66,6 @@ void MotorMaster_ProcessLoop(void);
 void MotorMaster_ParseRxBuffer(void);
 void MotorMaster_FormatTxBuffer(void);
 
-/* Split the host's cmd_robot_t into per-slave command mailboxes (ISR context). */
-void MotorMaster_HandleRobotCmd(const cmd_robot_t *cmd);
-
 /* USB RX (ring + frame scan) lives in usb_link; this module only supplies the
    frame-dispatch callback passed to usb_rx_process in the main loop. */
 

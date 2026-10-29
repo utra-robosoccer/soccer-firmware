@@ -17,36 +17,15 @@ static UART_HandleTypeDef *master_huart = NULL;
 uint8_t new_usb_packet_rx_flag = 0;
 uint8_t buf_rx_jet2master[NUM_SLV * MAX_MOTORS_PER_SLAVE * USB_BYTES_PER_MOTOR];
 
-/* ── double-buffered per-slave command mailbox ────────────────────────────
-   The host sends one cmd_robot_t per tick. MotorMaster_HandleRobotCmd (main-loop
-   USB dispatch) fills the PENDING back-buffer; mailbox_swap() at the start of every
-   master cycle moves the newest complete set into the ACTIVE buffer that poll_one_slave
-   reads. So a command received during cycle n is applied at n+1 (never the same cycle,
-   never a half-written set), and with no new command the active set is held and re-sent.
-   Mode requests are level-triggered: a slave absent from the latest command keeps its
-   last active chain. See docs/architecture.md. */
-static cmd_chain_t host_chain[NUM_SLAVES];        /* ACTIVE: applied + re-sent each cycle */
-static uint8_t     host_chain_valid[NUM_SLAVES];
-static uint16_t    g_cmd_seq_active   = CMD_SEQ_NONE; /* cmd_seq sent to slaves THIS cycle */
-
-static cmd_chain_t pend_chain[NUM_SLAVES];        /* PENDING: filled by USB dispatch   */
-static uint8_t     pend_chain_valid[NUM_SLAVES];
-static uint16_t    pend_cmd_seq       = CMD_SEQ_NONE;
-static uint16_t    pend_cycle_echo    = 0;        /* cmd.cycle_id of the pending command */
-static uint8_t     pend_fresh         = 0;        /* a new complete set awaits the swap */
-static uint8_t     pend_fault_reset   = 0;        /* pending command carries a RESET request */
-
-static uint16_t    g_cmd_seq_rx       = CMD_SEQ_NONE; /* last cmd_seq received from host */
+/* ── host-command mailbox (pure logic: common/include/cmd_mailbox.h) ───────
+   Double-buffered, apply-at-n+1, latest-wins. USB dispatch posts; the swap at the
+   start of every master cycle publishes to the ACTIVE buffer that poll_one_slave
+   reads. See docs/architecture.md. */
+static CmdMailbox  g_mbox;
 static uint16_t    master_cycle_id    = 0;            /* master cycle counter (per cycle) */
 
-/* Host-loop-vs-master-cycle counters, classified at the swap (reported in tele_robot_t,
-   wrap; the host reports per-run deltas). */
-static uint16_t    cnt_on_time = 0, cnt_late = 0, cnt_missing = 0, cnt_duplicate = 0;
-
-/* Host-death dead-man (task 6): cycles since the last fresh host command, and the FSM that
-   forces STOP to the slaves when the host goes quiet while armed. */
-static uint32_t      g_cycles_since_fresh = 0;
-static uint8_t       g_fresh_fault_reset  = 0;   /* a fresh fault-reset command arrived this cycle */
+/* Host-death dead-man (task 6): the FSM that forces STOP to the slaves when the
+   host goes quiet while armed; its inputs live in the mailbox. */
 static HostWatchdog  g_host_wd;
 static HostLinkAction g_host_action = HOST_LINK_OK;
 
@@ -269,18 +248,18 @@ static void emit_robot_tele(uint32_t master_time_us)
        touches motor data; the host decodes fixed-point raw→units.
        master_time_us is this cycle's real TIM2 µs timestamp (stamped by the caller).
        cmd_seq_active is the command actually applied this cycle; the four cmd_* counters
-       classify host-loop timing against the master clock (see mailbox_swap). Hardware
+       classify host-loop timing against the master clock (see cmd_mailbox_swap). Hardware
        cycle overruns remain in MasterStatus.missed_deadlines. */
     tele_robot_t pay;
     memset(&pay, 0, sizeof(pay));
     pay.cycle_id         = master_cycle_id;
     pay.master_time_us   = master_time_us;
-    pay.last_cmd_seq_rx  = g_cmd_seq_rx;
-    pay.cmd_seq_active   = g_cmd_seq_active;
-    pay.cmd_on_time      = cnt_on_time;
-    pay.cmd_late         = cnt_late;
-    pay.cmd_missing      = cnt_missing;
-    pay.cmd_duplicate    = cnt_duplicate;
+    pay.last_cmd_seq_rx  = g_mbox.cmd_seq_rx;
+    pay.cmd_seq_active   = g_mbox.cmd_seq_active;
+    pay.cmd_on_time      = g_mbox.cnt_on_time;
+    pay.cmd_late         = g_mbox.cnt_late;
+    pay.cmd_missing      = g_mbox.cnt_missing;
+    pay.cmd_duplicate    = g_mbox.cnt_duplicate;
     /* Reporting priority (spec §robot_state): HOST_LOST > PROTO_MISMATCH >
        the computed INIT/READY/DEGRADED. */
     pay.robot_state      = (g_host_action != HOST_LINK_OK) ? (uint8_t)ROBOT_HOST_LOST
@@ -322,69 +301,6 @@ static void emit_robot_tele(uint32_t master_time_us)
     if (n > 0u) usb_tx_write(frame, n);
 }
 
-/* ── ROBOT_CMD handler (main-loop USB dispatch) ────────────────────────────
-   Fill the PENDING back-buffer (per-slave, latest wins by chain_id). pend_fresh is set
-   LAST, after the whole set is copied, so a mailbox_swap can never take a half-written
-   set. If a previous pending set had not yet been swapped, the host produced more than
-   one command for one cycle → the older is dropped (cmd_duplicate). Mode requests are
-   level-triggered: a slave absent from this command keeps its stored pending chain. */
-void MotorMaster_HandleRobotCmd(const cmd_robot_t *cmd)
-{
-    if (cmd == NULL) return;
-#ifdef SPI_INJECT_TEST
-    if (cmd->reserved == 0xDEu) { g_spi_inject = 1u; return; } /* sentinel (reserved, not cycle_id) */
-#endif
-#ifdef USB_TX_TEST
-    if (cmd->reserved == 0xB0u) { g_txtest = 1u; return; }     /* sentinel (reserved, not cycle_id) */
-#endif
-    if (pend_fresh) cnt_duplicate++;     /* overwriting an unapplied set */
-    g_cmd_seq_rx    = cmd->cmd_seq;
-    pend_cmd_seq    = cmd->cmd_seq;
-    pend_cycle_echo = cmd->cycle_id;     /* the master cycle the host was answering */
-    uint8_t n = (cmd->n_chains > MAX_CHAINS) ? MAX_CHAINS : cmd->n_chains;
-    uint8_t fr = 0u;                     /* does this command carry a RESET request? */
-    for (uint8_t c = 0; c < n; c++) {
-        uint8_t s = cmd->chains[c].chain_id;
-        if (s >= NUM_SLAVES) { master_link_errors++; continue; }
-        pend_chain[s]       = cmd->chains[c];   /* struct copy (62 B) */
-        pend_chain_valid[s] = 1u;
-        uint8_t nm = (cmd->chains[c].n_motors > MAX_MOTORS_PER_SLAVE)
-                     ? MAX_MOTORS_PER_SLAVE : cmd->chains[c].n_motors;
-        for (uint8_t m = 0; m < nm; m++)
-            if (cmd->chains[c].motors[m].drive_req == DRV_REQ_RESET) fr = 1u;
-    }
-    pend_fault_reset = fr;
-    pend_fresh = 1u;                     /* publish last: the swap now sees a complete set */
-}
-
-/* Called once at the start of every master cycle, before polling. If a fresh command set
-   is pending, classify it against the cycle it answered and swap it into the active
-   buffer (apply at n+1); otherwise hold the active set and count a missing cycle. */
-static void mailbox_swap(void)
-{
-    if (pend_fresh) {
-        /* latest telemetry the host could have answered = the cycle emitted last =
-           master_cycle_id - 1 (it was incremented at this cycle's start). Wrap-safe. */
-        int16_t d = (int16_t)((uint16_t)(master_cycle_id - 1u) - pend_cycle_echo);
-        if (d <= 0) cnt_on_time++;       /* answered the freshest cycle (d<0 clamps to on-time) */
-        else        cnt_late++;          /* answered an older cycle (host lagged d cycles) */
-        for (uint8_t s = 0; s < NUM_SLAVES; s++) {
-            if (pend_chain_valid[s]) {
-                host_chain[s]       = pend_chain[s];
-                host_chain_valid[s] = 1u;
-            }
-        }
-        g_cmd_seq_active = pend_cmd_seq;
-        g_cycles_since_fresh = 0u;
-        g_fresh_fault_reset  = pend_fault_reset;
-        pend_fresh = 0u;
-    } else {
-        cnt_missing++;                   /* no new command → active set re-sent (hold) */
-        if (g_cycles_since_fresh < 0xFFFFFFFFu) g_cycles_since_fresh++;
-        g_fresh_fault_reset = 0u;
-    }
-}
-
 /* Frame dispatch: usb_link's RX scanner delivers complete frames here (main-loop
    context). WHAT a frame means is decided here, not in the transport. */
 static void on_usb_frame(const ProtoScanResult *r)
@@ -393,7 +309,13 @@ static void on_usb_frame(const ProtoScanResult *r)
         if (r->pay_len >= sizeof(cmd_robot_t)) {
             cmd_robot_t cmd;
             memcpy(&cmd, r->payload, sizeof(cmd));
-            MotorMaster_HandleRobotCmd(&cmd);
+#ifdef SPI_INJECT_TEST
+            if (cmd.reserved == 0xDEu) { g_spi_inject = 1u; return; } /* sentinel (reserved) */
+#endif
+#ifdef USB_TX_TEST
+            if (cmd.reserved == 0xB0u) { g_txtest = 1u; return; }     /* sentinel (reserved) */
+#endif
+            master_link_errors += cmd_mailbox_post(&g_mbox, &cmd);    /* bad chain_ids */
         } else {
             master_link_errors++;
         }
@@ -415,14 +337,7 @@ void MotorMaster_Init(SPI_HandleTypeDef *hspi, UART_HandleTypeDef *huart)
     CS_ALL_HIGH();
     memset(slave_alive, 0, sizeof(slave_alive));
     memset(slave_motors_alive, 0, sizeof(slave_motors_alive));
-    memset(host_chain, 0, sizeof(host_chain));
-    memset(host_chain_valid, 0, sizeof(host_chain_valid));
-    memset(pend_chain, 0, sizeof(pend_chain));
-    memset(pend_chain_valid, 0, sizeof(pend_chain_valid));
-    pend_fresh = 0u; pend_cmd_seq = CMD_SEQ_NONE; pend_cycle_echo = 0u; pend_fault_reset = 0u;
-    g_cmd_seq_active = CMD_SEQ_NONE; g_cmd_seq_rx = CMD_SEQ_NONE;
-    cnt_on_time = cnt_late = cnt_missing = cnt_duplicate = 0u;
-    g_cycles_since_fresh = 0u; g_fresh_fault_reset = 0u;
+    cmd_mailbox_reset(&g_mbox);
     host_watchdog_reset(&g_host_wd); g_host_action = HOST_LINK_OK;
     memset(latest_tele, 0, sizeof(latest_tele));
     memset(slave_crc_errors, 0, sizeof(slave_crc_errors));
@@ -455,8 +370,8 @@ static void poll_one_slave(uint8_t s)
         return;   /* skip the normal exchange this cycle */
     }
 #endif
-    /* Decide the chain to send this slave (active buffer is set only by mailbox_swap at
-       cycle start, same main-loop context — no masking needed):
+    /* Decide the chain to send this slave (active buffer is set only by cmd_mailbox_swap
+       at cycle start, same main-loop context — no masking needed):
          - host-death tripped → the master OVERRIDES with STOP for every motor;
          - else an applied host command → re-send it (ROBOT_CMD);
          - else (nothing ever applied) → a NOP keepalive, which clocks telemetry but does
@@ -476,9 +391,9 @@ static void poll_one_slave(uint8_t s)
             chain_local.motors[i].drive_req = DRV_REQ_STOP;
             chain_local.motors[i].flags     = 0u;
         }
-    } else if (host_chain_valid[s]) {
+    } else if (g_mbox.active_valid[s]) {
         opcode      = SPI_OP_ROBOT_CMD;
-        chain_local = host_chain[s];
+        chain_local = g_mbox.active[s];
     } else {
         opcode = SPI_OP_NOP;
         memset(&chain_local, 0, sizeof(chain_local));
@@ -507,7 +422,7 @@ static void poll_one_slave(uint8_t s)
     uint8_t seq_to_send = spi_seq[s]++;
     tele_chain_t tele;
     SpiExResult st = spi_exchange((SpiDevId)s, opcode, seq_to_send,
-                                  master_cycle_id, g_cmd_seq_active,
+                                  master_cycle_id, g_mbox.cmd_seq_active,
                                   &chain_local, &tele);
 
     if (st == SPI_EX_OK) {   /* CRC verified inside spi_exchange = valid + present */
@@ -595,11 +510,12 @@ void MotorMaster_ProcessLoop(void)
     if (master_cycle_take(NULL)) {
         uint32_t t0 = cycle_us_now();           /* cycle service start (µs) */
         master_cycle_id++;
-        mailbox_swap();                         /* apply-at-n+1: take the newest complete set */
+        cmd_mailbox_swap(&g_mbox, master_cycle_id);  /* apply-at-n+1: newest complete set */
         /* Host-death dead-man: if the host went quiet for too long while armed, override
            what we send the slaves (forced STOP), latched until a RESET-bearing command. */
-        g_host_action = host_watchdog_step(&g_host_wd, g_cycles_since_fresh, any_motor_armed(),
-                                           g_fresh_fault_reset, HOST_LOST_CYCLES);
+        g_host_action = host_watchdog_step(&g_host_wd, g_mbox.cycles_since_fresh,
+                                           any_motor_armed(), g_mbox.fresh_fault_reset,
+                                           HOST_LOST_CYCLES);
         for (uint8_t s = 0; s < NUM_SLAVES; s++) {
             poll_one_slave(s);
         }
