@@ -1,4 +1,4 @@
-#include "usb_tx.h"
+#include "usb_link.h"
 #include "usbd_cdc_if.h"
 #include "proto_common.h"   /* protocol.h (tele_robot_t, MSG_HEADER_SIZE) for the size guard */
 #include <string.h>

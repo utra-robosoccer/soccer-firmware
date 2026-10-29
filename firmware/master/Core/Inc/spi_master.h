@@ -4,7 +4,7 @@
 #include "main.h"
 #include "usbd_cdc_if.h"
 #include "proto_common.h"
-#include "usb_tx.h"
+#include "usb_link.h"
 #include <stdarg.h>
 #include <stdio.h>
 #include <stdint.h>

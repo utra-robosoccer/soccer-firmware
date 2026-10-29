@@ -23,9 +23,9 @@
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
 #include "spi_master.h"
-#include "usb_tx.h"
+#include "usb_link.h"
 #include "master_cycle.h"
-#include "imu_service.h"   /* optional BMI088 IMU on I2C1 (merged from the IMU PR) */
+#include "imu.h"   /* optional BMI088 IMU on I2C1 (merged from the IMU PR) */
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/

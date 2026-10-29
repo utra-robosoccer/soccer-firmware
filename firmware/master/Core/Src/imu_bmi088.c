@@ -1,4 +1,4 @@
-#include "bmi088.h"
+#include "imu_bmi088.h"
 
 #include <stddef.h>
 #include <string.h>

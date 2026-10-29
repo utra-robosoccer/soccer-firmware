@@ -23,7 +23,7 @@
 
 /* USER CODE BEGIN INCLUDE */
 #include "spi_master.h"
-#include "usb_tx.h"
+#include "usb_link.h"
 
 /* USER CODE END INCLUDE */
 

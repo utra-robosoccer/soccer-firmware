@@ -1,5 +1,5 @@
-#ifndef USB_TX_H
-#define USB_TX_H
+#ifndef USB_LINK_H
+#define USB_LINK_H
 
 #include <stdint.h>
 
@@ -18,4 +18,4 @@ extern uint32_t usb_tx_drops; /* whole frames dropped because the slot ring was 
 void    usb_tx_post_from_isr(const uint8_t *data, uint16_t len); /* USB-ISR context */
 void    usb_tx_pump_responses(void);                            /* MAIN context     */
 
-#endif /* USB_TX_H */
+#endif /* USB_LINK_H */

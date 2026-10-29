@@ -1,6 +1,6 @@
 #include "spi_master.h"
 #include "master_cycle.h"
-#include "imu_service.h"   /* optional BMI088 IMU on I2C1 (merged from the IMU PR) */
+#include "imu.h"   /* optional BMI088 IMU on I2C1 (merged from the IMU PR) */
 #include <stdio.h>
 #include <stdarg.h>
 #include <string.h>
