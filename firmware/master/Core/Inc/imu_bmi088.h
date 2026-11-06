@@ -1,5 +1,5 @@
-#ifndef BMI088_H
-#define BMI088_H
+#ifndef IMU_BMI088_H
+#define IMU_BMI088_H
 
 #include "stm32f4xx_hal.h"
 #include <stdint.h>
@@ -57,4 +57,4 @@ HAL_StatusTypeDef BMI088_ReadGyroscope(BMI088 *imu,
                                        int16_t *gyro_y,
                                        int16_t *gyro_z);
 
-#endif /* BMI088_H */
+#endif /* IMU_BMI088_H */

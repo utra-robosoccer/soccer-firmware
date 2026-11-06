@@ -4,7 +4,7 @@
  * output-compare fires once per cycle (period from the generated MASTER_POLL_HZ)
  * on an absolute grid (CCR1 += period → no drift). The ISR does no work: it only
  * sets a "cycle due" flag + records the fire time; all poll/assemble work stays in
- * the main loop (MotorMaster_ProcessLoop). See spi_master.c.
+ * the main loop (master_app_loop). See master_app.c.
  */
 #ifndef MASTER_CYCLE_H
 #define MASTER_CYCLE_H

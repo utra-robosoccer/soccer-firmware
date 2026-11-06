@@ -1,7 +1,7 @@
-#ifndef IMU_SERVICE_H
-#define IMU_SERVICE_H
+#ifndef IMU_H
+#define IMU_H
 
-#include "bmi088.h"
+#include "imu_bmi088.h"
 
 #define IMU_SERVICE_POLL_PERIOD_MS 10u
 
@@ -32,4 +32,4 @@ HAL_StatusTypeDef ImuService_Poll(void);
 /* Return a read-only view of the latest sample and service diagnostics. */
 const ImuSample *ImuService_GetLatestSample(void);
 
-#endif /* IMU_SERVICE_H */
+#endif /* IMU_H */
