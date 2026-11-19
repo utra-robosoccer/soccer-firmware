@@ -1,6 +1,6 @@
 #include "motor_runtime.h"
 #include "motor_chain.h"
-#include "robostride.h"
+#include "robstride.h"
 #include "enable_monitor.h"
 #include "../../../../common/include/drive_sm.h"           /* protocol-v9 drive machine */
 #include "../../../../common/include/master_watchdog.h"   /* master-loss grace phase */

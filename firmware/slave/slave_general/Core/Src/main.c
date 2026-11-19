@@ -27,7 +27,7 @@
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
-#include "robostride.h"
+#include "robstride.h"
 #include "motor_chain.h"
 #include "slave_spi.h"
 #include "motor_runtime.h"

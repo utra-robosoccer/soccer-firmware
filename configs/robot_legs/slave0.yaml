@@ -35,7 +35,7 @@ shared_ranges:
   kd_max:  5.0
 
 # Per-model CAN velocity/torque ranges (Type-1 operation-control tables), from
-# docs/robostride-motor-reference.md.
+# docs/robstride-motor-reference.md.
 models:
   RS00:
     v_min: -33.0   # rad/s

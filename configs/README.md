@@ -47,7 +47,7 @@ identity (`idx`, `can_id`, `model`, `joint_name`), soft limits / gains, and the
 per-model CAN "operation control mode" (Communication Type 1) velocity and
 torque ranges. Position (±4π), Kp and Kd are shared within a model size class,
 so only velocity and torque are model-specific. See
-`docs/robostride-motor-reference.md` for the full per-model capability tables.
+`docs/robstride-motor-reference.md` for the full per-model capability tables.
 
 ## Generating
 

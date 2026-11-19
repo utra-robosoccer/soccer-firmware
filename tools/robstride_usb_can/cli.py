@@ -1,19 +1,19 @@
 """Raw CH341 CLI for Robstride USB-CAN debugging.
 
 Examples:
-  python3 tools/robostride_usb_can/cli.py read 1
-  python3 tools/robostride_usb_can/cli.py init 1
-  python3 tools/robostride_usb_can/cli.py mit 1 0 0 0 0 0
-  python3 tools/robostride_usb_can/cli.py command 1 0 0 15 1 0 --duration 2
-  python3 tools/robostride_usb_can/cli.py sine 1 --amp 0.20 --freq 0.25 --duration 8
-  python3 tools/robostride_usb_can/cli.py sine-chain 1 2 --amp 0.20 --freq 0.25 --duration 8
-  python3 tools/robostride_usb_can/cli.py goto 1 1.57 0.30
-  python3 tools/robostride_usb_can/cli.py zero 1 --rate 0.30
-  python3 tools/robostride_usb_can/cli.py zero-vel 1 --rate 0.50
-  python3 tools/robostride_usb_can/cli.py off 1
-  python3 tools/robostride_usb_can/cli.py scan-ids
-  python3 tools/robostride_usb_can/cli.py set-zero 1
-  python3 tools/robostride_usb_can/cli.py set-id 1 2
+  python3 tools/robstride_usb_can/cli.py read 1
+  python3 tools/robstride_usb_can/cli.py init 1
+  python3 tools/robstride_usb_can/cli.py mit 1 0 0 0 0 0
+  python3 tools/robstride_usb_can/cli.py command 1 0 0 15 1 0 --duration 2
+  python3 tools/robstride_usb_can/cli.py sine 1 --amp 0.20 --freq 0.25 --duration 8
+  python3 tools/robstride_usb_can/cli.py sine-chain 1 2 --amp 0.20 --freq 0.25 --duration 8
+  python3 tools/robstride_usb_can/cli.py goto 1 1.57 0.30
+  python3 tools/robstride_usb_can/cli.py zero 1 --rate 0.30
+  python3 tools/robstride_usb_can/cli.py zero-vel 1 --rate 0.50
+  python3 tools/robstride_usb_can/cli.py off 1
+  python3 tools/robstride_usb_can/cli.py scan-ids
+  python3 tools/robstride_usb_can/cli.py set-zero 1
+  python3 tools/robstride_usb_can/cli.py set-id 1 2
 """
 import os
 import time

@@ -1,5 +1,5 @@
-/* Harness for the RobStride ext-id codec (robostride_id.h), driven by
- * host/tests/test_robostride_id.py.
+/* Harness for the RobStride ext-id codec (robstride_id.h), driven by
+ * host/tests/test_robstride_id.py.
  *
  * Asserts pack→unpack round-trips and that the id fits 29 bits, over 20 000
  * pseudo-random (mode,data,id) triples, and prints "<mode> <data> <id> <ext>" so
@@ -9,7 +9,7 @@
  * Built: gcc -std=c11 -Wall -Wextra -Werror -I firmware/common/include ... */
 #include <stdint.h>
 #include <stdio.h>
-#include "robostride_id.h"
+#include "robstride_id.h"
 
 static uint32_t g_lcg = 0x00C0FFEEu;
 static uint32_t lcg_next(void)

@@ -1,5 +1,5 @@
-#ifndef ROBOSTRIDE_ID_H
-#define ROBOSTRIDE_ID_H
+#ifndef ROBSTRIDE_ID_H
+#define ROBSTRIDE_ID_H
 #include <stdint.h>
 
 /* RobStride extended (29-bit) CAN arbitration-ID layout:
@@ -12,7 +12,7 @@
  * `*(exCanIdInfo*)&header.ExtId` pointer cast, which (a) violated strict aliasing
  * — undefined at -O2, where the compiler may drop the field stores and corrupt
  * the arbitration id — and (b) relied on the implementation-defined ordering of
- * C bitfields. Pure (no HAL), so it is host-tested: host/tests/test_robostride_id.py. */
+ * C bitfields. Pure (no HAL), so it is host-tested: host/tests/test_robstride_id.py. */
 static inline uint32_t rs_extid_pack(uint8_t mode, uint16_t data, uint8_t id)
 {
     return ((uint32_t)(mode & 0x1Fu) << 24) |
@@ -24,4 +24,4 @@ static inline uint8_t  rs_extid_mode(uint32_t ext) { return (uint8_t)((ext >> 24
 static inline uint16_t rs_extid_data(uint32_t ext) { return (uint16_t)((ext >> 8)  & 0xFFFFu); }
 static inline uint8_t  rs_extid_id(uint32_t ext)   { return (uint8_t)( ext         & 0xFFu); }
 
-#endif /* ROBOSTRIDE_ID_H */
+#endif /* ROBSTRIDE_ID_H */

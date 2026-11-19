@@ -1,6 +1,6 @@
 """RS02 CAN frame encoding and decoding - private 29-bit extended protocol.
 
-Sources: RS02 user manual (chapter 4), soccer-firmware/slave/robostride.h/.c
+Sources: RS02 user manual (chapter 4), soccer-firmware/slave/robstride.h/.c
 
 29-bit extended ID layout:  mode[28:24] | data[23:8] | node_id[7:0]
 """
@@ -18,7 +18,7 @@ COMM_SET_ID     = 7
 COMM_READ_PARAM = 17
 COMM_WRITE_PARAM = 18
 
-MASTER_ID = 0xFD      # host CAN ID (robostride.h: CAN_MASTER_ID)
+MASTER_ID = 0xFD      # host CAN ID (robstride.h: CAN_MASTER_ID)
 RUN_MODE_MIT = 0
 RUN_MODE_POSITION = 1
 RUN_MODE_VELOCITY = 2
@@ -143,7 +143,7 @@ def encode_disable(motor_id: int) -> tuple[int, bytes]:
 
 
 def encode_set_zero(motor_id: int) -> tuple[int, bytes]:
-    """Type 6 set-zero: payload byte 0 must be 0x01 (robostride.c confirmation)."""
+    """Type 6 set-zero: payload byte 0 must be 0x01 (robstride.c confirmation)."""
     return make_id(COMM_SET_ZERO, motor_id, data=MASTER_ID), bytes([0x01]) + bytes(7)
 
 
@@ -270,7 +270,7 @@ class Feedback:
 def decode_feedback(arb_id: int, data: bytes) -> Optional["Feedback"]:
     """Type 2 feedback frame.
 
-    CAN ID data field layout (robostride.h masks):
+    CAN ID data field layout (robstride.h masks):
       bits 7:0   — motor_id  (RS_FB_DATA_ID_MASK   = 0x00FF)
       bits 13:8  — faults    (RS_FB_DATA_FAULT_MASK = 0x3F00, >> 8)
       bits 15:14 — status    (RS_FB_DATA_MODE_MASK  = 0xC000, >> 14)

@@ -5,7 +5,7 @@
 wins; the discrepancies are listed at the end of this document.
 
 This is the single system-overview document. The manufacturer CAN reference is
-`robostride-motor-reference.md`; the CAN enable-loss study is `can-investigation.md`. (Four
+`robstride-motor-reference.md`; the CAN enable-loss study is `can-investigation.md`. (Four
 docs an older `architecture.md` claimed to replace — `protocol.md`, `telemetry-path.md`,
 `slave.md`, `command.md` — do not exist in the tree.)
 
@@ -282,10 +282,10 @@ all three languages. What follows is the semantic map only:
 ### 3e. Slave ↔ motor (CAN, RobStride)
 - **Bus:** classic CAN 2.0, 1 Mbps (`Prescaler 2, BS1 16TQ, BS2 4TQ, SJW 1TQ` → 21 TQ, ~81 % sample
   point; APB1 42 MHz). **`AutoRetransmission = DISABLE` (one-shot / NART)**, `AutoBusOff = DISABLE`.
-- **Extended-ID codec (`robostride_id.h`):** 29-bit ID = `mode[28:24] | data[23:8] | node_id[7:0]`.
+- **Extended-ID codec (`robstride_id.h`):** 29-bit ID = `mode[28:24] | data[23:8] | node_id[7:0]`.
   Replaced an earlier C bitfield (endianness/packing-fragile) with explicit shift/mask helpers
-  (`rs_extid_pack/mode/data/id`), pinned by `test_robostride_id.c`.
-- **Types used in the hot loop (`robostride.c`):** Type-1 operation-control out (`can_mit_control_set`:
+  (`rs_extid_pack/mode/data/id`), pinned by `test_robstride_id.c`.
+- **Types used in the hot loop (`robstride.c`):** Type-1 operation-control out (`can_mit_control_set`:
   ID data = torque_ff u16, payload BE u16×4 = pos/vel/Kp/Kd); Type-2 feedback in
   (`can_unpack_motor_feedback`: id, 6 fault bits, run mode, payload pos/vel/torque/temp). Enable
   (Type-3), stop/clear (Type-4), write run-mode (Type-18), set-zero (Type-6), id/param (Type-0/7/17)
@@ -630,19 +630,19 @@ is compile-time on all three sides — there is **no in-band N check**.
 - Status / notes:
 
 **Per-model Kp/Kd CAN-encode ranges**
-- Problem: the slave encodes Type-1 **Kp/Kd over hardcoded global ranges** (`robostride.h`
+- Problem: the slave encodes Type-1 **Kp/Kd over hardcoded global ranges** (`robstride.h`
   `KP_MAX 500`, `KD_MAX 5`); only velocity/torque are per-model (`MotorCanRange`). RS03/04/06 use
   Kp 0–5000 / Kd 0–100, so in a mixed-model config (e.g. `robot_legs`) their gains are mis-scaled
   ~10×/20× — unsafe to drive.
 - Idea: add `kp_min/max`, `kd_min/max` to `MotorCanRange`; emit them per-model in
   `gen_motor_config.py` from the yaml `models:` block; `can_mit_control_set` uses `r->kp_*/kd_*`
-  instead of the `robostride.h` globals.
+  instead of the `robstride.h` globals.
 - Trade-offs: a `MotorCanRange` size change + regen; the yaml `models:` block must carry kp/kd.
 - Dependencies: none (the host/wire fixed-point scales already cover 0–5000 / 0–100).
 - Status / notes: **DONE (this branch)** — `MotorCanRange` gained `kp_min/max`, `kd_min/max`,
   emitted per-model from the yaml `models:` block (`gen_motor_config.py`, with a class default:
   RS03/04/06 → 0–5000 / 0–100, else 0–500 / 0–5); `can_mit_control_set` uses `r->kp_*/kd_*`
-  (the `robostride.h` globals are now only the not-in-config fallback).
+  (the `robstride.h` globals are now only the not-in-config fallback).
 
 **Interrupt-driven CAN TX queue**
 - Problem: `can_tx` busy-waits ~280 µs CPU/cycle.

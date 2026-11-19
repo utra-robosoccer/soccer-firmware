@@ -1,4 +1,4 @@
-#include "robostride.h"     /* also pulls in robostride_id.h (rs_extid_pack/mode/data/id) */
+#include "robstride.h"     /* also pulls in robstride_id.h (rs_extid_pack/mode/data/id) */
 #include "proto_common.h"   /* motor_can_range_by_id() — per-model V/T ranges */
 
 
@@ -172,7 +172,7 @@ HAL_StatusTypeDef can_mit_control_set(uint8_t id, float torque, float MechPositi
     /* Velocity, torque AND Kp/Kd ranges are model-specific (e.g. RS00/02 Kp 0–500,
      * Kd 0–5; RS03/06 Kp 0–5000, Kd 0–100) and come from the config (slaveN.yaml
      * models → MotorCanRange). Only position is shared across models. Fall back to the
-     * robostride.h globals if the id is not in this slave's config. */
+     * robstride.h globals if the id is not in this slave's config. */
     const MotorCanRange *r = motor_can_range_by_id(id);
     float v_min  = r ? r->v_min  : V_MIN;
     float v_max  = r ? r->v_max  : V_MAX;
