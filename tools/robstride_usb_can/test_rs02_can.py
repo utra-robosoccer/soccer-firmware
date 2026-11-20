@@ -41,7 +41,7 @@ class ParamCodec(unittest.TestCase):
         self.assertEqual(mode, COMM_SAVE)
         self.assertEqual(node, 3)
         self.assertEqual(data, MASTER_ID)
-        self.assertEqual(pl, bytes(8))
+        self.assertEqual(pl, bytes(range(1, 9)))  # manual-mandated 01..08 payload
 
     def test_decode_param_roundtrip(self):
         # a Type-17 reply for reg 0x7029, value 1 (reg in [0:2], value in [4:8])

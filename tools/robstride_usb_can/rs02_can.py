@@ -187,8 +187,10 @@ def encode_write_param(motor_id: int, reg: int, value, as_float: bool = False) -
 
 
 def encode_save(motor_id: int) -> tuple[int, bytes]:
-    """Type 22 save: persist the 0x20xx flash bank."""
-    return make_id(COMM_SAVE, motor_id, data=MASTER_ID), bytes(8)
+    """Type 22 save: persist the 0x20xx flash bank.
+
+    The manual (RS03 manual 4.1.9) requires the fixed payload 01..08."""
+    return make_id(COMM_SAVE, motor_id, data=MASTER_ID), bytes(range(1, 9))
 
 
 @dataclass
