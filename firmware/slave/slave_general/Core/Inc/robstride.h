@@ -9,7 +9,7 @@
 #include "motor_types.h"  // motor_t, motor_status_t, motor_error_t, rs_runmode_t
 /* Strict-aliasing-safe RobStride ext-id codec (path relative to Core/Inc/, as in
    proto_common.h). Replaces the old (exCanIdInfo*)&ExtId pointer cast. */
-#include "../../../../common/include/robstride_id.h"
+#include "../../../../common/include/motor_rs_can_id.h"
 
 // --- Constants (DO NOT CHANGE) ---
 #define P_MIN   -12.57f
@@ -27,7 +27,7 @@
 #define ROBSTRIDE_READ_ONLY_MOTOR_ID 2u
 
 // The 29-bit ext-id layout (id[0:7] / data[8:23] / mode[24:28]) is now encoded and
-// decoded by rs_extid_pack/mode/data/id (robstride_id.h) with explicit shifts —
+// decoded by rs_extid_pack/mode/data/id (motor_rs_can_id.h) with explicit shifts —
 // no bitfield-struct pointer cast (that was undefined at -O2 under strict aliasing).
 
 // rs_runmode_t and motor_status_t are defined in motor_types.h

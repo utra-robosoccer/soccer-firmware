@@ -4,7 +4,7 @@
 #include "enable_monitor.h"
 #include "../../../../common/include/drive_sm.h"           /* protocol-v9 drive machine */
 #include "../../../../common/include/master_watchdog.h"   /* master-loss grace phase */
-#include "../../../../common/include/soft_limit.h"         /* one-sided soft-limit clamp */
+#include "../../../../common/include/motor_soft_limit.h"         /* one-sided soft-limit clamp */
 #include "../../../../common/include/arm_sm.h"              /* ENABLING CAN sequencing */
 #include <math.h>
 #include <string.h>

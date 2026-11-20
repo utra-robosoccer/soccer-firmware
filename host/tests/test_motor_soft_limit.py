@@ -13,9 +13,9 @@ class SoftLimit(unittest.TestCase):
         gcc = shutil.which("gcc") or shutil.which("cc")
         if gcc is None:
             self.skipTest("no C compiler available")
-        src = os.path.join(ROOT, "firmware", "common", "test", "test_soft_limit.c")
+        src = os.path.join(ROOT, "firmware", "common", "test", "test_motor_soft_limit.c")
         inc = os.path.join(ROOT, "firmware", "common", "include")
-        exe = os.path.join(HERE, "_soft_limit_bin")
+        exe = os.path.join(HERE, "_motor_soft_limit_bin")
         subprocess.check_call([gcc, "-std=c11", "-Wall", "-Wextra", "-Werror",
                                "-I", inc, src, "-o", exe, "-lm"])
         try:

@@ -1,5 +1,5 @@
-/* Pure (HAL-free) tests for the one-sided soft-limit clamp (soft_limit.h). Exit 0 = OK. */
-#include "soft_limit.h"
+/* Pure (HAL-free) tests for the one-sided soft-limit clamp (motor_soft_limit.h). Exit 0 = OK. */
+#include "motor_soft_limit.h"
 #include <stdio.h>
 #include <math.h>
 

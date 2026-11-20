@@ -1,4 +1,4 @@
-#include "robstride.h"     /* also pulls in robstride_id.h (rs_extid_pack/mode/data/id) */
+#include "robstride.h"     /* also pulls in motor_rs_can_id.h (rs_extid_pack/mode/data/id) */
 #include "proto_common.h"   /* motor_rs_config_by_id() — per-model RS vendor ranges */
 
 

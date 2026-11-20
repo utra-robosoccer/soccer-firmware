@@ -7,8 +7,8 @@
  * a command may hold where the shaft is or move it back toward [lo,hi], but never further
  * OUT than it already is. Inside the range this is the ordinary [lo,hi] clamp.
  */
-#ifndef SOFT_LIMIT_H
-#define SOFT_LIMIT_H
+#ifndef MOTOR_SOFT_LIMIT_H
+#define MOTOR_SOFT_LIMIT_H
 
 #include <stdint.h>
 
@@ -67,4 +67,4 @@ static inline uint8_t soft_clamp_mit(float *pos, float *vel, float *tau_ff,
 #ifdef __cplusplus
 }
 #endif
-#endif /* SOFT_LIMIT_H */
+#endif /* MOTOR_SOFT_LIMIT_H */
