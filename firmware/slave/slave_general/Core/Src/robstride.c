@@ -1,5 +1,5 @@
 #include "robstride.h"     /* also pulls in robstride_id.h (rs_extid_pack/mode/data/id) */
-#include "proto_common.h"   /* motor_can_range_by_id() — per-model V/T ranges */
+#include "proto_common.h"   /* motor_rs_config_by_id() — per-model RS vendor ranges */
 
 
 CAN_TxHeaderTypeDef rs_can_tx_header = {
@@ -170,10 +170,10 @@ HAL_StatusTypeDef can_mit_control_set(uint8_t id, float torque, float MechPositi
     uint8_t msg[8];
 
     /* Velocity, torque AND Kp/Kd ranges are model-specific (e.g. RS00/02 Kp 0–500,
-     * Kd 0–5; RS03/06 Kp 0–5000, Kd 0–100) and come from the config (slaveN.yaml
-     * models → MotorCanRange). Only position is shared across models. Fall back to the
-     * robstride.h globals if the id is not in this slave's config. */
-    const MotorCanRange *r = motor_can_range_by_id(id);
+     * Kd 0–5; RS03/06 Kp 0–5000, Kd 0–100) — fixed RS vendor limits from
+     * motor_rs_config.h (tier 1). Only position is shared across models. Fall back
+     * to the robstride.h globals if the id is not in this slave's config. */
+    const MotorRsConfig *r = motor_rs_config_by_id(id);
     float v_min  = r ? r->v_min  : V_MIN;
     float v_max  = r ? r->v_max  : V_MAX;
     float t_min  = r ? r->t_min  : T_MIN;
@@ -239,7 +239,7 @@ HAL_StatusTypeDef can_unpack_motor_feedback(motor_t* motor, uint8_t* recv_buf)
     motor->motor_errors.uncalibrated   = (fault_byte >> FAULT_BIT_UNCALIBRATED)   & 0x01;
 
     // Velocity and torque ranges are model-specific; look up by this motor's id.
-    const MotorCanRange *r = motor_can_range_by_id(motor->id);
+    const MotorRsConfig *r = motor_rs_config_by_id(motor->id);
     float v_min = r ? r->v_min : V_MIN;
     float v_max = r ? r->v_max : V_MAX;
     float t_min = r ? r->t_min : T_MIN;

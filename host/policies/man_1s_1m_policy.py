@@ -30,7 +30,7 @@ import threading
 import tty
 
 from master_link.motor_config_gen import (
-    MOTORS, MOTOR_SOFT_MIN, MOTOR_SOFT_MAX,
+    MOTORS, MOTOR_USER_P_MIN, MOTOR_USER_P_MAX,
 )
 
 from .base import (
@@ -64,7 +64,7 @@ class Man1s1mPolicy(Policy):
     def __init__(self):
         self._motors = []
         for g, m in enumerate(MOTORS):
-            lo, hi = MOTOR_SOFT_MIN[g], MOTOR_SOFT_MAX[g]
+            lo, hi = MOTOR_USER_P_MIN[g], MOTOR_USER_P_MAX[g]
             amp = max(0.0, min(hi, -lo) - SINE_MARGIN_RAD)   # largest 0-centered amplitude
             self._motors.append((m["slave"], m["idx"], lo, hi, amp))
         self._traj = {}     # (slave, local) -> SineStart, planned on sine entry

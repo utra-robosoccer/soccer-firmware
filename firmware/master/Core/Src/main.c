@@ -257,7 +257,7 @@ static void MX_SPI1_Init(void)
   /* USER CODE END SPI1_Init 0 */
 
   /* USER CODE BEGIN SPI1_Init 1 */
-  /* Map the generated MASTER_SPI_PRESCALER_DIV (system_config.h) → HAL enum. */
+  /* Map MASTER_SPI_PRESCALER_DIV (timing_config.h) → HAL enum. */
 #if   MASTER_SPI_PRESCALER_DIV == 2
 #define MASTER_SPI_BAUD SPI_BAUDRATEPRESCALER_2
 #elif MASTER_SPI_PRESCALER_DIV == 4

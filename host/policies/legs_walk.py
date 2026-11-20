@@ -55,7 +55,7 @@ walk in reverse).
 import math
 import sys
 
-from master_link.motor_config_gen import MOTORS, MOTOR_SOFT_MIN, MOTOR_SOFT_MAX
+from master_link.motor_config_gen import MOTORS, MOTOR_USER_P_MIN, MOTOR_USER_P_MAX
 
 from .base import Policy, Action, MotorCommand, REQ_ENABLE, LinkState, arm_command
 
@@ -189,7 +189,7 @@ class LegsWalkPolicy(Policy):
             sign = base * (-1 if (side == "L" and mirror_left) else 1)
             self._moving[key] = {
                 "kind": kind, "side": side, "sign": sign,
-                "lohi": (MOTOR_SOFT_MIN[g], MOTOR_SOFT_MAX[g]) if g is not None else (None, None),
+                "lohi": (MOTOR_USER_P_MIN[g], MOTOR_USER_P_MAX[g]) if g is not None else (None, None),
             }
 
         self._ref = {}      # kind → IK angle at mid-stance        (set in setup)

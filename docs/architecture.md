@@ -517,20 +517,26 @@ with unchanged latency (§4 bench).
 ## 9. Configuration and code generation
 
 ```
-configs/<setup>/{slave0.yaml, slave1.yaml, …}  ──(scripts/gen_motor_config.py)──▶ generated files
+configs/<setup>/firmware_config.yaml (schema v2)  ──(scripts/gen_motor_config.py)──▶ generated files
 configs/active   (one line: the active setup name; $SOCCER_SETUP overrides the generator)
 ```
-Per-slave YAML holds the chain (idx, can_id, model, soft_min/max, max_vel, max_tau, default_kp/kd);
-`shared_ranges`/`models` give CAN encode bounds. Rates/timeouts have generator defaults
-(`TIMING_MS_DEFAULTS`) — optionally overridable per setup.
+The yaml carries ONLY per-robot data: `slaves → motors`, each motor three blocks —
+`identity {can_id, model, joint_name}` / `user {p_min, p_max, v_max, t_max, default_kp, default_kd}`
+(tier 2) / `fallback {kp, kd, tau}` (tier 3, dead-man damp, required). Slave membership and chain
+index come from containment + list order. RS vendor encode ranges (tier 1) are hand-written in
+`firmware/common/include/motor_rs_config.h` (mirrored and enforced by the generator's `RS_CONFIG`);
+rates, the SPI prescaler, timeouts and guards are hand-written firmware constants in
+`firmware/common/include/timing_config.h` (derived tick/cycle counts computed by the C
+preprocessor; the generator regex-copies the four rates out of it for the host) — none of this is
+configurable per robot.
 
 | generated file | flag | consumed by | key contents |
 |---|---|---|---|
-| `firmware/common/include/motor_config.h` | `--slave slaveN` | slave build | `N_MOTORS`, `motor_configs[]`, `MOTOR_WOUND_OFFSET_MAX`, rates + derived periods/counts |
-| `firmware/common/include/system_config.h` | `--system` | master build | `NUM_SLAVES`, `slave_motor_counts[]`, `slave_motor_ids[][]`, global bounds, same rate block |
-| `host/master_link/motor_config_gen.py` | `--system` | host | `SLAVES`/`MOTORS`, `MOTOR_SOFT_MIN/MAX`, `MASTER_POLL_HZ`, `CONFIG_NAME`, `CONFIG_HASH` |
+| `firmware/common/include/motor_user_config.h` | `--slave slaveN` | slave build | `N_MOTORS`, `motor_user_configs[]` ({id, user, fallback}) |
+| `firmware/common/include/master_config.h` | `--system` | master build | `NUM_SLAVES`, `MAX_MOTORS_PER_SLAVE`, `slave_motor_counts[]` |
+| `host/master_link/motor_config_gen.py` | `--system` | host | `SLAVES`/`MOTORS`, `MOTOR_USER_P_MIN/MAX`, `MASTER_POLL_HZ`, `CONFIG_NAME`, `CONFIG_HASH` |
 
-**Rate-derived constants** (`timing_block`): `MASTER_CYCLE_US = 1e6/master_poll_hz`;
+**Rate-derived constants** (preprocessor, `timing_config.h`): `MASTER_CYCLE_US = 1e6/master_poll_hz`;
 `MOTOR_ENABLE_MON_K = round(enable_mon_ms/tick_ms)` = 3; `HOST_LOST_CYCLES =
 round(max(25, 3·1000/host_cmd_hz)·master_poll_hz/1000)` = 12; `HOST_LOST_DAMP_CYCLES =
 round(master_lost_damp_ms·master_poll_hz/1000)` = 60; `TX_ARM_DEADLINE_US = round(0.6·1e6/master_poll_hz)`
@@ -642,7 +648,10 @@ is compile-time on all three sides — there is **no in-band N check**.
 - Status / notes: **DONE (this branch)** — `MotorCanRange` gained `kp_min/max`, `kd_min/max`,
   emitted per-model from the yaml `models:` block (`gen_motor_config.py`, with a class default:
   RS03/04/06 → 0–5000 / 0–100, else 0–500 / 0–5); `can_mit_control_set` uses `r->kp_*/kd_*`
-  (the `robstride.h` globals are now only the not-in-config fallback).
+  (the `robstride.h` globals are now only the not-in-config fallback). **Superseded** by the
+  config-tier split: the per-model ranges (incl. kp/kd) are now the fixed vendor table
+  `MotorRsConfig motor_rs_configs[]` in `motor_rs_config.h`, looked up via `motor_rs_config_by_id()`
+  — no longer emitted from yaml.
 
 **Interrupt-driven CAN TX queue**
 - Problem: `can_tx` busy-waits ~280 µs CPU/cycle.

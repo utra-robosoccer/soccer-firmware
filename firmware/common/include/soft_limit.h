@@ -40,7 +40,7 @@ static inline uint8_t soft_clamp_range(float *x, float lo, float hi)
 
 /* Full MIT-command clamp: the one-sided position clamp above, plus cancellation of any
  * feedforward (vel, tau_ff) that would drive further OUT past a clamped position, plus
- * magnitude bounds |vel| ≤ vel_lim (cfg->max_vel) and |tau_ff| ≤ tau_lim (cfg->max_tau,
+ * magnitude bounds |vel| ≤ vel_lim (cfg->user.v_max) and |tau_ff| ≤ tau_lim (cfg->user.t_max,
  * the overtorque trip threshold — so the commanded feedforward alone can never exceed
  * what the torque guard allows). Returns SOFT_CLAMPED_* bits. */
 static inline uint8_t soft_clamp_mit(float *pos, float *vel, float *tau_ff,

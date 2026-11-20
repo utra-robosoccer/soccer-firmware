@@ -30,7 +30,7 @@ if [ $# -eq 0 ] || [ "$1" = "--list" ] || [ "$1" = "-l" ]; then
     exit 0
 fi
 
-# Optional --config <slaveN>: regenerate that slave's motor_config.h and rebuild
+# Optional --config <slaveN>: regenerate that slave's motor_user_config.h and rebuild
 # (via build.sh) before flashing, so one shared source tree flashes a per-slave
 # binary. Without it, the already-built Debug/*.elf is flashed as-is.
 CONFIG_SLAVE=""

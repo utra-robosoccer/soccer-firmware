@@ -18,7 +18,7 @@
 #include <stdint.h>
 #include <string.h>
 #include "protocol.h"
-#include "system_config.h"
+#include "master_config.h"
 
 #ifdef __cplusplus
 extern "C" {

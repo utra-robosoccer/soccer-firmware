@@ -3,33 +3,35 @@
 
 Config source
 -------------
-Each robot is described by ONE artifact exported from the soccer-software repo:
-``configs/<setup>/firmware_config.yaml`` (imported + hash-verified by
-scripts/import_firmware_config.py). It covers every slave in one file —
-``slaves: [{slave, motors: [...]}, ...]`` plus shared ``rates``, ``shared_ranges``
-and ``models``. There are NO per-slave intermediate files: ``--slave`` selects a
-slave's section and ``--system`` reads the whole file.
+Each robot is described by ONE file: ``configs/<setup>/firmware_config.yaml``
+(schema v2, currently hand-maintained in this repo; the soccer-software export
+will adopt this schema before imports resume). It carries ONLY what varies per
+robot — ``slaves: [{slave, motors: [...]}, ...]`` where each motor is three
+blocks: ``identity`` (can_id/model/joint_name), ``user`` (tier-2 limits) and
+``fallback`` (tier-3 dead-man damp constants). A motor's slave membership and
+index are given by position: the slave block that contains it, in list order.
+
+NOT in the yaml (fixed, firmware-side):
+  - RS vendor ranges (tier 1)  → motor_rs_config.h + the RS_CONFIG mirror here.
+  - rates / timeouts           → RATES / TIMING_MS below. Coupled to firmware
+    behavior; changing one IS a firmware change (edit here, regen, rebuild).
 
 Which setup is live is selected in ONE place: ``configs/active`` (a single line
 naming a subdirectory of configs/), overridable per-invocation by ``SOCCER_SETUP``.
 
-A setup that has not yet been migrated to the artifact (no firmware_config.yaml)
-falls back to the LEGACY per-slave ``configs/<setup>/slaveN.yaml`` files.
-
 Two modes:
 
   --slave  <slaveN | path.yaml>   (default for a bare positional argument)
-      Emits firmware/common/include/motor_config.h for THAT ONE slave
-      (N_MOTORS, transport bounds, MotorModel enum, motor_can_ranges[],
-      motor_configs[], motor_can_range_by_id()). A bare name selects the section
-      of the active setup's firmware_config.yaml; an explicit .yaml path is a
-      legacy slaveN.yaml. See scripts/build.sh --config.
+      Emits firmware/common/include/motor_user_config.h for THAT ONE slave
+      (N_MOTORS, motor_user_configs[] = {{id, user, fallback}},
+      motor_rs_config_by_id(); vendor ranges come from the hand-written
+      motor_rs_config.h, tier 1). The name selects the section of the active
+      setup's firmware_config.yaml. See scripts/build.sh --config.
 
-  --system [<a.yaml> ...]
-      With no args, reads the active setup's firmware_config.yaml (all slaves),
-      or every legacy slave*.yaml. Emits, covering ALL slaves:
-        - firmware/common/include/system_config.h  (master: NUM_SLAVES,
-          per-slave motor counts + CAN-id LUTs, global transport bounds)
+  --system
+      Reads the active setup's firmware_config.yaml (all slaves). Emits:
+        - firmware/common/include/master_config.h  (master: NUM_SLAVES,
+          per-slave motor counts)
         - host/master_link/motor_config_gen.py      (host: per-slave SLAVES[]
           plus a flattened view for the dashboard / test_client)
 
@@ -39,11 +41,10 @@ Usage:
     python3 scripts/gen_motor_config.py --system           # active setup, all slaves
     SOCCER_SETUP=2s_10m python3 scripts/gen_motor_config.py --system   # one-off setup override
 
-The firmware build does not run Python, so generated files are committed
-alongside the source. Re-run after importing a new artifact, then rebuild.
+The firmware build does not run Python: regenerate, then rebuild. The generated
+files are gitignored — the yaml (and this script's constants) are the source.
 """
 
-import glob
 import hashlib
 import os
 import sys
@@ -52,106 +53,28 @@ import yaml
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
-# Guard parameters (motion-safety tuning, not per-motor identity). TO_ZERO moved
-# to the host in protocol v9; only the wound-shaft arm guard remains firmware-side.
-GUARDS = {
-    "MOTOR_WOUND_OFFSET_MAX": "9.0f",  # rad — |pos_offset| above this at ENABLE → refuse + DRVF_WOUND
-    "MOTOR_FAULT_CHECK_DISABLED": "0u",# 1 = vendor-bit/Cali check in DISABLED (masked off
-                                       # until bench boot-rest data is clean — protocol_v9.md §8)
-}
-
-# ── Rates & timeouts (system-wide; override per-setup in configs/<setup>/system.yaml) ──
-# Rates in Hz; timeouts/debounces in ms. Tick-based firmware constants (loop
-# periods, settle-tick count, enable-monitor frame count) are DERIVED from these,
-# so changing a rate keeps the real-world durations fixed.
-RATE_DEFAULTS = {
-    "master_poll_hz":  200,   # SPI poll / command delivery
-    "telemetry_hz":    200,   # MSG_ROBOT_TELE emission
-    "slave_tick_hz":   200,   # slave control tick (motor_runtime_update)
-    "host_cmd_hz":      50,   # expected host command rate (run_policy --rate default)
-    "master_spi_prescaler": 16,  # APB2(72MHz)/div SPI clock: 64→1.125MHz ... 8→9MHz.
-    # All of 64/32/16/8 are 2-min clean on the bench (short wiring); 16 = 4.5MHz is two
-    # steps of margin below the fastest tested (div 8), and the slave SPI resync recovers
-    # isolated glitches — re-validate on the robot harness via the CRC/resync counters.
-}
-TIMING_MS_DEFAULTS = {
-    "can_fb_timeout_ms":   100,   # per-motor Type-2 staleness → DRVF_CAN_TIMEOUT / ABSENT
-    "enable_mon_ms":        15,   # not-Run dwell while enabled → DRVF_NOT_ENABLED
-    "enable_timeout_ms":   100,   # ENABLING without rs_mode==Run → DRVF_ENABLE_FAILED
-    "clear_timeout_ms":    100,   # CLEARING without a fresh reply → ABSENT
-    "absent_ping_ms":      100,   # state-poll period while ABSENT
-    # Dead-man watchdogs (task 6).
-    "master_lost_grace_ms":  50,  # slave: hold position (v/tau=0) this long after exchanges stop
-    "master_lost_damp_ms":  300,  # stop-ramp damp dwell (STOPPING; also master host-death dwell)
-}
+# ── Rates & timing: HAND-WRITTEN in firmware/common/include/timing_config.h ──
+# The generator does not own them; it only copies the rates the host needs
+# (run_policy rate-verify, .bin log header) out of that header at regen time,
+# so there is a single C-side source of truth.
+TIMING_CONFIG_H = os.path.join(
+    REPO_ROOT, "firmware/common/include/timing_config.h")
+_HOST_RATE_DEFINES = ("MASTER_POLL_HZ", "TELEMETRY_HZ", "SLAVE_TICK_HZ",
+                      "HOST_CMD_HZ")
 
 
-def load_system(setup_dir):
-    """Load configs/<setup>/system.yaml if present, else defaults. Returns
-    (rates, timeouts_ms) with every key filled from the defaults."""
-    rates = dict(RATE_DEFAULTS)
-    timeouts = dict(TIMING_MS_DEFAULTS)
-    path = os.path.join(setup_dir, "system.yaml")
-    if os.path.isfile(path):
-        doc = load(path) or {}
-        rates.update(doc.get("rates", {}) or {})
-        timeouts.update(doc.get("timeouts_ms", {}) or {})
-    return rates, timeouts
-
-
-def timing_block(rates, timeouts):
-    """Render the generated timing/rate #define block (shared via motor_config.h).
-    Derives tick periods and tick/frame counts from the rates so the real-world
-    durations stay fixed when a rate changes."""
-    poll_ms = max(1, round(1000.0 / rates["master_poll_hz"]))
-    tele_ms = max(1, round(1000.0 / rates["telemetry_hz"]))
-    tick_ms = max(1, round(1000.0 / rates["slave_tick_hz"]))
-    mon_k        = max(1, round(timeouts["enable_mon_ms"] / tick_ms))
-    # Host-death (master side): 3 host-command periods, floored at 25 ms, in master cycles.
-    host_lost_ms     = max(25, round(3.0 * 1000.0 / rates["host_cmd_hz"]))
-    host_lost_cyc    = max(1, round(host_lost_ms * rates["master_poll_hz"] / 1000.0))
-    # Slave TX-arm deadline: how long after an exchange the slave waits for the motor replies
-    # before arming the DMA for the next exchange (so the fresh reply rides it). 0.6 cycle —
-    # after the ≤2 ms reply window, comfortably before the next NSS.
-    tx_arm_deadline_us = max(1, round(0.6 * 1000000.0 / rates["master_poll_hz"]))
-    return f"""\
-/* Configured rates (Hz) — reported in MasterStatus and the .bin header. */
-#define MASTER_POLL_HZ  {rates['master_poll_hz']}u
-#define TELEMETRY_HZ    {rates['telemetry_hz']}u
-#define SLAVE_TICK_HZ   {rates['slave_tick_hz']}u
-#define HOST_CMD_HZ     {rates['host_cmd_hz']}u
-
-/* One master poll cycle (µs). The slave derives its forward/fallback service
-   thresholds from this, so they scale with the poll rate (incl. 400 Hz). */
-#define MASTER_CYCLE_US  {round(1000000.0 / rates['master_poll_hz'])}u
-
-/* Master SPI1 clock divider off APB2 (72 MHz): MX_SPI1_Init maps it to the
-   SPI_BAUDRATEPRESCALER_* enum. Valid: 2,4,8,16,32,64,128,256. */
-#define MASTER_SPI_PRESCALER_DIV  {rates['master_spi_prescaler']}u
-
-/* Derived loop periods (ms) — do not hand-edit; change the rate instead. */
-#define MASTER_POLL_PERIOD_MS  {poll_ms}u
-#define MASTER_TELE_PERIOD_MS  {tele_ms}u
-#define MOTOR_LOOP_PERIOD_MS   {tick_ms}u
-#define MOTOR_LOOP_DT_S        ((float)MOTOR_LOOP_PERIOD_MS * 0.001f)
-
-/* Timeouts/debounces (ms) and tick/frame counts derived from the slave tick. */
-#define MOTOR_CAN_FB_TIMEOUT_MS  {timeouts['can_fb_timeout_ms']}u
-#define MOTOR_ENABLE_MON_K       {mon_k}u   /* {timeouts['enable_mon_ms']} ms / {tick_ms} ms tick */
-#define MOTOR_ENABLE_TIMEOUT_MS  {timeouts['enable_timeout_ms']}u   /* ENABLING → DRVF_ENABLE_FAILED */
-#define MOTOR_CLEAR_TIMEOUT_MS   {timeouts['clear_timeout_ms']}u   /* CLEARING → ABSENT */
-#define MOTOR_ABSENT_PING_MS     {timeouts['absent_ping_ms']}u   /* poll period while ABSENT */
-
-/* Dead-man watchdogs (task 6). Master host-death is counted in master cycles; the slave
-   master-loss ramp is in ms (HAL_GetTick). */
-#define HOST_CMD_TIMEOUT_MS      {host_lost_ms}u   /* 3 host periods, 25 ms floor */
-#define HOST_LOST_CYCLES         {host_lost_cyc}u   /* host-death trigger (master cycles) */
-#define MASTER_LOST_GRACE_MS     {timeouts['master_lost_grace_ms']}u   /* slave hold (v/tau=0) after exchanges stop */
-#define MASTER_LOST_DAMP_MS      {timeouts['master_lost_damp_ms']}u   /* stop-ramp damp dwell (STOPPING) */
-
-/* Slave SPI TX-arm deadline (µs after an exchange): wait for motor replies, then arm the
-   next exchange's DMA so the fresh reply rides it (removes the one-exchange telemetry lag). */
-#define TX_ARM_DEADLINE_US       {tx_arm_deadline_us}u"""
+def read_rates():
+    """The host-facing rate #defines parsed out of timing_config.h."""
+    import re
+    text = open(TIMING_CONFIG_H).read()
+    rates = {}
+    for name in _HOST_RATE_DEFINES:
+        m = re.search(rf"^#define\s+{name}\s+(\d+)u?\b", text, re.MULTILINE)
+        if not m:
+            sys.exit(f"{os.path.relpath(TIMING_CONFIG_H, REPO_ROOT)}: "
+                     f"could not parse #define {name} (needed by the host)")
+        rates[name] = int(m.group(1))
+    return rates
 
 
 def _f(x):
@@ -168,101 +91,121 @@ def load(path):
 
 
 def validate(cfg):
+    """cfg['motors'] holds _norm_motor()-flattened entries. Tier 2 (user) and
+    tier 3 (fallback) must fit inside tier 1 (RS_CONFIG)."""
     motors = cfg["motors"]
-    models = cfg["models"]
     for i, m in enumerate(motors):
-        if m["idx"] != i:
-            raise ValueError(f"motor #{i} has idx={m['idx']}; must be sequential 0..N-1")
-        if m["model"] not in models:
-            raise ValueError(f"motor idx {i} references unknown model {m['model']!r}")
+        if m["model"] not in RS_CONFIG:
+            raise ValueError(f"motor #{i} references unknown model {m['model']!r} "
+                             f"(known: {sorted(RS_CONFIG)})")
+        rs = RS_CONFIG[m["model"]]
+        name = f"motor #{i} ({m['joint_name']}, {m['model']})"
+        if not (RS_P_MIN <= float(m["u_p_min"]) < float(m["u_p_max"]) <= RS_P_MAX):
+            raise ValueError(f"{name}: user.p [{m['u_p_min']}, {m['u_p_max']}] "
+                             f"invalid or outside RS position range ±{RS_P_MAX}")
+        for key, lim in (("u_v_max", rs["v_max"]), ("u_t_max", rs["t_max"]),
+                         ("u_default_kp", rs["kp_max"]), ("u_default_kd", rs["kd_max"]),
+                         ("fb_kp", rs["kp_max"]), ("fb_kd", rs["kd_max"])):
+            if not (0.0 <= float(m[key]) <= lim):
+                raise ValueError(f"{name}: {key}={m[key]} outside RS limit [0, {lim}]")
+        if abs(float(m["fb_tau"])) > rs["t_max"]:
+            raise ValueError(f"{name}: fb_tau={m['fb_tau']} outside RS limit "
+                             f"±{rs['t_max']}")
     can_ids = [m["can_id"] for m in motors]
     if len(set(can_ids)) != len(can_ids):
         raise ValueError(f"duplicate can_id in motors: {can_ids}")
 
 
-# Per-model Kp/Kd CAN ranges. RS00/01/02/05 use Kp 0–500 / Kd 0–5; the larger
-# RS03/04/06 use Kp 0–5000 / Kd 0–100 (RobStride Type-1 tables). A model in the yaml
-# `models:` block may give kp_min/kp_max/kd_min/kd_max explicitly; otherwise this
-# per-model default applies — NOT a single global, which would mis-scale a mixed chain.
-_LARGE_GAIN_MODELS = ("RS03", "RS04", "RS06")
+# ── Tier 1: RS (vendor) limits — per-model Type-1 encode ranges ──────────────
+# MIRROR of firmware/common/include/motor_rs_config.h (hand-written, fixed —
+# sourced from each model's user manual reference code). Used here for transport
+# bounds and to VALIDATE robot configs; the firmware reads the C header. The two
+# tables must stay identical — change both or neither.
+RS_CONFIG = {
+    "RS00": dict(v_max=33.0, t_max=14.0, kp_max=500.0,  kd_max=5.0),
+    "RS02": dict(v_max=44.0, t_max=17.0, kp_max=500.0,  kd_max=5.0),
+    "RS03": dict(v_max=20.0, t_max=60.0, kp_max=5000.0, kd_max=100.0),
+    "RS05": dict(v_max=50.0, t_max=5.5,  kp_max=500.0,  kd_max=5.0),
+    "RS06": dict(v_max=50.0, t_max=36.0, kp_max=5000.0, kd_max=100.0),
+}
+RS_P_MIN, RS_P_MAX = -12.57, 12.57
 
-def _gain(model_name, model_dict, key):
-    if key in model_dict:
-        return model_dict[key]
-    large = model_name in _LARGE_GAIN_MODELS
-    return {"kp_min": 0.0, "kp_max": 5000.0 if large else 500.0,
-            "kd_min": 0.0, "kd_max": 100.0 if large else 5.0}[key]
+# ── Schema v2 per-motor shape ─────────────────────────────────────────────────
+# identity: {can_id, model, joint_name}        — three names for one physical motor
+# user:     {p_min, p_max, v_max, t_max,       — tier 2: our operating envelope,
+#            default_kp, default_kd}             inside tier 1 (names mirror
+#                                                MotorRsConfig; tier is the scope)
+# fallback: {kp, kd, tau}                      — tier 3: dead-man damp MIT
+#                                                constants (pos=current, vel=0
+#                                                implied; kp normally 0). REQUIRED
+#                                                and explicit — these run with no
+#                                                host, so no silent defaults.
+_IDENTITY_KEYS = ("can_id", "model", "joint_name")
+_USER_KEYS = ("p_min", "p_max", "v_max", "t_max", "default_kp", "default_kd")
+_FALLBACK_KEYS = ("kp", "kd", "tau")
+
+_LEGACY_MARKERS = ("soft_min", "soft_max", "max_vel", "max_tau", "idx")
 
 
-def _transport_bounds(cfgs):
-    """Global SPI transport encoding bounds across all given configs: widest
-    model velocity/torque so every motor's value fits losslessly, plus the
-    shared position range (identical across models)."""
-    v_max = max(r["v_max"] for cfg in cfgs for r in cfg["models"].values())
-    t_max = max(r["t_max"] for cfg in cfgs for r in cfg["models"].values())
-    p_min = min(cfg["shared_ranges"]["p_min"] for cfg in cfgs)
-    p_max = max(cfg["shared_ranges"]["p_max"] for cfg in cfgs)
-    return p_min, p_max, v_max, t_max
+def _norm_motor(m, where):
+    """Validate one schema-v2 motor entry and flatten it for the emitters."""
+    if any(k in m for k in _LEGACY_MARKERS) or "identity" not in m:
+        raise ValueError(
+            f"{where}: legacy/flat motor entry — schema v2 requires the three "
+            f"blocks identity{_IDENTITY_KEYS} / user{_USER_KEYS} / "
+            f"fallback{_FALLBACK_KEYS}")
+    out = {}
+    for block, keys in (("identity", _IDENTITY_KEYS), ("user", _USER_KEYS),
+                        ("fallback", _FALLBACK_KEYS)):
+        got = m.get(block)
+        if not isinstance(got, dict):
+            raise ValueError(f"{where}: missing block {block!r} (schema v2)")
+        missing = [k for k in keys if k not in got]
+        extra = [k for k in got if k not in keys]
+        if missing or extra:
+            raise ValueError(f"{where}: block {block!r} missing {missing}, "
+                             f"unexpected {extra}")
+        prefix = {"identity": "", "user": "u_", "fallback": "fb_"}[block]
+        for k in keys:
+            out[prefix + k] = got[k]
+    return out
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-#  --slave : per-slave C header (motor_config.h)
+#  --slave : per-slave C header (motor_user_config.h)
 # ─────────────────────────────────────────────────────────────────────────────
 
-def gen_header(cfg, banner_src, banner_regen, rates, timeouts):
+def gen_header(cfg, banner_src, banner_regen):
     motors = cfg["motors"]
-    models = cfg["models"]
-    shared = cfg["shared_ranges"]
     n = len(motors)
-
-    # Transport (SPI u16) encoding bounds: widest model so RS00 fits losslessly.
-    v_max = max(models[k]["v_max"] for k in models)
-    t_max = max(models[k]["t_max"] for k in models)
-    p_min, p_max = shared["p_min"], shared["p_max"]
-
-    model_names = sorted(models.keys())  # stable enum order
-    enum_entries = ",\n".join(f"    MOTOR_MODEL_{name} = {i}u"
-                              for i, name in enumerate(model_names))
-
-    range_entries = ",\n".join(
-        (lambda md: (
-            f"    [MOTOR_MODEL_{name}] = {{ {_f(md['v_min'])}, {_f(md['v_max'])}, "
-            f"{_f(md['t_min'])}, {_f(md['t_max'])}, "
-            f"{_f(_gain(name, md, 'kp_min'))}, {_f(_gain(name, md, 'kp_max'))}, "
-            f"{_f(_gain(name, md, 'kd_min'))}, {_f(_gain(name, md, 'kd_max'))} }}"
-        ))(models[name])
-        for name in model_names
-    )
 
     cfg_entries = []
     for m in motors:
         cfg_entries.append(
             "    {\n"
-            f"        .can_id     = {m['can_id']}u,\n"
-            f"        .model      = MOTOR_MODEL_{m['model']},\n"
-            f"        .joint_name = \"{m['joint_name']}\",\n"
-            f"        .soft_min   = {_f(m['soft_min'])},\n"
-            f"        .soft_max   = {_f(m['soft_max'])},\n"
-            f"        .max_vel    = {_f(m['max_vel'])},\n"
-            f"        .max_tau    = {_f(m['max_tau'])},\n"
-            f"        .default_kp = {_f(m['default_kp'])},\n"
-            f"        .default_kd = {_f(m['default_kd'])},\n"
+            f"        .id       = {{ {m['can_id']}u, MOTOR_MODEL_{m['model']}, "
+            f"\"{m['joint_name']}\" }},\n"
+            f"        .user     = {{ {_f(m['u_p_min'])}, {_f(m['u_p_max'])}, "
+            f"{_f(m['u_v_max'])}, {_f(m['u_t_max'])}, "
+            f"{_f(m['u_default_kp'])}, {_f(m['u_default_kd'])} }},\n"
+            f"        .fallback = {{ {_f(m['fb_kp'])}, {_f(m['fb_kd'])}, "
+            f"{_f(m['fb_tau'])} }},\n"
             "    }"
         )
     cfg_block = ",\n".join(cfg_entries)
-
-    gz = "\n".join(f"#define {k:<14} {v}" for k, v in GUARDS.items())
-    timing = timing_block(rates, timeouts)
 
     return f"""\
 /* AUTO-GENERATED — DO NOT EDIT.
  * Source: {banner_src}
  * Regenerate: {banner_regen}
  */
-#ifndef MOTOR_CONFIG_H
-#define MOTOR_CONFIG_H
+#ifndef MOTOR_USER_CONFIG_H
+#define MOTOR_USER_CONFIG_H
 
 #include <stdint.h>
+
+#include "motor_rs_config.h"   /* tier 1: fixed vendor ranges (MotorModel, motor_rs_configs[]) */
+#include "timing_config.h"     /* rates, timeouts, guards — hand-written firmware constants */
 
 #ifdef __cplusplus
 extern "C" {{
@@ -270,109 +213,93 @@ extern "C" {{
 
 #define N_MOTORS {n}u
 
-/* SPI transport encoding bounds shared by slave (pack) and master (unpack).
- * Set to the widest model so every motor's value fits losslessly. */
-#define MOTOR_P_MIN  {_f(p_min)}
-#define MOTOR_P_MAX  {_f(p_max)}
-#define MOTOR_V_MIN  {_f(-v_max)}
-#define MOTOR_V_MAX  {_f(v_max)}
-#define MOTOR_T_MIN  {_f(-t_max)}
-#define MOTOR_T_MAX  {_f(t_max)}
-
-/* TO_ZERO motion parameters */
-{gz}
-
-/* Timing, rates & derived tick counts (system-wide) */
-{timing}
-
-/* Motor models present on the bus */
-typedef enum {{
-{enum_entries}
-}} MotorModel;
-
-/* Per-model CAN "operation control mode" (Type 1) ranges — velocity, torque AND
- * Kp/Kd (RS00/02 use Kp 0–500, Kd 0–5; RS03/04/06 use Kp 0–5000, Kd 0–100).
- * From slaveN.yaml `models:`. Only position is shared (MOTOR_P_MIN/MAX). */
-typedef struct {{
-    float v_min;
-    float v_max;
-    float t_min;
-    float t_max;
-    float kp_min;
-    float kp_max;
-    float kd_min;
-    float kd_max;
-}} MotorCanRange;
-
-static const MotorCanRange motor_can_ranges[] = {{
-{range_entries}
-}};
+/* ── Motor-config tiers ───────────────────────────────────────────────────────
+ * 1. RS (vendor) limits — motor_rs_config.h (included above): fixed per-MODEL
+ *    Type-1 encode ranges from the RobStride manuals. Never configurable.
+ * 2. USER limits — MotorUserLimits, per MOTOR: the operating envelope we
+ *    choose. Field names mirror MotorRsConfig; the tier is carried by the
+ *    access path (cfg->user.p_min vs motor_rs_configs[model].v_max). Validated
+ *    at generation to fit inside tier 1.
+ * 3. Fallback — MotorFallback, per MOTOR: MIT constants the slave applies
+ *    AUTONOMOUSLY when the host or master dies (stop-ramp damp dwell), so a
+ *    falling robot is damped with known-safe values. pos=current, vel=0 are
+ *    implied; kp is normally 0 for a pure backdrive-safe damp.
+ * A motor's slave membership is by containment: this header IS one slave's
+ * chain, and the array index is the chain index.
+ * ──────────────────────────────────────────────────────────────────────────── */
 
 typedef struct {{
-    uint8_t     can_id;
-    MotorModel  model;
-    const char *joint_name;
-    float       soft_min;    /* rad */
-    float       soft_max;    /* rad */
-    float       max_vel;     /* rad/s */
-    float       max_tau;     /* Nm — torque trip: |tau| above this idles motor */
-    float       default_kp;
-    float       default_kd;
-}} MotorConfig;
+    uint8_t     can_id;      /* RobStride bus id            */
+    MotorModel  model;       /* index into motor_rs_limits  */
+    const char *joint_name;  /* robot joint this motor IS   */
+}} MotorIdentity;
 
-static const MotorConfig motor_configs[N_MOTORS] = {{
+typedef struct {{
+    float p_min;        /* rad — soft angle range (asymmetric per joint)        */
+    float p_max;
+    float v_max;        /* rad/s — |vel| command bound                          */
+    float t_max;        /* Nm — |tau| command bound AND overtorque fault trip   */
+    float default_kp;   /* gains used when the host sends USE_CONFIG_GAINS      */
+    float default_kd;
+}} MotorUserLimits;
+
+typedef struct {{
+    float kp;        /* damp-phase position gain (normally 0)        */
+    float kd;        /* damp-phase velocity gain — the damping knob  */
+    float tau_ff;    /* damp-phase feedforward torque (normally 0)   */
+}} MotorFallback;
+
+typedef struct {{
+    MotorIdentity   id;        /* who this motor is                  */
+    MotorUserLimits user;      /* tier 2: our operating envelope     */
+    MotorFallback   fallback;  /* tier 3: dead-man damp constants    */
+}} MotorUserConfig;
+
+static const MotorUserConfig motor_user_configs[N_MOTORS] = {{
 {cfg_block}
 }};
 
-/* Look up a motor's per-model CAN range by its bus id. Returns NULL if the id
- * is not part of this slave's chain. */
-static inline const MotorCanRange *motor_can_range_by_id(uint8_t can_id)
+/* Look up a motor's RS (vendor) Type-1 encode ranges by its bus id. Returns
+ * NULL if the id is not part of this slave's chain. */
+static inline const MotorRsConfig *motor_rs_config_by_id(uint8_t can_id)
 {{
     for (uint8_t i = 0u; i < N_MOTORS; i++) {{
-        if (motor_configs[i].can_id == can_id) {{
-            return &motor_can_ranges[motor_configs[i].model];
+        if (motor_user_configs[i].id.can_id == can_id) {{
+            return &motor_rs_configs[motor_user_configs[i].id.model];
         }}
     }}
-    return (const MotorCanRange *)0;
+    return (const MotorRsConfig *)0;
 }}
 
 #ifdef __cplusplus
 }}
 #endif
-#endif /* MOTOR_CONFIG_H */
+#endif /* MOTOR_USER_CONFIG_H */
 """
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-#  --system : master C header (system_config.h)
+#  --system : master C header (master_config.h)
 # ─────────────────────────────────────────────────────────────────────────────
 
-def gen_system_header(cfgs, banner_src, banner_regen, rates, timeouts):
+def gen_system_header(cfgs, banner_src, banner_regen):
     n_slaves = len(cfgs)
     counts = [len(cfg["motors"]) for cfg in cfgs]
     max_per = max(counts)
-    total = sum(counts)
-    p_min, p_max, v_max, t_max = _transport_bounds(cfgs)
-    timing = timing_block(rates, timeouts)
 
     counts_c = ", ".join(f"{c}u" for c in counts)
-
-    id_rows = []
-    for cfg in cfgs:
-        ids = [m["can_id"] for m in cfg["motors"]]
-        ids += [0] * (max_per - len(ids))            # pad unused slots with 0
-        id_rows.append("    { " + ", ".join(f"{i}u" for i in ids) + " }")
-    ids_c = ",\n".join(id_rows)
 
     return f"""\
 /* AUTO-GENERATED — DO NOT EDIT.
  * Sources: {banner_src}
  * Regenerate: {banner_regen}
  */
-#ifndef SYSTEM_CONFIG_H
-#define SYSTEM_CONFIG_H
+#ifndef MASTER_CONFIG_H
+#define MASTER_CONFIG_H
 
 #include <stdint.h>
+
+#include "timing_config.h"   /* rates, timeouts — hand-written firmware constants */
 
 #ifdef __cplusplus
 extern "C" {{
@@ -380,31 +307,15 @@ extern "C" {{
 
 #define NUM_SLAVES            {n_slaves}u
 #define MAX_MOTORS_PER_SLAVE  {max_per}u
-#define TOTAL_MOTORS          {total}u
 
-/* SPI transport encoding bounds (global, widest model across all slaves). */
-#define MOTOR_P_MIN  {_f(p_min)}
-#define MOTOR_P_MAX  {_f(p_max)}
-#define MOTOR_V_MIN  {_f(-v_max)}
-#define MOTOR_V_MAX  {_f(v_max)}
-#define MOTOR_T_MIN  {_f(-t_max)}
-#define MOTOR_T_MAX  {_f(t_max)}
-
-/* Timing, rates & derived tick counts (system-wide; mirror of motor_config.h). */
-{timing}
-
-/* Number of active motors on each slave (chain order). */
+/* Number of active motors on each slave (chain order). CAN ids are the
+ * slave's business (motor_user_config.h) — the master only counts motors. */
 static const uint8_t slave_motor_counts[NUM_SLAVES] = {{ {counts_c} }};
-
-/* Per-slave RobStride CAN node ids (chain order). Unused slots are 0. */
-static const uint8_t slave_motor_ids[NUM_SLAVES][MAX_MOTORS_PER_SLAVE] = {{
-{ids_c}
-}};
 
 #ifdef __cplusplus
 }}
 #endif
-#endif /* SYSTEM_CONFIG_H */
+#endif /* MASTER_CONFIG_H */
 """
 
 
@@ -414,21 +325,23 @@ static const uint8_t slave_motor_ids[NUM_SLAVES][MAX_MOTORS_PER_SLAVE] = {{
 
 def gen_python(cfgs, banner_src, banner_regen, cfg_name="", cfg_hash="", rates=None):
     n_slaves = len(cfgs)
-    rates = rates or RATE_DEFAULTS
+    rates = rates or read_rates()
 
     # Per-slave grouped structure.
     slave_blocks = []
     for s, cfg in enumerate(cfgs):
         slave_name = cfg.get("slave") or f"slave{s}"
         motor_lines = []
-        for m in cfg["motors"]:
+        for idx, m in enumerate(cfg["motors"]):
             motor_lines.append(
                 "        dict("
-                f"idx={m['idx']}, can_id={m['can_id']}, model={m['model']!r}, "
+                f"idx={idx}, can_id={m['can_id']}, model={m['model']!r}, "
                 f"joint_name={m['joint_name']!r}, "
-                f"soft_min={float(m['soft_min'])!r}, soft_max={float(m['soft_max'])!r}, "
-                f"max_vel={float(m['max_vel'])!r}, max_tau={float(m['max_tau'])!r}, "
-                f"default_kp={float(m['default_kp'])!r}, default_kd={float(m['default_kd'])!r})"
+                f"p_min={float(m['u_p_min'])!r}, p_max={float(m['u_p_max'])!r}, "
+                f"v_max={float(m['u_v_max'])!r}, t_max={float(m['u_t_max'])!r}, "
+                f"default_kp={float(m['u_default_kp'])!r}, default_kd={float(m['u_default_kd'])!r}, "
+                f"fallback_kp={float(m['fb_kp'])!r}, fallback_kd={float(m['fb_kd'])!r}, "
+                f"fallback_tau={float(m['fb_tau'])!r})"
             )
         motors_block = ",\n".join(motor_lines)
         slave_blocks.append(
@@ -436,32 +349,14 @@ def gen_python(cfgs, banner_src, banner_regen, cfg_name="", cfg_hash="", rates=N
         )
     slaves_block = ",\n".join(slave_blocks)
 
-    # Union of model ranges across all slaves.
-    model_union = {}
-    for cfg in cfgs:
-        for k, r in cfg["models"].items():
-            model_union.setdefault(k, r)
-    model_lines = []
-    for k in sorted(model_union):
-        r = model_union[k]
-        model_lines.append(
-            f"    {k!r}: dict(v_min={float(r['v_min'])!r}, v_max={float(r['v_max'])!r}, "
-            f"t_min={float(r['t_min'])!r}, t_max={float(r['t_max'])!r})"
-        )
-    model_block = ",\n".join(model_lines)
-
-    # Global SPI transport bounds — must equal the C MOTOR_*_MIN/MAX the slave
-    # encodes telemetry with; the host decodes raw pos/vel/tau with these.
-    p_min, p_max, v_max, t_max = _transport_bounds(cfgs)
-
     return f'''\
 # AUTO-GENERATED — DO NOT EDIT.
 # Sources: {banner_src}
 # Regenerate: {banner_regen}
 """Motor configuration constants for host tools (generated, multi-slave)."""
 
-# Active setup name + sha256 over its slave YAMLs (sorted by filename). The runner
-# recomputes the hash from configs/<CONFIG_NAME>/ and warns if this file is stale.
+# Active setup name + sha256 of its firmware_config.yaml. The runner recomputes
+# the hash and warns if this file is stale.
 CONFIG_NAME = {cfg_name!r}
 CONFIG_HASH = {cfg_hash!r}
 
@@ -472,21 +367,6 @@ N_SLAVES = {n_slaves}
 SLAVES = [
 {slaves_block},
 ]
-
-# Per-model CAN velocity/torque ranges (union across slaves).
-MODEL_RANGES = {{
-{model_block},
-}}
-
-# ── Global SPI transport encoding bounds (widest model across slaves) ──────────
-# The slave encodes pos/vel/tau_raw over THESE bounds (not per-model); decode raw
-# telemetry with them. pos_raw is home-frame wrapped [-pi, pi] over the +-4pi bound.
-MOTOR_P_MIN = {float(p_min)!r}
-MOTOR_P_MAX = {float(p_max)!r}
-MOTOR_V_MIN = {float(-v_max)!r}
-MOTOR_V_MAX = {float(v_max)!r}
-MOTOR_T_MIN = {float(-t_max)!r}
-MOTOR_T_MAX = {float(t_max)!r}
 
 # ── Flattened view (global index = position in this list) ──────────────────────
 # Each motor dict gains "slave" (slave index) and keeps its local "idx".
@@ -499,19 +379,21 @@ N_MOTORS = len(MOTORS)
 MOTOR_DEFAULT_KP = [m["default_kp"] for m in MOTORS]
 MOTOR_DEFAULT_KD = [m["default_kd"] for m in MOTORS]
 
-# Per-motor soft angle limits (rad). Commands are clamped to [soft_min, soft_max].
-MOTOR_SOFT_MIN = [m["soft_min"] for m in MOTORS]
-MOTOR_SOFT_MAX = [m["soft_max"] for m in MOTORS]
+# Per-motor USER (tier-2) soft angle limits (rad). Commands are clamped to
+# [p_min, p_max]. Named USER to distinguish from the RS vendor ranges (tier 1).
+MOTOR_USER_P_MIN = [m["p_min"] for m in MOTORS]
+MOTOR_USER_P_MAX = [m["p_max"] for m in MOTORS]
 
 # Motor counts per slave, in slave order.
 SLAVE_MOTOR_COUNTS = [len(s["motors"]) for s in SLAVES]
 
-# ── Configured rates (Hz) — mirror the firmware motor_config.h; recorded in the
-# .bin header and used as the run_policy --rate default (HOST_CMD_HZ). ──────────
-MASTER_POLL_HZ = {rates['master_poll_hz']}
-TELEMETRY_HZ   = {rates['telemetry_hz']}
-SLAVE_TICK_HZ  = {rates['slave_tick_hz']}
-HOST_CMD_HZ    = {rates['host_cmd_hz']}
+# ── Configured rates (Hz) — parsed from firmware/common/include/timing_config.h
+# (the single source); recorded in the .bin header and used as the run_policy
+# --rate default (HOST_CMD_HZ). ─────────────────────────────────────────────────
+MASTER_POLL_HZ = {rates['MASTER_POLL_HZ']}
+TELEMETRY_HZ   = {rates['TELEMETRY_HZ']}
+SLAVE_TICK_HZ  = {rates['SLAVE_TICK_HZ']}
+HOST_CMD_HZ    = {rates['HOST_CMD_HZ']}
 
 RATES = dict(master_poll_hz=MASTER_POLL_HZ, telemetry_hz=TELEMETRY_HZ,
              slave_tick_hz=SLAVE_TICK_HZ, host_cmd_hz=HOST_CMD_HZ)
@@ -522,18 +404,7 @@ RATES = dict(master_poll_hz=MASTER_POLL_HZ, telemetry_hz=TELEMETRY_HZ,
 #  CLI
 # ─────────────────────────────────────────────────────────────────────────────
 
-def _resolve(path):
-    if not os.path.isabs(path):
-        path = os.path.join(REPO_ROOT, path)
-    return path
-
-
 CONFIGS_DIR = os.path.join(REPO_ROOT, "configs")
-
-
-def _configs_rel(src):
-    """Path relative to configs/, e.g. 'bench/slave0.yaml' — used in banners."""
-    return os.path.relpath(src, CONFIGS_DIR)
 
 
 def active_setup():
@@ -563,72 +434,44 @@ def _require_setup():
     return s
 
 
-def resolve_config(token):
-    """Resolve a slave-config token to an absolute path.
-
-    An existing file (absolute or repo-relative) is used as-is; otherwise a bare
-    name like 'slave0' resolves to configs/<active setup>/slave0.yaml."""
-    cand = token if os.path.isabs(token) else os.path.join(REPO_ROOT, token)
-    if os.path.isfile(cand):
-        return cand
-    name = token if token.endswith(".yaml") else token + ".yaml"
-    setup = _require_setup()
-    p = os.path.join(CONFIGS_DIR, setup, name)
-    if os.path.isfile(p):
-        return p
-    sys.exit(f"config {token!r} not found (looked for {cand} and {p})")
-
-
-def active_slaves():
-    """Every slave*.yaml in the active setup dir, sorted (slave0, slave1, ...)."""
-    setup = _require_setup()
-    files = sorted(glob.glob(os.path.join(CONFIGS_DIR, setup, "slave*.yaml")))
-    if not files:
-        sys.exit(f"no slave*.yaml found in configs/{setup}/")
-    return files
-
-
-def config_hash(paths):
-    """LEGACY: sha256 over the given slave*.yaml files' contents, sorted by filename.
-    (The firmware_config.yaml path uses the artifact's own content_sha256 instead.)"""
+def config_hash(path):
+    """sha256 of the firmware_config.yaml file as generated from."""
     h = hashlib.sha256()
-    for p in sorted(paths, key=os.path.basename):
-        with open(p, "rb") as fh:
-            h.update(fh.read())
+    with open(path, "rb") as fh:
+        h.update(fh.read())
     return h.hexdigest()
 
 
-# ── firmware_config.yaml — the single-file artifact exported per robot (preferred) ──
+# ── firmware_config.yaml (schema v2) — the single per-robot config file ──────
 def firmware_config_path(setup):
     return os.path.join(CONFIGS_DIR, setup, "firmware_config.yaml")
 
 
 def load_firmware_config(setup):
-    """Parsed configs/<setup>/firmware_config.yaml, or None if that setup still uses
-    legacy per-slave slaveN.yaml files."""
+    """Parsed, schema-checked configs/<setup>/firmware_config.yaml."""
     p = firmware_config_path(setup)
+    rel = os.path.relpath(p, REPO_ROOT)
     if not os.path.isfile(p):
-        return None
+        sys.exit(f"{rel}: missing — every setup needs a firmware_config.yaml "
+                 f"(schema v2)")
     doc = load(p)
     if not isinstance(doc, dict) or "slaves" not in doc:
-        sys.exit(f"{os.path.relpath(p, REPO_ROOT)}: not a firmware_config.yaml (no 'slaves' list)")
+        sys.exit(f"{rel}: not a firmware_config.yaml (no 'slaves' list)")
+    stale = [k for k in ("rates", "shared_ranges", "models") if k in doc]
+    if stale:
+        sys.exit(f"{rel}: legacy schema — {stale} moved out of the config "
+                 f"(rates/timeouts are firmware constants in gen_motor_config.py; "
+                 f"vendor ranges live in motor_rs_config.h). Migrate to schema v2 "
+                 f"(see configs/1s_5m/firmware_config.yaml).")
     return doc
 
 
-def _fw_rates_timeouts(doc):
-    """Rates come from the artifact's `rates` block (the 4 Hz); the SPI prescaler and the
-    ms timeouts/debounces are firmware-side defaults the artifact does not carry."""
-    rates = dict(RATE_DEFAULTS)
-    rates.update(doc.get("rates") or {})
-    return rates, dict(TIMING_MS_DEFAULTS)
-
-
 def _fw_cfg(doc, section):
-    """A per-slave cfg dict (shared models/ranges + that slave's motors) for the emitters."""
-    return {"slave": section.get("slave"),
-            "shared_ranges": doc["shared_ranges"],
-            "models": doc["models"],
-            "motors": section["motors"]}
+    """A per-slave cfg dict with schema-v2-normalized motors for the emitters."""
+    slave = section.get("slave")
+    motors = [_norm_motor(m, f"{slave} motor #{i}")
+              for i, m in enumerate(section["motors"])]
+    return {"slave": slave, "motors": motors}
 
 
 def _fw_section(doc, slave_name):
@@ -640,24 +483,24 @@ def _fw_section(doc, slave_name):
 
 
 # ── emitters ──
-def _write_slave_header(cfg, banner_src, banner_regen, rates, timeouts):
+def _write_slave_header(cfg, banner_src, banner_regen):
     validate(cfg)
-    header_path = os.path.join(REPO_ROOT, "firmware/common/include/motor_config.h")
+    header_path = os.path.join(REPO_ROOT, "firmware/common/include/motor_user_config.h")
     with open(header_path, "w") as fh:
-        fh.write(gen_header(cfg, banner_src, banner_regen, rates, timeouts))
+        fh.write(gen_header(cfg, banner_src, banner_regen))
     print(f"Generated {os.path.relpath(header_path, REPO_ROOT)}  (slave: {cfg.get('slave', '?')}, "
-          f"N_MOTORS={len(cfg['motors'])}, tick={rates['slave_tick_hz']}Hz)")
+          f"N_MOTORS={len(cfg['motors'])})")
 
 
-def _write_system(cfgs, banner_src, banner_regen, cfg_name, cfg_hash, rates, timeouts):
+def _write_system(cfgs, banner_src, banner_regen, cfg_name, cfg_hash):
     for c in cfgs:
         validate(c)
-    sys_path = os.path.join(REPO_ROOT, "firmware/common/include/system_config.h")
+    sys_path = os.path.join(REPO_ROOT, "firmware/common/include/master_config.h")
     py_path = os.path.join(REPO_ROOT, "host/master_link/motor_config_gen.py")
     with open(sys_path, "w") as fh:
-        fh.write(gen_system_header(cfgs, banner_src, banner_regen, rates, timeouts))
+        fh.write(gen_system_header(cfgs, banner_src, banner_regen))
     with open(py_path, "w") as fh:
-        fh.write(gen_python(cfgs, banner_src, banner_regen, cfg_name, cfg_hash, rates))
+        fh.write(gen_python(cfgs, banner_src, banner_regen, cfg_name, cfg_hash))
     counts = [len(c["motors"]) for c in cfgs]
     print(f"Generated {os.path.relpath(sys_path, REPO_ROOT)}  (NUM_SLAVES={len(cfgs)}, counts={counts})")
     print(f"Generated {os.path.relpath(py_path, REPO_ROOT)}")
@@ -665,107 +508,52 @@ def _write_system(cfgs, banner_src, banner_regen, cfg_name, cfg_hash, rates, tim
 
 # ── slave header ──
 def do_slave_name(setup, slave_name):
-    """Emit motor_config.h for one slave of `setup` — firmware_config.yaml section if present,
-    else the legacy configs/<setup>/<slave_name>.yaml."""
+    """Emit motor_user_config.h for one slave section of `setup`'s firmware_config.yaml."""
     doc = load_firmware_config(setup)
-    if doc is not None:
-        cfg = _fw_cfg(doc, _fw_section(doc, slave_name))
-        rates, timeouts = _fw_rates_timeouts(doc)
-        _write_slave_header(
-            cfg,
-            f"configs/{setup}/firmware_config.yaml (section {slave_name})",
-            f"SOCCER_SETUP={setup} python3 scripts/gen_motor_config.py --slave {slave_name}",
-            rates, timeouts)
-        return
-    do_slave_path(resolve_config(slave_name))
-
-
-def do_slave_path(path):
-    """LEGACY: emit motor_config.h for an explicit slaveN.yaml path."""
-    path = _resolve(path)
-    rel = _configs_rel(path)
-    cfg = load(path)
-    rates, timeouts = load_system(os.path.dirname(path))
-    _write_slave_header(cfg, f"configs/{rel}",
-                        f"python3 scripts/gen_motor_config.py --slave configs/{rel}",
-                        rates, timeouts)
+    cfg = _fw_cfg(doc, _fw_section(doc, slave_name))
+    _write_slave_header(
+        cfg,
+        f"configs/{setup}/firmware_config.yaml (section {slave_name})",
+        f"SOCCER_SETUP={setup} python3 scripts/gen_motor_config.py --slave {slave_name}")
 
 
 # ── system headers ──
 def do_system_setup(setup):
-    """Emit system_config.h + motor_config_gen.py for `setup` — firmware_config.yaml if present,
-    else all legacy slaveN.yaml."""
+    """Emit master_config.h + motor_config_gen.py for `setup` (all slaves)."""
     doc = load_firmware_config(setup)
-    if doc is not None:
-        cfgs = [_fw_cfg(doc, s) for s in doc["slaves"]]
-        rates, timeouts = _fw_rates_timeouts(doc)
-        _write_system(
-            cfgs,
-            f"configs/{setup}/firmware_config.yaml",
-            f"SOCCER_SETUP={setup} python3 scripts/gen_motor_config.py --system",
-            setup, doc.get("content_sha256") or "", rates, timeouts)
-        return
-    do_system_paths(active_slaves())
-
-
-def do_system_paths(paths):
-    """LEGACY: emit system headers from explicit slaveN.yaml paths."""
-    paths = [_resolve(p) for p in paths]
-    names = [_configs_rel(p) for p in paths]
-    cfgs = [load(p) for p in paths]
-    cfg_name = os.path.dirname(names[0]) or os.path.splitext(os.path.basename(names[0]))[0]
-    cfg_hash = config_hash(paths)
-    rates, timeouts = load_system(os.path.dirname(paths[0]))
-    src_list = " ".join(f"configs/{n}" for n in names)
-    _write_system(cfgs, ", ".join(names),
-                  f"python3 scripts/gen_motor_config.py --system {src_list}",
-                  cfg_name, cfg_hash, rates, timeouts)
-
-
-def _is_path_token(tok):
-    cand = tok if os.path.isabs(tok) else os.path.join(REPO_ROOT, tok)
-    return os.path.isfile(cand) or tok.endswith(".yaml") or os.sep in tok
+    cfgs = [_fw_cfg(doc, s) for s in doc["slaves"]]
+    _write_system(
+        cfgs,
+        f"configs/{setup}/firmware_config.yaml",
+        f"SOCCER_SETUP={setup} python3 scripts/gen_motor_config.py --system",
+        setup, config_hash(firmware_config_path(setup)))
 
 
 def main():
     args = sys.argv[1:]
+    setup = _require_setup()
     if not args:
         # Regenerate everything for the active setup: system files + the default
         # per-slave header (first slave).
-        setup = _require_setup()
         doc = load_firmware_config(setup)
-        if doc is not None:
-            print(f"Active setup: {setup}  ({len(doc['slaves'])} slave(s), firmware_config.yaml)")
-            do_system_setup(setup)
-            do_slave_name(setup, doc["slaves"][0]["slave"])
-        else:
-            slaves = active_slaves()
-            print(f"Active setup: {setup}  ({len(slaves)} slave(s), legacy slaveN.yaml)")
-            do_system_paths(slaves)
-            do_slave_path(slaves[0])
+        print(f"Active setup: {setup}  ({len(doc['slaves'])} slave(s))")
+        do_system_setup(setup)
+        do_slave_name(setup, doc["slaves"][0]["slave"])
         return
     if args[0] == "--slave":
         if len(args) != 2:
-            sys.exit("usage: gen_motor_config.py --slave <slaveN | path.yaml>")
-        tok = args[1]
-        if _is_path_token(tok):
-            do_slave_path(tok)           # explicit legacy slaveN.yaml path
-        else:
-            do_slave_name(_require_setup(), tok)   # bare name → firmware_config.yaml section
+            sys.exit("usage: gen_motor_config.py --slave <slaveN>")
+        do_slave_name(setup, args[1])
     elif args[0] == "--system":
-        srcs = args[1:]
-        if srcs:
-            do_system_paths(srcs)        # explicit legacy paths
-        else:
-            do_system_setup(_require_setup())
+        if len(args) != 1:
+            sys.exit("usage: gen_motor_config.py --system   (reads the active "
+                     "setup's firmware_config.yaml; explicit paths are gone "
+                     "with the legacy slaveN.yaml format)")
+        do_system_setup(setup)
     elif args[0].startswith("--"):
         sys.exit(f"unknown option {args[0]!r}; use --slave or --system")
     else:
-        tok = args[0]
-        if _is_path_token(tok):
-            do_slave_path(tok)
-        else:
-            do_slave_name(_require_setup(), tok)
+        do_slave_name(setup, args[0])
 
 
 if __name__ == "__main__":

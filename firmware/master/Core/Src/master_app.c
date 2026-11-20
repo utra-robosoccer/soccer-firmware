@@ -108,7 +108,7 @@ static void emit_master_status(uint32_t now_ms)
     pay.uptime_ms      = now_ms;
     pay.link_errors    = master_link_errors + usb_rx_scan_errors; /* app + scan rejects */
     pay.rx_frames      = usb_rx_frames;
-    pay.master_poll_hz = MASTER_POLL_HZ;         /* configured rates (motor_config.h) */
+    pay.master_poll_hz = MASTER_POLL_HZ;         /* configured rates (motor_user_config.h) */
     pay.telemetry_hz   = TELEMETRY_HZ;
     pay.slave_tick_hz  = SLAVE_TICK_HZ;
     pay.host_cmd_hz    = HOST_CMD_HZ;

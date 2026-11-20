@@ -15,7 +15,7 @@ Args (via run_policy): --amp RAD (default 0.2), --freq HZ (default 0.4),
 """
 import math
 
-from master_link.motor_config_gen import MOTORS, MOTOR_SOFT_MIN, MOTOR_SOFT_MAX
+from master_link.motor_config_gen import MOTORS, MOTOR_USER_P_MIN, MOTOR_USER_P_MAX
 
 from .base import Policy, Action, MotorCommand, REQ_DISABLE, REQ_ENABLE, LinkState, arm_command
 from .sine_start import SineStart, fits_soft_limits
@@ -56,7 +56,7 @@ class BenchSinePolicy(Policy):
         self._lim = {}
         for k in self._motors:
             g = gidx.get(k)
-            self._lim[k] = (MOTOR_SOFT_MIN[g], MOTOR_SOFT_MAX[g]) if g is not None else (None, None)
+            self._lim[k] = (MOTOR_USER_P_MIN[g], MOTOR_USER_P_MAX[g]) if g is not None else (None, None)
         self._t0 = None
         # Every motor uses the same --amp.
         self._amp_of = {k: self._amp for k in self._motors}

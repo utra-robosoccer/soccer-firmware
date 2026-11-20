@@ -14,9 +14,9 @@
 #include "stm32f4xx_hal.h"
 #include "stm32f4xx_hal_can.h"
 #include "main.h"
-#include "proto_common.h"   /* N_MOTORS, motor_configs[] (generated) */
+#include "proto_common.h"   /* N_MOTORS, motor_user_configs[] (generated) */
 
-#define MAX_MOTOR_COUNT N_MOTORS //Total motors on the CAN bus — driven by the generated motor_config.h
+#define MAX_MOTOR_COUNT N_MOTORS //Total motors on the CAN bus — driven by the generated motor_user_config.h
 /* motors[] is private to motor_chain.c (owned by the CAN RX ISR). Main-loop code
    must NOT read it directly — use motor_get_snapshot() for a coherent read and
    motor_set_fault_word() for the one field it writes. */
@@ -50,7 +50,7 @@ void motor_get_snapshot(uint8_t idx, motor_t *out);
    fault-word sentinel/clear. A single 32-bit store is atomic w.r.t. the ISR. */
 void motor_set_fault_word(uint8_t idx, uint32_t val);
 
-/* Bind motors[i].id / master_id from motor_configs[] before the CAN bus starts,
+/* Bind motors[i].id / master_id from motor_user_configs[] before the CAN bus starts,
    so the RX ISR's id lookup can match incoming feedback. Call once at init. */
 void motor_chain_bind_ids(void);
 

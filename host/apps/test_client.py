@@ -38,7 +38,7 @@ import serial
 try:
     from master_link.motor_config_gen import (
         N_MOTORS, MOTORS, MOTOR_DEFAULT_KP, MOTOR_DEFAULT_KD,
-        MOTOR_SOFT_MIN, MOTOR_SOFT_MAX,
+        MOTOR_USER_P_MIN, MOTOR_USER_P_MAX,
     )
 except ImportError:
     sys.exit("master_link not importable — run:\n"
@@ -218,7 +218,7 @@ def _sine_thread(idx: int, ser_ref, ser_lock: threading.Lock,
     slave_id, local_idx = _slave_local(idx)
     kp = MOTOR_DEFAULT_KP[idx]
     kd = MOTOR_DEFAULT_KD[idx]
-    lo, hi   = MOTOR_SOFT_MIN[idx], MOTOR_SOFT_MAX[idx]
+    lo, hi   = MOTOR_USER_P_MIN[idx], MOTOR_USER_P_MAX[idx]
     mid      = 0.5 * (lo + hi)
     amp      = max(0.0, 0.5 * (hi - lo) - SINE_MARGIN_RAD)  # peaks 5° inside each limit
     t0 = time.monotonic()
@@ -322,7 +322,7 @@ def main() -> None:
             )
             sine_threads[idx] = th
             th.start()
-            lo, hi = MOTOR_SOFT_MIN[idx], MOTOR_SOFT_MAX[idx]
+            lo, hi = MOTOR_USER_P_MIN[idx], MOTOR_USER_P_MAX[idx]
             amp = max(0.0, 0.5 * (hi - lo) - SINE_MARGIN_RAD)
             print(f"[{_t()}] → SINE {_motor_label(idx)} STARTED  "
                   f"mid={0.5*(lo+hi):+.3f}  amp=±{amp:.3f} rad @ {SINE_FREQ} Hz "

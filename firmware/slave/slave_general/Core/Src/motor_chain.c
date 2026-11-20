@@ -5,7 +5,7 @@
 
 /* Private to this TU — owned by the CAN RX ISR. Main-loop code reads it only
    through motor_get_snapshot() and writes only via motor_set_fault_word(). */
-static motor_t motors[MAX_MOTOR_COUNT]; //motor chain array, indexed in motor_configs[] order
+static motor_t motors[MAX_MOTOR_COUNT]; //motor chain array, indexed in motor_user_configs[] order
 
 // For FIFO Intr Callback function
 volatile uint8_t can_rx_flag = 0;
@@ -33,7 +33,7 @@ uint8_t rx_data[8];
 static motor_t* get_motor_by_id(uint8_t id)
 {
     for (int i = 0; i < MAX_MOTOR_COUNT; i++) {
-        if (motor_configs[i].can_id == id) {
+        if (motor_user_configs[i].id.can_id == id) {
             return &motors[i];
         }
     }
@@ -70,7 +70,7 @@ void motor_set_fault_word(uint8_t idx, uint32_t val)
 void motor_chain_bind_ids(void)
 {
     for (uint8_t i = 0; i < MAX_MOTOR_COUNT; i++) {
-        motors[i].id        = motor_configs[i].can_id;
+        motors[i].id        = motor_user_configs[i].id.can_id;
         motors[i].master_id = CAN_MASTER_ID;
     }
 }

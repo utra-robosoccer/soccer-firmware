@@ -31,7 +31,7 @@ static inline int32_t ms_since(uint32_t now, uint32_t t) { return (int32_t)(now 
 static void send_mit(uint8_t idx, float torque, float home_pos, float vel,
                      float kp, float kd)
 {
-    can_mit_control_set(motor_configs[idx].can_id, torque,
+    can_mit_control_set(motor_user_configs[idx].id.can_id, torque,
                         home_pos + motors_rt[idx].pos_offset, vel, kp, kd);
     cmd_seq_on_mit_frame(&motors_rt[idx].cmd_track, motors_rt[idx].target_cmd_seq);
 }
@@ -62,13 +62,13 @@ static uint8_t pack_faults(const motor_t *m)
    position (soft_clamp_mit): a joint parked outside [lo,hi] can be held or driven back,
    never further out — so enabling/commanding it never fights the shaft into an overtorque.
    Outward feedforward (vel AND tau_ff) past a clamped position is cancelled, |vel| is
-   bounded to cfg->max_vel, and |tau_ff| to cfg->max_tau (the overtorque trip threshold).
+   bounded to cfg->user.v_max, and |tau_ff| to cfg->user.t_max (the overtorque trip threshold).
    Returns TELE_FLAG_* bits. */
 static uint8_t apply_soft_clamp(const MotorRuntime *r, float *pos, float *vel, float *tau_ff)
 {
     uint8_t c = soft_clamp_mit(pos, vel, tau_ff, r->pos,
-                               r->cfg->soft_min, r->cfg->soft_max,
-                               r->cfg->max_vel, r->cfg->max_tau);
+                               r->cfg->user.p_min, r->cfg->user.p_max,
+                               r->cfg->user.v_max, r->cfg->user.t_max);
     uint8_t flags = 0u;
     if (c & SOFT_CLAMPED_POS) flags |= TELE_FLAG_CLAMPED_POS;
     if (c & SOFT_CLAMPED_FF)  flags |= TELE_FLAG_CLAMPED_TAU;
@@ -81,7 +81,7 @@ static uint8_t apply_soft_clamp(const MotorRuntime *r, float *pos, float *vel, f
    Config-default gains (USE_CONFIG_GAINS) bypass this — they are validated at generation. */
 static uint8_t clamp_gains(uint8_t can_id, float *kp, float *kd)
 {
-    const MotorCanRange *rg = motor_can_range_by_id(can_id);
+    const MotorRsConfig *rg = motor_rs_config_by_id(can_id);
     uint8_t c = 0u;
     c |= soft_clamp_range(kp, rg ? rg->kp_min : KP_MIN, rg ? rg->kp_max : KP_MAX);
     c |= soft_clamp_range(kd, rg ? rg->kd_min : KD_MIN, rg ? rg->kd_max : KD_MAX);
@@ -122,7 +122,7 @@ static void fault_detected(uint8_t idx, uint8_t fault, uint32_t now_ms)
                                              (uint8_t)(r->fault != DRVF_NONE));
     if (f.latch_fault != DRVF_NONE) r->fault = f.latch_fault;
     if (f.abort_enable) arm_sm_cancel(&r->arm_phase, &r->arm_wait);
-    if (f.send_disable) can_disable_motor(motor_configs[idx].can_id, CAN_MASTER_ID);
+    if (f.send_disable) can_disable_motor(motor_user_configs[idx].id.can_id, CAN_MASTER_ID);
     if (f.begin_stop) {
         r->hold_vel   = 0.0f;
         r->cmd_tau_ff = 0.0f;
@@ -134,7 +134,7 @@ static void fault_detected(uint8_t idx, uint8_t fault, uint32_t now_ms)
    (present) or ABSENT (silent — the runtime keeps pinging it at ABSENT_PING_MS). */
 static void discover(uint8_t idx)
 {
-    uint8_t cid = motor_configs[idx].can_id;
+    uint8_t cid = motor_user_configs[idx].id.can_id;
     motors_rt[idx].state = DRV_DISCOVERING;
 
     for (uint8_t attempt = 0; attempt < 3u; attempt++) {
@@ -168,7 +168,7 @@ void motor_runtime_init(void)
 {
     memset(motors_rt, 0, sizeof(motors_rt));
     for (uint8_t i = 0; i < N_MOTORS; i++) {
-        motors_rt[i].cfg   = &motor_configs[i];
+        motors_rt[i].cfg   = &motor_user_configs[i];
         motors_rt[i].state = DRV_BOOT;
         motors_rt[i].fault = DRVF_NONE;
     }
@@ -182,7 +182,7 @@ void motor_runtime_apply_cmd(uint8_t idx, const cmd_motor_t *m, uint16_t cmd_seq
     if (idx >= N_MOTORS || m == NULL) return;
 
     MotorRuntime *r = &motors_rt[idx];
-    uint8_t cid = motor_configs[idx].can_id;
+    uint8_t cid = motor_user_configs[idx].id.can_id;
     uint32_t now_ms = HAL_GetTick();
 
     /* Wound guard is consulted only on a DISABLED→ENABLING transition; compute it
@@ -239,8 +239,8 @@ void motor_runtime_apply_cmd(uint8_t idx, const cmd_motor_t *m, uint16_t cmd_seq
         r->hold_vel   = proto_i16_to_f(m->vel, PROTO_VEL_SCALE);
         r->cmd_tau_ff = proto_i16_to_f(m->tau_ff, PROTO_TAU_SCALE);
         r->last_apply_clamp = apply_soft_clamp(r, &r->hold_pos, &r->hold_vel, &r->cmd_tau_ff);
-        r->cmd_kp = use_cfg ? r->cfg->default_kp : proto_u16_to_f(m->kp, PROTO_KP_SCALE);
-        r->cmd_kd = use_cfg ? r->cfg->default_kd : proto_u16_to_f(m->kd, PROTO_KD_SCALE);
+        r->cmd_kp = use_cfg ? r->cfg->user.default_kp : proto_u16_to_f(m->kp, PROTO_KP_SCALE);
+        r->cmd_kd = use_cfg ? r->cfg->user.default_kd : proto_u16_to_f(m->kd, PROTO_KD_SCALE);
         if (!use_cfg) r->last_apply_clamp |= clamp_gains(cid, &r->cmd_kp, &r->cmd_kd);
         r->target_cmd_seq = cmd_seq;
         r->got_fresh_cmd  = 1u;
@@ -301,7 +301,7 @@ void motor_runtime_update(uint32_t now_ms, uint8_t cmd_fresh)
     for (uint8_t k = 0; k < N_MOTORS; k++) {
         uint8_t i = order[k];
         MotorRuntime *r = &motors_rt[i];
-        uint8_t cid = motor_configs[i].can_id;
+        uint8_t cid = motor_user_configs[i].id.can_id;
 
         /* ── fault detection on the mirrored feedback state (first trip latches).
            CAN-timeout is time-based (feedback absence) so it belongs here in the
@@ -321,7 +321,7 @@ void motor_runtime_update(uint32_t now_ms, uint8_t cmd_fresh)
                    r->mon_verdict == ENABLE_MON_FAULT_NOT_ENABLED) {
             fault_detected(i, DRVF_NOT_ENABLED, now_ms);
         } else if (r->state == DRV_ENABLED &&
-                   fabsf(r->tau) > r->cfg->max_tau) {
+                   fabsf(r->tau) > r->cfg->user.t_max) {
             fault_detected(i, DRVF_OVERTORQUE, now_ms);
         } else if (r->state == DRV_DISABLED && MOTOR_FAULT_CHECK_DISABLED &&
                    (r->motor_fault != 0u || r->motor_mode == RS_MODE_CALI)) {
@@ -409,13 +409,16 @@ void motor_runtime_update(uint32_t now_ms, uint8_t cmd_fresh)
             break;
 
         case DRV_STOPPING:
-            /* Backdrive-safe damp (Kp=0, config Kd) for the damp dwell, then the
-               ramp owns its disable; drive_sm picks DISABLED vs FAULT. */
+            /* Dead-man damp: the per-motor fallback MIT constants (tier 3 of the
+               config — normally kp=0 for a pure backdrive-safe damp) for the damp
+               dwell, then the ramp owns its disable; drive_sm picks DISABLED vs
+               FAULT. */
             if (ms_since(now_ms, r->state_ms) >= (int32_t)MASTER_LOST_DAMP_MS) {
                 can_disable_motor(cid, CAN_MASTER_ID);
                 in.stop_done = 1u;
             } else {
-                send_mit(i, 0.0f, r->pos, 0.0f, 0.0f, r->cfg->default_kd);
+                send_mit(i, r->cfg->fallback.tau_ff, r->pos, 0.0f,
+                         r->cfg->fallback.kp, r->cfg->fallback.kd);
             }
             break;
 

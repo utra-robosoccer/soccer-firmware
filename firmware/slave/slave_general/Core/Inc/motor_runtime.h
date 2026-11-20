@@ -2,17 +2,17 @@
 #define MOTOR_RUNTIME_H
 
 #include "stm32f4xx_hal.h"
-#include "proto_common.h"   /* protocol.h wire structs + generated motor_config.h */
+#include "proto_common.h"   /* protocol.h wire structs + generated motor_user_config.h */
 #include "cmd_seq_track.h"  /* CmdSeqTrack — reply-window pairing for last_applied_seq */
 #include <stdint.h>
 
-/* Loop period, watchdog and timeout constants are GENERATED into motor_config.h
+/* Loop period, watchdog and timeout constants are GENERATED into motor_user_config.h
    (derived from configs/<setup>/system.yaml rates); see proto_common.h. */
 
 /* Per-motor runtime state. `state` is a DriveState (DRV_*), `fault` a DriveFault
    (DRVF_*, latched at detection, first wins). */
 typedef struct {
-    const MotorConfig *cfg;
+    const MotorUserConfig *cfg;
     uint8_t            state;         /* DriveState (DRV_*)                       */
     uint8_t            fault;         /* DriveFault (DRVF_*) — latched at detection */
     float              pos;           /* wrapped to [-pi, pi] (home frame)        */

@@ -16,7 +16,7 @@ comes from the master clock t_ns.
 """
 import math
 
-from master_link.motor_config_gen import MOTORS, MOTOR_SOFT_MIN, MOTOR_SOFT_MAX
+from master_link.motor_config_gen import MOTORS, MOTOR_USER_P_MIN, MOTOR_USER_P_MAX
 
 from .base import Policy, Action, MotorCommand, REQ_ENABLE, LinkState, arm_command
 from .sine_start import SineStart, fits_soft_limits
@@ -50,7 +50,7 @@ class LegsSinePolicy(Policy):
         self._lim = {}
         for k in self._moving:
             g = gidx.get(k)
-            self._lim[k] = (MOTOR_SOFT_MIN[g], MOTOR_SOFT_MAX[g]) if g is not None else (None, None)
+            self._lim[k] = (MOTOR_USER_P_MIN[g], MOTOR_USER_P_MAX[g]) if g is not None else (None, None)
         self._traj = {k: SineStart(self._amp, self._omega, self._move_speed) for k in self._moving}
         self._hold = {}        # stationary joints: pose captured at MIT start
         self._t0 = None
