@@ -1,5 +1,5 @@
 #include "motor_runtime.h"
-#include "motor_chain.h"
+#include "can_rx.h"
 #include "robstride.h"
 #include "enable_monitor.h"
 #include "../../../../common/include/drive_sm.h"           /* protocol-v9 drive machine */
@@ -133,7 +133,7 @@ static void fault_detected(uint8_t idx, uint8_t fault, uint32_t now_ms)
 
 /* ── boot CAN-id sweep ───────────────────────────────────────────────────────
    Probe every possible id with a Type-0 get-id, collect replies for one fixed
-   window (the RX ISR marks them in motor_chain's bitmap), then judge the bus
+   window (the RX ISR marks them in can_rx's bitmap), then judge the bus
    against the configured roster. The verdict latches until reboot: a missing
    motor or an extra id answering blocks arming chain-wide — fix the bus,
    power-cycle. No re-ping, no re-sweep. */
@@ -149,7 +149,7 @@ static void can_id_sweep(void)
     HAL_Delay(CAN_ID_SWEEP_WINDOW_MS);
 
     uint8_t seen[32];
-    motor_chain_sweep_snapshot(seen);
+    can_rx_sweep_snapshot(seen);
     uint8_t cfg_ids[N_MOTORS];
     for (uint8_t i = 0; i < N_MOTORS; i++) {
         cfg_ids[i] = motor_user_configs[i].id.can_id;

@@ -23,7 +23,7 @@ HAL_StatusTypeDef can_link_init(void);
 HAL_StatusTypeDef can_link_tx(uint32_t ext_id, const uint8_t msg[8]);
 
 /* RX: the FIFO0 HAL callback lives in can_link.c. It reads each frame out of
- * the peripheral and hands it to this hook, which the app (motor_chain.c)
+ * the peripheral and hands it to this hook, which the app (can_rx.c)
  * implements — dispatch by comm type, LUT, unpack. Runs in ISR context. */
 void can_link_on_frame(uint32_t ext_id, uint8_t data[8]);
 

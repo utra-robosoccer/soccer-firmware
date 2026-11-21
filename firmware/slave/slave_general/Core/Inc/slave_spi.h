@@ -9,7 +9,7 @@
 #define INC_SLAVE_SPI_H_
 
 #include "stm32f4xx_hal.h"
-#include "motor_chain.h"
+#include "can_rx.h"
 #include "proto_common.h"
 #include "main.h"
 

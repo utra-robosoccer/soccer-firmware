@@ -2,7 +2,7 @@
  * encodes one frame (common/motor_rs_can.h) and queues it on can_link.
  * Sends are fire-and-forget: HAL status stays inside can_link (failures are
  * accounted in can_tx_error_count -> telemetry can_tx_errors).
- * Decoders are pure and called straight from motor_chain's RX dispatch. */
+ * Decoders are pure and called straight from can_rx's RX dispatch. */
 #ifndef ROBSTRIDE
 #define ROBSTRIDE
 #include <stdint.h>

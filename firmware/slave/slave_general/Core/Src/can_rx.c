@@ -1,4 +1,4 @@
-#include "motor_chain.h"
+#include "can_rx.h"
 #include "robstride.h"   /* vendor-protocol frames: rs_decode_* (wire-level RX is can_link.c) */
 #include <string.h>
 
@@ -6,11 +6,11 @@
 
 /* Private to this TU — owned by the CAN RX ISR. Main-loop code reads it only
    through motor_get_snapshot() and writes only via motor_set_fault_word(). */
-static motor_t motors[MAX_MOTOR_COUNT]; //motor chain array, indexed in motor_user_configs[] order
+static motor_t motors[MAX_MOTOR_COUNT]; // last-feedback cache, indexed in motor_user_configs[] order
 
 /* CAN-id-sweep bitmap: bit per id that answered a Type-0 probe. Owned by the
    RX ISR (marked on every Type-0 reply, roster or not); main-loop code reads
-   it only through motor_chain_sweep_snapshot(). */
+   it only through can_rx_sweep_snapshot(). */
 static uint8_t sweep_seen[32];
 
 // Protocol-level RX diagnostics (updated from can_link_on_frame, ISR context).
@@ -40,7 +40,7 @@ static motor_t* get_motor_by_id(uint8_t id)
 }
 
 // ---------------------------------------------------------
-// Cross-context access for main-loop code (see motor_chain.h)
+// Cross-context access for main-loop code (see can_rx.h)
 // ---------------------------------------------------------
 
 // Coherent snapshot: the ONLY read path into motors[] from outside the ISR.
@@ -66,7 +66,7 @@ void motor_set_fault_word(uint8_t idx, uint32_t val)
 }
 
 // Coherent copy of the id-sweep bitmap, same masking rule as motor_get_snapshot.
-void motor_chain_sweep_snapshot(uint8_t out[32])
+void can_rx_sweep_snapshot(uint8_t out[32])
 {
     __disable_irq();
     memcpy(out, sweep_seen, sizeof(sweep_seen));
@@ -74,7 +74,7 @@ void motor_chain_sweep_snapshot(uint8_t out[32])
 }
 
 // Bind CAN ids before the bus starts so the RX ISR's lookup can match feedback.
-void motor_chain_bind_ids(void)
+void can_rx_bind_ids(void)
 {
     for (uint8_t i = 0; i < MAX_MOTOR_COUNT; i++) {
         motors[i].id        = motor_user_configs[i].id.can_id;

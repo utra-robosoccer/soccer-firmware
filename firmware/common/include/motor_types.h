@@ -2,11 +2,10 @@
  * motor_types.h — shared motor domain model.
  *
  * The plain-C data types that describe a motor's identity, mode, faults and
- * live telemetry. Extracted out of robstride.h so that modules which only need
- * the data model (motor_chain / can_rx, motor_runtime / motor_control) do not
- * have to include the CAN protocol driver. robstride.h includes this file and
- * keeps only the CAN-frame internals (exCanIdInfo, decode masks, scaling
- * constants) and the codec prototypes.
+ * live telemetry. Kept separate so modules that only need the data model
+ * (can_rx, motor_runtime) do not have to include the CAN protocol headers;
+ * the pure codec (motor_rs_can.h) includes this file and owns the frame
+ * internals.
  *
  * No HAL / hardware dependency — safe to include from host-side unit tests.
  */

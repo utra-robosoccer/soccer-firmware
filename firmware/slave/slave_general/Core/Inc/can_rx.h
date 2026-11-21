@@ -1,12 +1,10 @@
-/*
- * motor_chain.h
- *
- *  Created on: Jan 4, 2026
- *
- */
+/* can_rx — what the slave receives from the CAN bus: the protocol-aware RX
+ * dispatch (can_link_on_frame: comm type → roster LUT → decode) and the
+ * ISR-owned last-feedback cache motors[], read by the main loop only through
+ * the snapshot accessors below. can_link stays protocol-blind transport. */
 
-#ifndef INC_MOTOR_CHAIN_H_
-#define INC_MOTOR_CHAIN_H_
+#ifndef CAN_RX_H
+#define CAN_RX_H
 
 #include "../../../../common/include/motor_types.h"  /* motor_t domain model */
 #include <stdint.h>
@@ -17,7 +15,7 @@
 #include "proto_common.h"   /* N_MOTORS, motor_user_configs[] (generated) */
 
 #define MAX_MOTOR_COUNT N_MOTORS //Total motors on the CAN bus — driven by the generated motor_user_config.h
-/* motors[] is private to motor_chain.c (owned by the CAN RX ISR). Main-loop code
+/* motors[] is private to can_rx.c (owned by the CAN RX ISR). Main-loop code
    must NOT read it directly — use motor_get_snapshot() for a coherent read and
    motor_set_fault_word() for the one field it writes. */
 /* Protocol-level RX diagnostics (wire-level ones — raw count, last ext-id/
@@ -45,10 +43,10 @@ void motor_set_fault_word(uint8_t idx, uint32_t val);
 
 /* Bind motors[i].id / master_id from motor_user_configs[] before the CAN bus starts,
    so the RX ISR's id lookup can match incoming feedback. Call once at init. */
-void motor_chain_bind_ids(void);
+void can_rx_bind_ids(void);
 
 /* Coherent copy of the CAN-id-sweep bitmap (bit per id that answered a Type-0
    probe; ISR-owned). The boot sweep reads it once after its reply window. */
-void motor_chain_sweep_snapshot(uint8_t out[32]);
+void can_rx_sweep_snapshot(uint8_t out[32]);
 
-#endif /* INC_MOTOR_CHAIN_H_ */
+#endif /* CAN_RX_H */

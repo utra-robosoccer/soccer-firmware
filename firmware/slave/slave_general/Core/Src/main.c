@@ -28,7 +28,7 @@
 #include <stdio.h>
 #include <string.h>
 #include "robstride.h"
-#include "motor_chain.h"
+#include "can_rx.h"
 #include "slave_spi.h"
 #include "motor_runtime.h"
 #include "tx_arm_timer.h"   /* TX-arm deadline (one-shot TIM3) — removes the telemetry lag */
@@ -249,7 +249,7 @@ int main(void)
 
   /* Bind CAN ids into the (private) motors[] before the bus starts, so the RX
      ISR's id lookup can match feedback. */
-  motor_chain_bind_ids();
+  can_rx_bind_ids();
 
   if (can_link_init() != HAL_OK) {
     Error_Handler();
