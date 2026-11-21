@@ -1,11 +1,17 @@
 #include "motor_chain.h"
-#include "robstride.h"   /* vendor-protocol frames: rs_unpack_* (wire-level RX is can_link.c) */
+#include "robstride.h"   /* vendor-protocol frames: rs_decode_* (wire-level RX is can_link.c) */
+#include <string.h>
 
 #define PI 3.1415926f
 
 /* Private to this TU — owned by the CAN RX ISR. Main-loop code reads it only
    through motor_get_snapshot() and writes only via motor_set_fault_word(). */
 static motor_t motors[MAX_MOTOR_COUNT]; //motor chain array, indexed in motor_user_configs[] order
+
+/* CAN-id-sweep bitmap: bit per id that answered a Type-0 probe. Owned by the
+   RX ISR (marked on every Type-0 reply, roster or not); main-loop code reads
+   it only through motor_chain_sweep_snapshot(). */
+static uint8_t sweep_seen[32];
 
 // Protocol-level RX diagnostics (updated from can_link_on_frame, ISR context).
 volatile uint8_t can_rx_flag = 0;
@@ -59,6 +65,14 @@ void motor_set_fault_word(uint8_t idx, uint32_t val)
     }
 }
 
+// Coherent copy of the id-sweep bitmap, same masking rule as motor_get_snapshot.
+void motor_chain_sweep_snapshot(uint8_t out[32])
+{
+    __disable_irq();
+    memcpy(out, sweep_seen, sizeof(sweep_seen));
+    __enable_irq();
+}
+
 // Bind CAN ids before the bus starts so the RX ISR's lookup can match feedback.
 void motor_chain_bind_ids(void)
 {
@@ -79,6 +93,22 @@ void can_link_on_frame(uint32_t ext_id, uint8_t data[8])
 
     // Use the LUT helper instead of checking sender_id <= MAX_MOTOR_COUNT
     motor_t *target_motor = get_motor_by_id(sender_id);
+
+    /* Type-0 replies feed the id-sweep bitmap BEFORE the roster lookup: an id
+       outside the configured roster answering is exactly what the boot sweep
+       must see (it blocks arming). */
+    if (comm_type == 0u) {
+        can_type0_count++;
+        rs_id_sweep_mark(sweep_seen, sender_id);
+        if (target_motor != NULL) {
+            if (rs_decode_get_id(ext_id, data, target_motor)) {
+                can_rx_flag = 1;
+            } else {
+                can_unpack_error_count++;
+            }
+        }
+        return;
+    }
 
     if (target_motor == NULL) {
         can_no_lut_count++;
@@ -117,15 +147,6 @@ void can_link_on_frame(uint32_t ext_id, uint8_t data[8])
                 can_rx_flag = 1;
                 break;
             }
-
-            case 0: // Get ID Response
-                can_type0_count++;
-                if (rs_decode_get_id(ext_id, data, target_motor)) {
-                    can_rx_flag = 1;
-                } else {
-                    can_unpack_error_count++;
-                }
-                break;
 
             default:
                 // Handle unknown types or other responses (e.g. Type 1 response is Type 2)

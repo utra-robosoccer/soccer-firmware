@@ -4,6 +4,7 @@
 #include "stm32f4xx_hal.h"
 #include "proto_common.h"   /* protocol.h wire structs + generated motor_user_config.h */
 #include "cmd_seq_track.h"  /* CmdSeqTrack — reply-window pairing for last_applied_seq */
+#include "../../../../common/include/motor_rs_can.h"  /* RsIdSweepResult */
 #include <stdint.h>
 
 /* Loop period, watchdog and timeout constants are GENERATED into motor_user_config.h
@@ -82,5 +83,9 @@ void motor_runtime_sample(tele_motor_t *out, uint8_t idx);
 
 /* Aggregate alive bitmask (bit i = motor i present: state past ABSENT). */
 uint8_t motor_runtime_motors_alive(void);
+
+/* Boot CAN-id-sweep verdict, latched until reboot (gdb/debug visibility).
+   ok == 0 blocks every ENABLE chain-wide (TELE_FLAG_REQUEST_REJECTED). */
+const RsIdSweepResult *motor_runtime_sweep_result(void);
 
 #endif /* MOTOR_RUNTIME_H */

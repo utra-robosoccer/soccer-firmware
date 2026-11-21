@@ -2,8 +2,9 @@
  * host/tests/test_motor_rs_can.py.
  *
  * Part 1: golden frame vectors — byte-exact encode checks (incl. the Type-17
- * zero_sta read frame verified live on the bench) and decode round-trips for
- * the Type-0/2/17 replies. Part 2: ext-id pack→unpack round-trips and the
+ * zero_sta read frame verified live on the bench), decode round-trips for
+ * the Type-0/2/17 replies, and the CAN-id-sweep roster checks. Part 2:
+ * ext-id pack→unpack round-trips and the
  * 29-bit bound over 20 000 pseudo-random (mode,data,id) triples, printed as
  * "<mode> <data> <id> <ext>" so Python re-checks the wire formula.
  *
@@ -100,6 +101,47 @@ static int golden_checks(void)
     if (!rs_decode_single_param(rs_extid_pack(0x11, 1, 0xFD), pv, &out) ||
         !near(out, 1.0f, 1e-6f)) {
         fprintf(stderr, "single_param: out=%f\n", (double)out); return 0;
+    }
+
+    /* CAN id sweep roster checks (bitmap edges 1 and 0xFC included). */
+    {
+        const uint8_t cfg[3] = {1, 7, 0xFC};
+        uint8_t seen[32] = {0};
+        RsIdSweepResult r = rs_id_sweep_check(seen, cfg, 3);   /* empty bus */
+        if (r.found_mask != 0x00u || r.unexpected_id != 0u || r.ok) {
+            fprintf(stderr, "sweep empty: mask=%02X unexp=%u ok=%u\n",
+                    r.found_mask, r.unexpected_id, r.ok); return 0;
+        }
+
+        rs_id_sweep_mark(seen, 1);
+        rs_id_sweep_mark(seen, 0xFC);
+        r = rs_id_sweep_check(seen, cfg, 3);                   /* 7 missing */
+        if (r.found_mask != 0x05u || r.unexpected_id != 0u || r.ok) {
+            fprintf(stderr, "sweep missing: mask=%02X unexp=%u ok=%u\n",
+                    r.found_mask, r.unexpected_id, r.ok); return 0;
+        }
+
+        rs_id_sweep_mark(seen, 7);
+        r = rs_id_sweep_check(seen, cfg, 3);                   /* exact match */
+        if (r.found_mask != 0x07u || r.unexpected_id != 0u || !r.ok) {
+            fprintf(stderr, "sweep ok: mask=%02X unexp=%u ok=%u\n",
+                    r.found_mask, r.unexpected_id, r.ok); return 0;
+        }
+
+        rs_id_sweep_mark(seen, 5);                             /* extra id on bus */
+        r = rs_id_sweep_check(seen, cfg, 3);
+        if (r.found_mask != 0x07u || r.unexpected_id != 5u || r.ok) {
+            fprintf(stderr, "sweep extra: mask=%02X unexp=%u ok=%u\n",
+                    r.found_mask, r.unexpected_id, r.ok); return 0;
+        }
+
+        /* Missing AND extra together (one motor on a wrong id looks like this). */
+        const uint8_t cfg4[4] = {1, 7, 9, 0xFC};
+        r = rs_id_sweep_check(seen, cfg4, 4);                  /* 9 missing, 5 extra */
+        if (r.found_mask != 0x0Bu || r.unexpected_id != 5u || r.ok) {
+            fprintf(stderr, "sweep wrongid: mask=%02X unexp=%u ok=%u\n",
+                    r.found_mask, r.unexpected_id, r.ok); return 0;
+        }
     }
     return 1;
 }

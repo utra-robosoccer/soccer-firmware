@@ -1,6 +1,7 @@
 /* motor_rs_can — the RobStride private CAN protocol, pure and host-testable:
- * the 29-bit ext-id layout, the RsFrame value type, every frame type's encoder
- * and every reply's decoder. No HAL — transport is the slave's can_link.
+ * the 29-bit ext-id layout, the RsFrame value type, every frame type's encoder,
+ * every reply's decoder, and the boot CAN-id-sweep roster check. No HAL —
+ * transport is the slave's can_link.
  * Tested by host/tests/test_motor_rs_can.py (golden vectors shared in spirit
  * with the Python codec in tools/robstride_usb_can/rs02_can.py).
  *
@@ -242,6 +243,48 @@ static inline uint8_t rs_decode_single_param(uint32_t ext_id, const uint8_t data
 
     memcpy(result_val, &raw_val, sizeof(float));
     return 1;
+}
+
+/* ── CAN id sweep — boot-time bus census ─────────────────────────────────────
+ * The slave probes every possible id with a Type-0 get-id, marks each reply in
+ * a 256-bit bitmap, then checks the bitmap against the configured roster. Any
+ * mismatch — a configured motor silent, or an id answering that is not in the
+ * roster — means the bus does not match the build and arming must be refused.
+ * Limitation (accepted): two motors sharing one id answer on the same bit and
+ * look clean; catching that would need the Type-0 UID payload, not tracked. */
+typedef struct {
+    uint8_t found_mask;     /* bit i = cfg_ids[i] answered the sweep         */
+    uint8_t unexpected_id;  /* lowest answering id not in cfg_ids; 0 = none  */
+    uint8_t ok;             /* 1 iff all configured found AND none unexpected */
+} RsIdSweepResult;
+
+static inline void rs_id_sweep_mark(uint8_t seen[32], uint8_t id)
+{
+    seen[id >> 3] |= (uint8_t)(1u << (id & 7u));
+}
+
+static inline RsIdSweepResult rs_id_sweep_check(const uint8_t seen[32],
+                                                const uint8_t *cfg_ids, uint8_t n_cfg)
+{
+    RsIdSweepResult r = {0u, 0u, 0u};
+    if (n_cfg > 8u) n_cfg = 8u;              /* found_mask is one byte wide */
+
+    for (uint8_t i = 0; i < n_cfg; i++) {
+        if (seen[cfg_ids[i] >> 3] & (1u << (cfg_ids[i] & 7u))) {
+            r.found_mask |= (uint8_t)(1u << i);
+        }
+    }
+    for (uint16_t id = 0; id < 256u; id++) {
+        if (!(seen[id >> 3] & (1u << (id & 7u)))) continue;
+        uint8_t configured = 0u;
+        for (uint8_t i = 0; i < n_cfg; i++) {
+            if (cfg_ids[i] == (uint8_t)id) { configured = 1u; break; }
+        }
+        if (!configured) { r.unexpected_id = (uint8_t)id; break; }
+    }
+    uint8_t all = (uint8_t)((n_cfg == 8u) ? 0xFFu : ((1u << n_cfg) - 1u));
+    r.ok = (uint8_t)(r.found_mask == all && r.unexpected_id == 0u);
+    return r;
 }
 
 #ifdef __cplusplus

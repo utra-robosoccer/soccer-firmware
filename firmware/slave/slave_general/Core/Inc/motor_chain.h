@@ -47,4 +47,8 @@ void motor_set_fault_word(uint8_t idx, uint32_t val);
    so the RX ISR's id lookup can match incoming feedback. Call once at init. */
 void motor_chain_bind_ids(void);
 
+/* Coherent copy of the CAN-id-sweep bitmap (bit per id that answered a Type-0
+   probe; ISR-owned). The boot sweep reads it once after its reply window. */
+void motor_chain_sweep_snapshot(uint8_t out[32]);
+
 #endif /* INC_MOTOR_CHAIN_H_ */

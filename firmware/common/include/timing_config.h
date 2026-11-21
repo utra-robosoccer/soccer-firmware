@@ -38,7 +38,9 @@
 #define MOTOR_ENABLE_MON_MS       15u  /* not-Run dwell while enabled → DRVF_NOT_ENABLED */
 #define MOTOR_ENABLE_TIMEOUT_MS  100u  /* ENABLING without rs_mode==Run → DRVF_ENABLE_FAILED */
 #define MOTOR_CLEAR_TIMEOUT_MS   100u  /* CLEARING without a fresh reply → ABSENT */
-#define MOTOR_ABSENT_PING_MS     100u  /* state-poll period while ABSENT */
+#define CAN_ID_SWEEP_WINDOW_MS   300u  /* Type-0 reply collection after the boot
+                                          id-sweep blast (sweep runs once; the
+                                          verdict latches until reboot) */
 
 /* Enable-monitor dwell in slave ticks (rounded). */
 #define MOTOR_ENABLE_MON_K \

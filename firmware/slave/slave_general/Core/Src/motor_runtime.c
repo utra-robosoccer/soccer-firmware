@@ -131,29 +131,30 @@ static void fault_detected(uint8_t idx, uint8_t fault, uint32_t now_ms)
     if (f.next_state != r->state) enter_state(idx, f.next_state, now_ms);
 }
 
-/* Discover one motor: ping and wait up to 300 ms for a response. Ends DISABLED
-   (present) or ABSENT (silent — the runtime keeps pinging it at ABSENT_PING_MS). */
-static void discover(uint8_t idx)
-{
-    uint8_t cid = motor_user_configs[idx].id.can_id;
-    motors_rt[idx].state = DRV_DISCOVERING;
+/* ── boot CAN-id sweep ───────────────────────────────────────────────────────
+   Probe every possible id with a Type-0 get-id, collect replies for one fixed
+   window (the RX ISR marks them in motor_chain's bitmap), then judge the bus
+   against the configured roster. The verdict latches until reboot: a missing
+   motor or an extra id answering blocks arming chain-wide — fix the bus,
+   power-cycle. No re-ping, no re-sweep. */
+static RsIdSweepResult g_sweep;
 
-    for (uint8_t attempt = 0; attempt < 3u; attempt++) {
-        can_rx_flag = 0;
-        if (rs_get_motor_id(cid, CAN_MASTER_ID) != HAL_OK) {
-            HAL_Delay(100u);
-            continue;
-        }
-        uint32_t t = HAL_GetTick();
-        while (can_rx_flag == 0 && (HAL_GetTick() - t) < 300u) {}
-        if (can_rx_flag) {
-            enter_state(idx, DRV_DISABLED, HAL_GetTick());
-            HAL_Delay(20u);
-            return;
-        }
-        HAL_Delay(50u);
+static void can_id_sweep(void)
+{
+    /* 0 is not a valid motor id; 0xFD is the master; 0xFE/0xFF stay reserved.
+       can_link_tx's bounded mailbox wait self-paces the blast. */
+    for (uint16_t id = 1u; id <= 0xFCu; id++) {
+        rs_get_motor_id((uint8_t)id, CAN_MASTER_ID);
     }
-    enter_state(idx, DRV_ABSENT, HAL_GetTick());
+    HAL_Delay(CAN_ID_SWEEP_WINDOW_MS);
+
+    uint8_t seen[32];
+    motor_chain_sweep_snapshot(seen);
+    uint8_t cfg_ids[N_MOTORS];
+    for (uint8_t i = 0; i < N_MOTORS; i++) {
+        cfg_ids[i] = motor_user_configs[i].id.can_id;
+    }
+    g_sweep = rs_id_sweep_check(seen, cfg_ids, N_MOTORS);
 }
 
 /* ENABLING CAN-send pacing (cycles): settle after the run-mode write and after the
@@ -173,9 +174,17 @@ void motor_runtime_init(void)
         motors_rt[i].state = DRV_BOOT;
         motors_rt[i].fault = DRVF_NONE;
     }
+    can_id_sweep();
+    uint32_t now_ms = HAL_GetTick();
     for (uint8_t i = 0; i < N_MOTORS; i++) {
-        discover(i);
+        enter_state(i, ((g_sweep.found_mask >> i) & 1u) ? DRV_DISABLED
+                                                        : DRV_ABSENT, now_ms);
     }
+}
+
+const RsIdSweepResult *motor_runtime_sweep_result(void)
+{
+    return &g_sweep;
 }
 
 void motor_runtime_apply_cmd(uint8_t idx, const cmd_motor_t *m, uint16_t cmd_seq)
@@ -196,8 +205,19 @@ void motor_runtime_apply_cmd(uint8_t idx, const cmd_motor_t *m, uint16_t cmd_seq
         wound = (off > MOTOR_WOUND_OFFSET_MAX || off < -MOTOR_WOUND_OFFSET_MAX) ? 1u : 0u;
     }
 
-    DriveReqDecision d = drive_sm_on_request(r->state, m->drive_req, wound,
-                                             (uint8_t)(r->fault != DRVF_NONE));
+    /* Bus gate: the boot id sweep must have matched the configured roster
+       exactly before anything arms. A blocked chain rejects every ENABLE
+       (surfaced as TELE_FLAG_REQUEST_REJECTED); DISABLE/STOP/RESET flow
+       normally. */
+    DriveReqDecision d;
+    if (m->drive_req == DRV_REQ_ENABLE && !g_sweep.ok) {
+        memset(&d, 0, sizeof d);
+        d.rejected   = 1u;
+        d.next_state = r->state;
+    } else {
+        d = drive_sm_on_request(r->state, m->drive_req, wound,
+                                (uint8_t)(r->fault != DRVF_NONE));
+    }
     r->req_rejected = d.rejected;
 
     if (d.abort_enable) arm_sm_cancel(&r->arm_phase, &r->arm_wait);
@@ -439,14 +459,8 @@ void motor_runtime_update(uint32_t now_ms, uint8_t cmd_fresh)
             break;
 
         case DRV_ABSENT:
-            /* state_ms doubles as the ping clock while ABSENT. */
-            if (ms_since(now_ms, r->state_ms) >= (int32_t)MOTOR_ABSENT_PING_MS) {
-                rs_read_motor_state(cid);
-                r->state_ms = now_ms;
-            }
-            in.fb_fresh = (uint8_t)(ms_since(now_ms, r->last_fb_ms) >= 0 &&
-                                    ms_since(now_ms, r->last_fb_ms) <
-                                        (int32_t)MOTOR_CAN_FB_TIMEOUT_MS);
+            /* Terminal: presence was judged once by the boot id sweep. No
+               re-ping — fix the bus and power-cycle. */
             break;
 
         default:   /* DRV_BOOT / DRV_DISCOVERING / DRV_FAULT: nothing to service */
