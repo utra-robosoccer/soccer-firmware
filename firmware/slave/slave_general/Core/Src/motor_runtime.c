@@ -31,7 +31,7 @@ static inline int32_t ms_since(uint32_t now, uint32_t t) { return (int32_t)(now 
 static void send_mit(uint8_t idx, float torque, float home_pos, float vel,
                      float kp, float kd)
 {
-    can_mit_control_set(motor_user_configs[idx].id.can_id, torque,
+    rs_mit_control_set(motor_user_configs[idx].id.can_id, torque,
                         home_pos + motors_rt[idx].pos_offset, vel, kp, kd);
     cmd_seq_on_mit_frame(&motors_rt[idx].cmd_track, motors_rt[idx].target_cmd_seq);
 }
@@ -76,15 +76,16 @@ static uint8_t apply_soft_clamp(const MotorRuntime *r, float *pos, float *vel, f
 }
 
 /* Clamp wire-sourced gains to this motor's per-model CAN encode range. The CAN encoder
-   (can_mit_control_set) would saturate them silently; clamping here keeps the runtime
+   (rs_mit_control_set) would saturate them silently; clamping here keeps the runtime
    state consistent with what is actually sent and reports it (TELE_FLAG_CLAMPED_GAIN).
    Config-default gains (USE_CONFIG_GAINS) bypass this — they are validated at generation. */
 static uint8_t clamp_gains(uint8_t can_id, float *kp, float *kd)
 {
     const MotorRsConfig *rg = motor_rs_config_by_id(can_id);
+    if (rg == NULL) rg = rs_default_ranges();
     uint8_t c = 0u;
-    c |= soft_clamp_range(kp, rg ? rg->kp_min : KP_MIN, rg ? rg->kp_max : KP_MAX);
-    c |= soft_clamp_range(kd, rg ? rg->kd_min : KD_MIN, rg ? rg->kd_max : KD_MAX);
+    c |= soft_clamp_range(kp, rg->kp_min, rg->kp_max);
+    c |= soft_clamp_range(kd, rg->kd_min, rg->kd_max);
     return c ? (uint8_t)TELE_FLAG_CLAMPED_GAIN : 0u;
 }
 
@@ -122,7 +123,7 @@ static void fault_detected(uint8_t idx, uint8_t fault, uint32_t now_ms)
                                              (uint8_t)(r->fault != DRVF_NONE));
     if (f.latch_fault != DRVF_NONE) r->fault = f.latch_fault;
     if (f.abort_enable) arm_sm_cancel(&r->arm_phase, &r->arm_wait);
-    if (f.send_disable) can_disable_motor(motor_user_configs[idx].id.can_id, CAN_MASTER_ID);
+    if (f.send_disable) rs_disable_motor(motor_user_configs[idx].id.can_id, CAN_MASTER_ID);
     if (f.begin_stop) {
         r->hold_vel   = 0.0f;
         r->cmd_tau_ff = 0.0f;
@@ -139,7 +140,7 @@ static void discover(uint8_t idx)
 
     for (uint8_t attempt = 0; attempt < 3u; attempt++) {
         can_rx_flag = 0;
-        if (can_get_motor_id(cid, CAN_MASTER_ID) != HAL_OK) {
+        if (rs_get_motor_id(cid, CAN_MASTER_ID) != HAL_OK) {
             HAL_Delay(100u);
             continue;
         }
@@ -200,12 +201,12 @@ void motor_runtime_apply_cmd(uint8_t idx, const cmd_motor_t *m, uint16_t cmd_seq
     r->req_rejected = d.rejected;
 
     if (d.abort_enable) arm_sm_cancel(&r->arm_phase, &r->arm_wait);
-    if (d.send_disable) can_disable_motor(cid, CAN_MASTER_ID);
+    if (d.send_disable) rs_disable_motor(cid, CAN_MASTER_ID);
     if (d.send_clear) {
         /* CLEARING entry: the wire-level Type-4 Byte0=1 both stops the motor and
            clears the RS driver's latched fault; reset our mirrors with it. The
            judgement (clean reply / still dirty / silent) runs in the service. */
-        can_clear_fault(cid, CAN_MASTER_ID);
+        rs_clear_fault(cid, CAN_MASTER_ID);
         motor_set_fault_word(idx, 0u);
         r->fault_word = 0u;
     }
@@ -316,7 +317,7 @@ void motor_runtime_update(uint32_t now_ms, uint8_t cmd_fresh)
             fault_detected(i, DRVF_MOTOR_REPORTED, now_ms);
             motor_set_fault_word(i, 0xFFFFFFFFu);
             r->fault_word = 0xFFFFFFFFu;
-            can_read_single_param(cid, CAN_MASTER_ID, 0x3022u);
+            rs_read_single_param(cid, CAN_MASTER_ID, 0x3022u);
         } else if (r->state == DRV_ENABLED &&
                    r->mon_verdict == ENABLE_MON_FAULT_NOT_ENABLED) {
             fault_detected(i, DRVF_NOT_ENABLED, now_ms);
@@ -347,7 +348,7 @@ void motor_runtime_update(uint32_t now_ms, uint8_t cmd_fresh)
                 if (r->have_tuple) {
                     send_mit(i, 0.0f, r->hold_pos, 0.0f, r->cmd_kp, r->cmd_kd);
                 } else {
-                    can_mit_control_set(cid, 0.0f, r->pos + r->pos_offset,
+                    rs_mit_control_set(cid, 0.0f, r->pos + r->pos_offset,
                                         0.0f, 0.0f, 0.0f);
                 }
                 continue;       /* grace frame sent; skip the normal service */
@@ -366,9 +367,9 @@ void motor_runtime_update(uint32_t now_ms, uint8_t cmd_fresh)
                 uint8_t act = arm_sm_step(&r->arm_phase, &r->arm_wait,
                                           ARM_CLEAR_WAIT_CYCLES, ARM_SETTLE_WAIT_CYCLES);
                 if (act == ARM_ACT_SEND_MODE) {
-                    can_change_motor_mode(cid, CAN_MASTER_ID, MIT_MODE);
+                    rs_change_motor_mode(cid, CAN_MASTER_ID, MIT_MODE);
                 } else if (act == ARM_ACT_SEND_ENABLE) {
-                    can_enable_motor(cid, CAN_MASTER_ID);
+                    rs_enable_motor(cid, CAN_MASTER_ID);
                     r->enable_sent_ms = now_ms;
                 }
                 /* ARM_ACT_COMPLETE: sends exhausted; Run confirmation decides. */
@@ -382,10 +383,10 @@ void motor_runtime_update(uint32_t now_ms, uint8_t cmd_fresh)
                 /* arm_wait is free once arm_sm is idle — reuse it as the toggle. */
                 r->arm_wait ^= 1u;
                 if (r->arm_wait & 1u) {
-                    can_enable_motor(cid, CAN_MASTER_ID);
+                    rs_enable_motor(cid, CAN_MASTER_ID);
                     r->enable_sent_ms = now_ms;
                 } else {
-                    can_change_motor_mode(cid, CAN_MASTER_ID, MIT_MODE);
+                    rs_change_motor_mode(cid, CAN_MASTER_ID, MIT_MODE);
                 }
             }
             in.run_seen = (uint8_t)(r->enable_sent_ms != 0u &&
@@ -403,7 +404,7 @@ void motor_runtime_update(uint32_t now_ms, uint8_t cmd_fresh)
                 /* Limp poll: zero gains and zero torque apply no effort but keep
                    the Type-2 feedback, enable monitor and CAN timeout alive while
                    the host has not yet sent its first tuple. */
-                can_mit_control_set(cid, 0.0f, r->pos + r->pos_offset,
+                rs_mit_control_set(cid, 0.0f, r->pos + r->pos_offset,
                                     0.0f, 0.0f, 0.0f);
             }
             break;
@@ -414,7 +415,7 @@ void motor_runtime_update(uint32_t now_ms, uint8_t cmd_fresh)
                dwell, then the ramp owns its disable; drive_sm picks DISABLED vs
                FAULT. */
             if (ms_since(now_ms, r->state_ms) >= (int32_t)MASTER_LOST_DAMP_MS) {
-                can_disable_motor(cid, CAN_MASTER_ID);
+                rs_disable_motor(cid, CAN_MASTER_ID);
                 in.stop_done = 1u;
             } else {
                 send_mit(i, r->cfg->fallback.tau_ff, r->pos, 0.0f,
@@ -423,7 +424,7 @@ void motor_runtime_update(uint32_t now_ms, uint8_t cmd_fresh)
             break;
 
         case DRV_CLEARING:
-            can_read_motor_state(cid);       /* provoke the judging Type-2 */
+            rs_read_motor_state(cid);       /* provoke the judging Type-2 */
             in.clear_reply = (uint8_t)((int32_t)(r->last_fb_ms - r->state_ms) >= 0);
             in.clear_dirty = (uint8_t)(r->motor_fault != 0u ||
                                        r->motor_mode == RS_MODE_CALI);
@@ -432,7 +433,7 @@ void motor_runtime_update(uint32_t now_ms, uint8_t cmd_fresh)
             break;
 
         case DRV_DISABLED:
-            can_read_motor_state(cid);       /* keep presence + mirrors fresh */
+            rs_read_motor_state(cid);       /* keep presence + mirrors fresh */
             in.fb_timeout =
                 (uint8_t)(ms_since(now_ms, r->last_fb_ms) >= (int32_t)MOTOR_CAN_FB_TIMEOUT_MS);
             break;
@@ -440,7 +441,7 @@ void motor_runtime_update(uint32_t now_ms, uint8_t cmd_fresh)
         case DRV_ABSENT:
             /* state_ms doubles as the ping clock while ABSENT. */
             if (ms_since(now_ms, r->state_ms) >= (int32_t)MOTOR_ABSENT_PING_MS) {
-                can_read_motor_state(cid);
+                rs_read_motor_state(cid);
                 r->state_ms = now_ms;
             }
             in.fb_fresh = (uint8_t)(ms_since(now_ms, r->last_fb_ms) >= 0 &&
@@ -457,7 +458,7 @@ void motor_runtime_update(uint32_t now_ms, uint8_t cmd_fresh)
             DriveTickDecision t = drive_sm_on_tick(r->state, &in);
             if (t.latch_fault != DRVF_NONE && r->fault == DRVF_NONE)
                 r->fault = t.latch_fault;
-            if (t.send_disable) can_disable_motor(cid, CAN_MASTER_ID);
+            if (t.send_disable) rs_disable_motor(cid, CAN_MASTER_ID);
             if (t.enter_enabled) {
                 enter_enabled(i, now_ms);
             } else if (t.next_state != r->state) {

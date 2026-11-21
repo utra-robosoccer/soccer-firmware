@@ -251,7 +251,7 @@ int main(void)
      ISR's id lookup can match feedback. */
   motor_chain_bind_ids();
 
-  if (can_bus_init() != HAL_OK) {
+  if (can_link_init() != HAL_OK) {
     Error_Handler();
   }
 

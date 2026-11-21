@@ -1,5 +1,5 @@
 #include "motor_chain.h"
-#include "robstride.h"   /* CAN codec: can_unpack_*, exCanIdInfo, rs_can_rx_header */
+#include "robstride.h"   /* vendor-protocol frames: rs_unpack_* (wire-level RX is can_link.c) */
 
 #define PI 3.1415926f
 
@@ -7,9 +7,8 @@
    through motor_get_snapshot() and writes only via motor_set_fault_word(). */
 static motor_t motors[MAX_MOTOR_COUNT]; //motor chain array, indexed in motor_user_configs[] order
 
-// For FIFO Intr Callback function
+// Protocol-level RX diagnostics (updated from can_link_on_frame, ISR context).
 volatile uint8_t can_rx_flag = 0;
-volatile uint32_t can_raw_rx_count = 0;
 volatile uint32_t can_feedback_count = 0;
 volatile uint8_t can_feedback_motor_id = 0;
 volatile uint32_t can_type0_count = 0;
@@ -18,14 +17,8 @@ volatile uint32_t can_type17_count = 0;
 volatile uint32_t can_unknown_type_count = 0;
 volatile uint32_t can_no_lut_count = 0;
 volatile uint32_t can_unpack_error_count = 0;
-volatile uint32_t can_last_ext_id = 0;
-volatile uint32_t can_last_rx_word0 = 0;
-volatile uint32_t can_last_rx_word1 = 0;
 volatile uint8_t can_last_type = 0;
 volatile uint8_t can_last_sender_id = 0;
-volatile uint8_t can_last_dlc = 0;
-volatile uint8_t can_last_ide = 0;
-uint8_t rx_data[8];
 
 // ---------------------------------------------------------
 // Helper: Get Motor Pointer by ID using LUT
@@ -75,25 +68,12 @@ void motor_chain_bind_ids(void)
     }
 }
 
-void HAL_CAN_RxFifo0MsgPendingCallback(CAN_HandleTypeDef *hcan)
+/* Dispatch one received RobStride frame (called by can_link's FIFO0 callback,
+   ISR context): comm type → LUT lookup → unpack into motors[]. */
+void can_link_on_frame(uint32_t ext_id, uint8_t data[8])
 {
-
-    HAL_CAN_GetRxMessage(hcan, CAN_RX_FIFO0, &rs_can_rx_header, rx_data);
-    can_raw_rx_count++;
-    can_last_ext_id = rs_can_rx_header.ExtId;
-    can_last_dlc = rs_can_rx_header.DLC;
-    can_last_ide = rs_can_rx_header.IDE;
-    can_last_rx_word0 = ((uint32_t)rx_data[0]) |
-                        ((uint32_t)rx_data[1] << 8) |
-                        ((uint32_t)rx_data[2] << 16) |
-                        ((uint32_t)rx_data[3] << 24);
-    can_last_rx_word1 = ((uint32_t)rx_data[4]) |
-                        ((uint32_t)rx_data[5] << 8) |
-                        ((uint32_t)rx_data[6] << 16) |
-                        ((uint32_t)rx_data[7] << 24);
-
-    uint8_t comm_type = rs_extid_mode(rs_can_rx_header.ExtId); // Bits 24-28
-    uint8_t sender_id = (uint8_t)(rs_extid_data(rs_can_rx_header.ExtId) & 0xFF);
+    uint8_t comm_type = rs_extid_mode(ext_id); // Bits 24-28
+    uint8_t sender_id = (uint8_t)(rs_extid_data(ext_id) & 0xFF);
     can_last_type = comm_type;
     can_last_sender_id = sender_id;
 
@@ -110,7 +90,8 @@ void HAL_CAN_RxFifo0MsgPendingCallback(CAN_HandleTypeDef *hcan)
         {
             case 2: // Motor Feedback
                 can_type2_count++;
-                if (can_unpack_motor_feedback(target_motor, rx_data) == HAL_OK) {
+                if (rs_decode_feedback(ext_id, data,
+                                       motor_rs_config_by_id(sender_id), target_motor)) {
                     target_motor->last_fb_ms = HAL_GetTick();  // per-motor fb_age source
                     target_motor->fb_count++;                  // per-motor fresh-feedback tick
                     can_feedback_motor_id = sender_id;
@@ -125,11 +106,11 @@ void HAL_CAN_RxFifo0MsgPendingCallback(CAN_HandleTypeDef *hcan)
             {
                 can_type17_count++;
                 // Reply carries the register index (bytes 0-1) and value (bytes 4-7).
-                uint16_t idx = (uint16_t)(rx_data[0] | (rx_data[1] << 8));
-                uint32_t raw = (uint32_t)rx_data[4] |
-                               ((uint32_t)rx_data[5] << 8) |
-                               ((uint32_t)rx_data[6] << 16) |
-                               ((uint32_t)rx_data[7] << 24);
+                uint16_t idx = (uint16_t)(data[0] | (data[1] << 8));
+                uint32_t raw = (uint32_t)data[4] |
+                               ((uint32_t)data[5] << 8) |
+                               ((uint32_t)data[6] << 16) |
+                               ((uint32_t)data[7] << 24);
                 if (idx == 0x3022u) {
                     target_motor->fault_word = raw;  // latch fault register
                 }
@@ -139,7 +120,7 @@ void HAL_CAN_RxFifo0MsgPendingCallback(CAN_HandleTypeDef *hcan)
 
             case 0: // Get ID Response
                 can_type0_count++;
-                if (can_unpack_get_id(target_motor, rx_data) == HAL_OK) {
+                if (rs_decode_get_id(ext_id, data, target_motor)) {
                     can_rx_flag = 1;
                 } else {
                     can_unpack_error_count++;

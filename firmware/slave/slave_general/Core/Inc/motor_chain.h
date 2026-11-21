@@ -8,7 +8,7 @@
 #ifndef INC_MOTOR_CHAIN_H_
 #define INC_MOTOR_CHAIN_H_
 
-#include "motor_types.h"    /* motor_t domain model (not the whole CAN driver) */
+#include "../../../../common/include/motor_types.h"  /* motor_t domain model */
 #include <stdint.h>
 #include <stdio.h>
 #include "stm32f4xx_hal.h"
@@ -20,8 +20,9 @@
 /* motors[] is private to motor_chain.c (owned by the CAN RX ISR). Main-loop code
    must NOT read it directly — use motor_get_snapshot() for a coherent read and
    motor_set_fault_word() for the one field it writes. */
+/* Protocol-level RX diagnostics (wire-level ones — raw count, last ext-id/
+   payload words — live in can_link.h). Updated from can_link_on_frame. */
 extern volatile uint8_t can_rx_flag;
-extern volatile uint32_t can_raw_rx_count;
 extern volatile uint32_t can_feedback_count;
 extern volatile uint8_t can_feedback_motor_id;
 extern volatile uint32_t can_type0_count;
@@ -30,16 +31,8 @@ extern volatile uint32_t can_type17_count;
 extern volatile uint32_t can_unknown_type_count;
 extern volatile uint32_t can_no_lut_count;
 extern volatile uint32_t can_unpack_error_count;
-extern volatile uint32_t can_last_ext_id;
-extern volatile uint32_t can_last_rx_word0;
-extern volatile uint32_t can_last_rx_word1;
 extern volatile uint8_t can_last_type;
 extern volatile uint8_t can_last_sender_id;
-extern volatile uint8_t can_last_dlc;
-extern volatile uint8_t can_last_ide;
-extern uint8_t rx_data[8];
-
-//void HAL_CAN_RxFifo0MsgPendingCallback(CAN_HandleTypeDef *hcan);
 
 /* Coherent per-motor read for main-loop code: copies motors[idx] under a brief
    critical section so a multi-field read can't be split across two CAN feedback

@@ -1,6 +1,8 @@
-"""Host test for the RobStride ext-id codec (firmware/common/include/motor_rs_can_id.h).
+"""Host test for the pure RobStride CAN codec (firmware/common/include/motor_rs_can.h).
 
-Compiles test_motor_rs_can_id.c (which round-trips 20 000 random triples and checks
+Compiles test_motor_rs_can.c (golden frame vectors — byte-exact encodes incl. the
+bench-verified zero_sta Type-17 read, plus Type-0/2/17 decode round-trips — then
+20 000 random ext-id round-trips and
 the 29-bit bound in C) and verifies each printed ext id matches the wire formula
 mode<<24 | data<<8 | id. Also pins known IDs for the frames we send and the type-2
 feedback reply we parse — this is the regression guard for the strict-aliasing /
@@ -23,7 +25,7 @@ def unpack(ext):
     return ((ext >> 24) & 0x1F, (ext >> 8) & 0xFFFF, ext & 0xFF)   # mode, data, id
 
 
-class RobstrideIdCodec(unittest.TestCase):
+class RobstrideCanCodec(unittest.TestCase):
     def test_known_ids(self):
         # Tx frames (mode, data=master_id/payload, target id) → ext id.
         self.assertEqual(pack(3, 0x00FD, 5), 0x0300FD05)   # enable motor id5, master 0xFD
@@ -47,9 +49,9 @@ class RobstrideIdCodec(unittest.TestCase):
         gcc = shutil.which("gcc") or shutil.which("cc")
         if gcc is None:
             self.skipTest("no C compiler available")
-        src = os.path.join(ROOT, "firmware", "common", "test", "test_motor_rs_can_id.c")
+        src = os.path.join(ROOT, "firmware", "common", "test", "test_motor_rs_can.c")
         inc = os.path.join(ROOT, "firmware", "common", "include")
-        exe = os.path.join(HERE, "_rsid_bin")
+        exe = os.path.join(HERE, "_rs_can_bin")
         subprocess.check_call([gcc, "-std=c11", "-Wall", "-Wextra", "-Werror",
                                "-I", inc, src, "-o", exe])
         try:
