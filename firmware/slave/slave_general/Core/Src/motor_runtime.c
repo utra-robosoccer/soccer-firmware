@@ -161,7 +161,6 @@ static void can_id_sweep(void)
    enable. Completion is NOT wait-based — the ENABLING→ENABLED edge fires on the
    first feedback showing rs_mode == Run after the enable went out (or times out
    into DRVF_ENABLE_FAILED), so a fast ACK advances early. */
-#define ARM_CLEAR_WAIT_CYCLES  ((uint8_t)((5u  * SLAVE_TICK_HZ + 999u) / 1000u))
 #define ARM_SETTLE_WAIT_CYCLES ((uint8_t)((20u * SLAVE_TICK_HZ + 999u) / 1000u))
 
 /* ── public API ──────────────────────────────────────────────────────────── */
@@ -233,11 +232,9 @@ void motor_runtime_apply_cmd(uint8_t idx, const cmd_motor_t *m, uint16_t cmd_seq
     if (d.clear_fault) r->fault = DRVF_NONE;
     if (d.latch_fault != DRVF_NONE && r->fault == DRVF_NONE) r->fault = d.latch_fault;
     if (d.begin_enable) {
-        /* Always open with the Type-4 Byte0=1 clear: benign on a healthy disabled
-           motor, and some units refuse the enable without it even when their
-           fault reports are clean. (Latched DRIVE faults still go through
-           CLEARING — this is the wire-level belt-and-braces before an enable.) */
-        arm_sm_begin(&r->arm_phase, &r->arm_wait, 1u);
+        /* Handshake: run-mode write, then enable (a faulted motor is cleared via
+           the explicit RESET→CLEARING path before drive_sm accepts the enable). */
+        arm_sm_begin(&r->arm_phase, &r->arm_wait);
         r->have_tuple     = 0u;
         r->enable_sent_ms = 0u;
     }
@@ -385,7 +382,7 @@ void motor_runtime_update(uint32_t now_ms, uint8_t cmd_fresh)
         case DRV_ENABLING:
             if (arm_sm_active(r->arm_phase)) {
                 uint8_t act = arm_sm_step(&r->arm_phase, &r->arm_wait,
-                                          ARM_CLEAR_WAIT_CYCLES, ARM_SETTLE_WAIT_CYCLES);
+                                          ARM_SETTLE_WAIT_CYCLES);
                 if (act == ARM_ACT_SEND_MODE) {
                     rs_change_motor_mode(cid, CAN_MASTER_ID, MIT_MODE);
                 } else if (act == ARM_ACT_SEND_ENABLE) {
