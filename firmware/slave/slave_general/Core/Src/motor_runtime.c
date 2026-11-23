@@ -36,6 +36,22 @@ static void send_mit(uint8_t idx, float torque, float home_pos, float vel,
     cmd_seq_on_mit_frame(&motors_rt[idx].cmd_track, motors_rt[idx].target_cmd_seq);
 }
 
+/* Poll a motor that must stay off (DISABLED / CLEARING / FAULT): a zero-gain
+   zero-torque Type-1 — the only frame every model answers while disabled
+   (bench: RS00s are silent to a plain Type-4) — elicits the Type-2 that feeds
+   the mode/fault/position mirrors. If the mirror shows the motor NOT in Reset
+   (Run or Cali) when it must be off, a Type-4 re-asserts the stop the same
+   cycle; the stop can no longer double as the poll, but the poll still makes a
+   runaway limp (zero gains) while the Type-4 lands. */
+static void off_poll(uint8_t idx)
+{
+    uint8_t cid = motor_user_configs[idx].id.can_id;
+    rs_mit_control_set(cid, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f);
+    if (motors_rt[idx].motor_mode != RS_MODE_RESET) {
+        rs_disable_motor(cid, CAN_MASTER_ID);
+    }
+}
+
 /* Reset the enable monitor: clear the not-Run count, seed the fresh-frame
    reference to the motor's current fb_count. Called on each ENABLED entry. */
 static void enable_monitor_reset(uint8_t idx)
@@ -215,7 +231,7 @@ void motor_runtime_init(void)
         if ((g_sweep.found_mask >> i) & 1u) {
             /* Seed the feedback clock: the sweep reply proved the motor alive,
                but no Type-2 exists yet and DISABLED's first ticks run before
-               the first Type-4 poll is answered — an unseeded last_fb_ms would
+               the first ready poll is answered — an unseeded last_fb_ms would
                read as a 100 ms timeout and drop the motor to terminal ABSENT.
                (can_rx seeds its motors[] copy on the same Type-0, so the
                snapshot mirrored by on_feedback agrees until real Type-2s.) */
@@ -252,12 +268,15 @@ void motor_runtime_apply_cmd(uint8_t idx, const cmd_motor_t *m, uint16_t cmd_seq
 
     /* Enable gate: the boot checks (id sweep + zero_sta) must have passed, and
        THIS motor must be verified ready — DISABLED with a fresh Type-2 from
-       the ready poll showing Reset mode and no fault bits. A rejected enable
-       surfaces as TELE_FLAG_REQUEST_REJECTED; DISABLE/STOP/RESET flow
+       the ready poll showing Reset mode and no fault bits. fb_seen guards the
+       mirrors: motor_mode defaults to 0 == Reset at boot, so without at least
+       one real Type-2 the mode/fault checks would pass vacuously. A rejected
+       enable surfaces as TELE_FLAG_REQUEST_REJECTED; DISABLE/STOP/RESET flow
        normally. */
     uint8_t gate_reject = 0u;
     if (m->drive_req == DRV_REQ_ENABLE) {
         uint8_t verified = (uint8_t)(r->state == DRV_DISABLED &&
+                                     r->fb_seen &&
                                      r->motor_mode == RS_MODE_RESET &&
                                      r->motor_fault == 0u &&
                                      ms_since(now_ms, r->last_fb_ms) <
@@ -343,6 +362,7 @@ void motor_runtime_on_feedback(uint32_t now_ms)
         motors_rt[i].motor_fault = pack_faults(&snap);
         motors_rt[i].fault_word  = snap.fault_word;
         motors_rt[i].last_fb_ms  = snap.last_fb_ms;
+        motors_rt[i].fb_seen     = (uint8_t)(snap.fb_count != 0u);
 
         uint8_t driving = (motors_rt[i].state == DRV_ENABLED ||
                            motors_rt[i].state == DRV_STOPPING);
@@ -498,7 +518,7 @@ void motor_runtime_update(uint32_t now_ms, uint8_t cmd_fresh)
             break;
 
         case DRV_CLEARING:
-            rs_disable_motor(cid, CAN_MASTER_ID);  /* provoke the judging Type-2 */
+            off_poll(i);  /* provoke the judging Type-2 */
             in.clear_reply = (uint8_t)((int32_t)(r->last_fb_ms - r->state_ms) >= 0);
             in.clear_dirty = (uint8_t)(r->motor_fault != 0u ||
                                        r->motor_mode == RS_MODE_CALI);
@@ -507,18 +527,18 @@ void motor_runtime_update(uint32_t now_ms, uint8_t cmd_fresh)
             break;
 
         case DRV_DISABLED:
-            /* Ready-mode poll: the Type-4 both RE-ASSERTS the stop and provokes
-               the Type-2 whose Reset mode / fault bits / position the enable
-               gate verifies. */
-            rs_disable_motor(cid, CAN_MASTER_ID);
+            /* Ready-mode poll: provokes the Type-2 whose Reset mode / fault
+               bits / position the enable gate verifies; off_poll re-asserts
+               the stop whenever that Type-2 shows the motor not in Reset. */
+            off_poll(i);
             in.fb_timeout =
                 (uint8_t)(ms_since(now_ms, r->last_fb_ms) >= (int32_t)MOTOR_CAN_FB_TIMEOUT_MS);
             break;
 
         case DRV_FAULT:
-            /* Same Type-4 poll: keeps telemetry fresh in FAULT and repairs a
-               dropped one-shot disable — the motor is re-stopped every tick. */
-            rs_disable_motor(cid, CAN_MASTER_ID);
+            /* Same poll: keeps telemetry fresh in FAULT and repairs a dropped
+               one-shot disable — a motor seen off-Reset is re-stopped. */
+            off_poll(i);
             break;
 
         case DRV_ABSENT:

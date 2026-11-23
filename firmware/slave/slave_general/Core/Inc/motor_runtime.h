@@ -32,6 +32,8 @@ typedef struct {
     uint8_t            motor_fault;   /* packed Type-2 fault bits (rs_fault_bits) */
     uint32_t           fault_word;    /* telemetry mirror of the latched 0x3022   */
     uint32_t           last_fb_ms;    /* snapshot's last-Type-2 stamp, for fb_age */
+    uint8_t            fb_seen;       /* a real Type-2 arrived since boot (the
+                                         mode/fault mirrors hold defaults until) */
     uint32_t           armed_ms;      /* ENABLED entry — CAN-timeout grace baseline */
     uint32_t           state_ms;      /* entry time of the current transient state
                                          (ENABLING / CLEARING / STOPPING / ABSENT) */
