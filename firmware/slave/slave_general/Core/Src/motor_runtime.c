@@ -212,8 +212,18 @@ void motor_runtime_init(void)
                           g_zero_sta_mask == (uint8_t)((1u << N_MOTORS) - 1u));
     uint32_t now_ms = HAL_GetTick();
     for (uint8_t i = 0; i < N_MOTORS; i++) {
-        enter_state(i, ((g_sweep.found_mask >> i) & 1u) ? DRV_DISABLED
-                                                        : DRV_ABSENT, now_ms);
+        if ((g_sweep.found_mask >> i) & 1u) {
+            /* Seed the feedback clock: the sweep reply proved the motor alive,
+               but no Type-2 exists yet and DISABLED's first ticks run before
+               the first Type-4 poll is answered — an unseeded last_fb_ms would
+               read as a 100 ms timeout and drop the motor to terminal ABSENT.
+               (can_rx seeds its motors[] copy on the same Type-0, so the
+               snapshot mirrored by on_feedback agrees until real Type-2s.) */
+            motors_rt[i].last_fb_ms = now_ms;
+            enter_state(i, DRV_DISABLED, now_ms);
+        } else {
+            enter_state(i, DRV_ABSENT, now_ms);
+        }
     }
 }
 

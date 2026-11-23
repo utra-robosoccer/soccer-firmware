@@ -120,6 +120,12 @@ void can_link_on_frame(uint32_t ext_id, uint8_t data[8])
         rs_id_sweep_mark(sweep_seen, sender_id);
         if (target_motor != NULL) {
             if (rs_decode_get_id(ext_id, data, target_motor)) {
+                /* Proof of life: seed the feedback clock so DISABLED's first
+                   tick (which runs before the first Type-4 poll can be
+                   answered) doesn't see a never-stamped last_fb_ms as a
+                   100 ms timeout and drop a present motor to terminal ABSENT.
+                   The first Type-2 reply takes over within one poll cycle. */
+                target_motor->last_fb_ms = HAL_GetTick();
                 can_rx_flag = 1;
             } else {
                 can_unpack_error_count++;
