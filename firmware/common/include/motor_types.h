@@ -20,7 +20,7 @@ typedef enum {
     POS_PP_MODE     = 1,
     VELOCITY_MODE   = 2,
     CURRENT_MODE    = 3,
-    CSP_MODE        = 4
+    CSP_MODE        = 5   /* datasheet: reg 0x7005 valid values are 0/1/2/3/5 */
 } rs_runmode_t;
 
 /* RobStride high-level operating status (Type-2 feedback mode field). */
