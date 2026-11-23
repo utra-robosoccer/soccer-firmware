@@ -39,17 +39,14 @@ static void send_mit(uint8_t idx, float torque, float home_pos, float vel,
 /* Poll a motor that must stay off (DISABLED / CLEARING / FAULT): a zero-gain
    zero-torque Type-1 — the only frame every model answers while disabled
    (bench: RS00s are silent to a plain Type-4) — elicits the Type-2 that feeds
-   the mode/fault/position mirrors. If the mirror shows the motor NOT in Reset
-   (Run or Cali) when it must be off, a Type-4 re-asserts the stop the same
-   cycle; the stop can no longer double as the poll, but the poll still makes a
-   runaway limp (zero gains) while the Type-4 lands. */
+   the mode/fault/position mirrors. The poll also makes a runaway limp (zero
+   gains); the re-assert-stop Type-4 for a motor seen off-Reset is sent at the
+   HEAD of the burst by motor_runtime_update, never here: queued mid-burst it
+   loses one-shot arbitration to polls/replies at the same phase every tick. */
 static void off_poll(uint8_t idx)
 {
-    uint8_t cid = motor_user_configs[idx].id.can_id;
-    rs_mit_control_set(cid, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f);
-    if (motors_rt[idx].motor_mode != RS_MODE_RESET) {
-        rs_disable_motor(cid, CAN_MASTER_ID);
-    }
+    rs_mit_control_set(motor_user_configs[idx].id.can_id,
+                       0.0f, 0.0f, 0.0f, 0.0f, 0.0f);
 }
 
 /* Reset the enable monitor: clear the not-Run count, seed the fresh-frame
@@ -407,6 +404,20 @@ void motor_runtime_update(uint32_t now_ms, uint8_t cmd_fresh)
         if (motors_rt[i].state == DRV_ENABLING) order[n++] = i;
     for (uint8_t i = 0; i < N_MOTORS; i++)
         if (motors_rt[i].state != DRV_ENABLING) order[n++] = i;
+
+    /* Repair pre-pass, FIRST frames of the burst: a motor that must be off but
+       whose Type-2 shows Run/Cali gets a Type-4 stop here, while the bus is
+       idle. A Type-4 ext-id (0x04…) loses one-shot arbitration to Type-1 polls
+       (0x01…) and Type-2 replies (0x02…), so queued mid-burst the stop was
+       dropped at the same phase every tick — bench: a stuck-Run motor
+       swallowed 200 re-stops/s with none reaching the wire. */
+    for (uint8_t i = 0; i < N_MOTORS; i++) {
+        MotorRuntime *r = &motors_rt[i];
+        if ((r->state == DRV_DISABLED || r->state == DRV_CLEARING ||
+             r->state == DRV_FAULT) && r->motor_mode != RS_MODE_RESET) {
+            rs_disable_motor(motor_user_configs[i].id.can_id, CAN_MASTER_ID);
+        }
+    }
 
     for (uint8_t k = 0; k < N_MOTORS; k++) {
         uint8_t i = order[k];
