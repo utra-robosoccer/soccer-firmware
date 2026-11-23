@@ -191,7 +191,8 @@ static void can_id_sweep(void)
    replied are re-asked, up to 3 rounds: one dropped frame must not
    false-latch the chain. The verdict latches until reboot. */
 static uint8_t g_zero_sta_mask;   /* bit i = motor i replied with zero_sta == 1 */
-static uint8_t g_boot_ok;         /* sweep ok AND zero_sta ok on every motor    */
+static uint8_t g_fw_ver_mask;     /* bit i = motor i's fw version matched tier 1 */
+static uint8_t g_boot_ok;         /* sweep AND zero_sta AND fw version, all motors */
 
 static void zero_sta_check(void)
 {
@@ -216,6 +217,36 @@ static void zero_sta_check(void)
     }
 }
 
+/* Boot fw-version check: every motor's reply to the Type-4 version-read
+   (Byte0=0, Byte1=0xC4 — safe: sent only here, while the motor is in Reset)
+   must echo 00,C4 and match its model's expected bytes in tier 1
+   (motor_rs_configs[].fw_version) EXACTLY. A mismatch — wrong build, wrong
+   model on this id, or a model whose bytes were never recorded — latches the
+   chain blocked, same as zero_sta. One motor at a time with its own reply
+   window (the version reply is comm-type-2 and only the window tells it from
+   feedback), up to 3 attempts; raw replies stay gdb-visible in can_rx. */
+static void fw_version_check(void)
+{
+    uint8_t raw[8];
+    for (uint8_t i = 0; i < N_MOTORS; i++) {
+        for (uint8_t attempt = 0;
+             attempt < 3u && !can_rx_fw_ver(i, raw); attempt++) {
+            can_rx_fw_ver_arm(i);
+            rs_read_fw_version(motor_user_configs[i].id.can_id, CAN_MASTER_ID);
+            HAL_Delay(BOOT_FW_VER_WINDOW_MS);
+        }
+        if (can_rx_fw_ver(i, raw)) {
+            const uint8_t *exp =
+                motor_rs_configs[motor_user_configs[i].id.model].fw_version;
+            if (raw[0] == 0x00u && raw[1] == 0xC4u &&
+                memcmp(&raw[2], exp, RS_FW_VERSION_LEN) == 0) {
+                g_fw_ver_mask |= (uint8_t)(1u << i);
+            }
+        }
+    }
+    can_rx_fw_ver_disarm_all();   /* close every window before polling starts */
+}
+
 /* ENABLING CAN-send pacing (cycles): settle after the run-mode write and after the
    enable. Completion is NOT wait-based — the ENABLING→ENABLED edge fires on the
    first feedback showing rs_mode == Run after the enable went out (or times out
@@ -234,10 +265,13 @@ void motor_runtime_init(void)
     }
     can_id_sweep();
     if (g_sweep.ok) {
-        zero_sta_check();   /* roster wrong → skip; the chain is blocked anyway */
+        zero_sta_check();     /* roster wrong → skip; the chain is blocked anyway */
+        fw_version_check();
     }
+    uint8_t all = (uint8_t)((1u << N_MOTORS) - 1u);
     g_boot_ok = (uint8_t)(g_sweep.ok &&
-                          g_zero_sta_mask == (uint8_t)((1u << N_MOTORS) - 1u));
+                          g_zero_sta_mask == all &&
+                          g_fw_ver_mask == all);
     uint32_t now_ms = HAL_GetTick();
     for (uint8_t i = 0; i < N_MOTORS; i++) {
         if ((g_sweep.found_mask >> i) & 1u) {

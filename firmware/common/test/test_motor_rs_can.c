@@ -46,6 +46,11 @@ static int golden_checks(void)
     if (!frame_is("enable", rs_enable_encode(5, 0xFD), 0x0300FD05u, zeros)) return 0;
     if (!frame_is("disable", rs_disable_encode(5, 0xFD), 0x0400FD05u, zeros)) return 0;
     if (!frame_is("clear_fault", rs_clear_fault_encode(5, 0xFD), 0x0400FD05u, byte0_1)) return 0;
+
+    /* Type-4 version-read variant — the exact frame verified on the bench
+     * (reply payload: 00 C4 then 6 version bytes). */
+    const uint8_t verread[8] = {0x00, 0xC4, 0, 0, 0, 0, 0, 0};
+    if (!frame_is("version_read", rs_version_read_encode(5, 0xFD), 0x0400FD05u, verread)) return 0;
     if (!frame_is("mech_zero", rs_mech_zero_encode(2, 0xFD), 0x0600FD02u, byte0_1)) return 0;
 
     /* Type-17 read of zero_sta (0x7029) — the exact frame verified on the bench. */

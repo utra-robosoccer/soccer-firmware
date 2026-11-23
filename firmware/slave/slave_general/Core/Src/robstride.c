@@ -35,6 +35,11 @@ void rs_clear_fault(uint8_t id, uint16_t master_id)
     rs_send(rs_clear_fault_encode(id, master_id));
 }
 
+void rs_read_fw_version(uint8_t id, uint16_t master_id)
+{
+    rs_send(rs_version_read_encode(id, master_id));
+}
+
 void rs_set_mech_zero(uint8_t id, uint16_t master_id)
 {
     rs_send(rs_mech_zero_encode(id, master_id));

@@ -53,4 +53,13 @@ void can_rx_sweep_snapshot(uint8_t out[32]);
    raw value written to *raw_out. ISR-owned; single-load reads, no masking. */
 uint8_t can_rx_zero_sta(uint8_t idx, uint32_t *raw_out);
 
+/* fw-version boot capture, routed by WINDOW: arm opens motor idx's one-reply
+   window (the next comm-type-2 frame from it is captured as the version reply,
+   not decoded as feedback), can_rx_fw_ver returns 1 once captured and copies
+   the raw 8-byte payload (00,C4 echo + version bytes). disarm_all MUST run
+   when the boot check ends, before normal polling starts. */
+void can_rx_fw_ver_arm(uint8_t idx);
+void can_rx_fw_ver_disarm_all(void);
+uint8_t can_rx_fw_ver(uint8_t idx, uint8_t out[8]);
+
 #endif /* CAN_RX_H */

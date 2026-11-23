@@ -45,6 +45,9 @@
                                           reboot) */
 #define BOOT_ZERO_STA_WINDOW_MS  100u  /* Type-17 reply collection per round of
                                           the boot zero_sta check (≤3 rounds) */
+#define BOOT_FW_VER_WINDOW_MS      5u  /* reply window per fw-version read
+                                          attempt (≤3 per motor; replies land
+                                          well under 1 ms on a quiet bus) */
 
 /* Enable-monitor dwell in slave ticks (rounded). */
 #define MOTOR_ENABLE_MON_K \

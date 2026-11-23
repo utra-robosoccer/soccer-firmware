@@ -19,6 +19,18 @@ static uint8_t sweep_seen[32];
 static volatile uint32_t zero_sta_raw[MAX_MOTOR_COUNT];
 static volatile uint8_t  zero_sta_seen;
 
+/* fw-version boot-check capture. The version reply is a comm-type-2 frame that
+   is NOT feedback (payload: 00,C4 echo + version bytes), and its content can't
+   be told apart from feedback reliably (byte 0 of real feedback is the
+   position high byte; 0x56 is a valid position). Routing is therefore by
+   WINDOW: motor_runtime arms a motor's expect bit, sends it the version read
+   and nothing else, so the next comm-type-2 frame from that motor IS the
+   version reply. Captured raw here (gdb-visible), judged in motor_runtime,
+   and the expect bits are cleared before normal polling starts. */
+static volatile uint8_t fw_ver_expect;
+static volatile uint8_t fw_ver_seen;
+static volatile uint8_t fw_ver_raw[MAX_MOTOR_COUNT][8];
+
 // Protocol-level RX diagnostics (updated from can_link_on_frame, ISR context).
 volatile uint8_t can_rx_flag = 0;
 volatile uint32_t can_feedback_count = 0;
@@ -91,6 +103,34 @@ uint8_t can_rx_zero_sta(uint8_t idx, uint32_t *raw_out)
     return 1u;
 }
 
+// fw-version boot capture (see the fw_ver_* comment above). arm opens motor
+// idx's one-reply window; disarm_all closes every window — MUST be called when
+// the boot check ends, or the first real Type-2 would be swallowed as a
+// version reply. can_rx_fw_ver returns 1 once captured and copies the 8 raw
+// payload bytes (value stored before the seen bit, same rule as zero_sta).
+void can_rx_fw_ver_arm(uint8_t idx)
+{
+    if (idx < MAX_MOTOR_COUNT) {
+        fw_ver_expect |= (uint8_t)(1u << idx);
+    }
+}
+
+void can_rx_fw_ver_disarm_all(void)
+{
+    fw_ver_expect = 0u;
+}
+
+uint8_t can_rx_fw_ver(uint8_t idx, uint8_t out[8])
+{
+    if (idx >= MAX_MOTOR_COUNT || !(fw_ver_seen & (uint8_t)(1u << idx))) {
+        return 0u;
+    }
+    for (uint8_t b = 0; b < 8u; b++) {
+        out[b] = fw_ver_raw[idx][b];
+    }
+    return 1u;
+}
+
 // Bind CAN ids before the bus starts so the RX ISR's lookup can match feedback.
 void can_rx_bind_ids(void)
 {
@@ -142,7 +182,21 @@ void can_link_on_frame(uint32_t ext_id, uint8_t data[8])
     {
         switch (comm_type)
         {
-            case 2: // Motor Feedback
+            case 2: // Motor Feedback — or a version reply, routed by window
+            {
+                uint8_t slot = (uint8_t)(target_motor - motors);
+                if (fw_ver_expect & (uint8_t)(1u << slot)) {
+                    /* This motor has an outstanding version read and was sent
+                       nothing else, so this comm-type-2 frame is its version
+                       reply, not feedback. Raw bytes first, then the bits. */
+                    for (uint8_t b = 0; b < 8u; b++) {
+                        fw_ver_raw[slot][b] = data[b];
+                    }
+                    fw_ver_seen   |= (uint8_t)(1u << slot);
+                    fw_ver_expect &= (uint8_t)~(1u << slot);
+                    can_rx_flag = 1;
+                    break;
+                }
                 can_type2_count++;
                 if (rs_decode_feedback(ext_id, data,
                                        motor_rs_config_by_id(sender_id), target_motor)) {
@@ -155,6 +209,7 @@ void can_link_on_frame(uint32_t ext_id, uint8_t data[8])
                     can_unpack_error_count++;
                 }
                 break;
+            }
 
             case 17: // Single Parameter Read reply
             {

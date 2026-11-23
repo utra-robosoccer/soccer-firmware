@@ -145,6 +145,18 @@ static inline RsFrame rs_clear_fault_encode(uint8_t id, uint16_t master_id)
     return f;
 }
 
+/* Type 4 variant: firmware-version read — stop frame with Byte0=0x00,
+ * Byte1=0xC4. The reply is a comm-type-2 frame whose payload echoes 00,C4 and
+ * carries RS_FW_VERSION_LEN version bytes after it (NOT feedback — route it by
+ * the outstanding-read window, see can_rx). Sent only while the motor is in
+ * Reset (it is still a Type-4 stop). */
+static inline RsFrame rs_version_read_encode(uint8_t id, uint16_t master_id)
+{
+    RsFrame f = { rs_extid_pack(4, master_id, id), {0} };
+    f.data[1] = 0xC4;
+    return f;
+}
+
 /* Type 6: Set mechanical zero. */
 static inline RsFrame rs_mech_zero_encode(uint8_t id, uint16_t master_id)
 {

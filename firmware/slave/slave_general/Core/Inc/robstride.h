@@ -25,6 +25,7 @@ void rs_enable_motor(uint8_t id, uint16_t master_id);
 // Comm Type 4
 void rs_disable_motor(uint8_t id, uint16_t master_id);
 void rs_clear_fault(uint8_t id, uint16_t master_id);  // Type-4, Byte0=1
+void rs_read_fw_version(uint8_t id, uint16_t master_id);  // Type-4, Byte1=0xC4
 
 // Comm Type 6
 void rs_set_mech_zero(uint8_t id, uint16_t master_id);
