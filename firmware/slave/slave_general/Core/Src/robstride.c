@@ -20,11 +20,6 @@ void rs_mit_control_set(uint8_t id, float torque, float MechPosition, float spee
                           torque, MechPosition, speed, kp, kd));
 }
 
-void rs_read_motor_state(uint8_t id)
-{
-    rs_mit_control_set(id, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f);
-}
-
 void rs_enable_motor(uint8_t id, uint16_t master_id)
 {
     rs_send(rs_enable_encode(id, master_id));

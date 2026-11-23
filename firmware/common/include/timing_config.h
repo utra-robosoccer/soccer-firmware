@@ -41,6 +41,8 @@
 #define CAN_ID_SWEEP_WINDOW_MS   300u  /* Type-0 reply collection after the boot
                                           id-sweep blast (sweep runs once; the
                                           verdict latches until reboot) */
+#define BOOT_ZERO_STA_WINDOW_MS  100u  /* Type-17 reply collection per round of
+                                          the boot zero_sta check (≤3 rounds) */
 
 /* Enable-monitor dwell in slave ticks (rounded). */
 #define MOTOR_ENABLE_MON_K \

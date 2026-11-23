@@ -85,7 +85,10 @@ void motor_runtime_sample(tele_motor_t *out, uint8_t idx);
 uint8_t motor_runtime_motors_alive(void);
 
 /* Boot CAN-id-sweep verdict, latched until reboot (gdb/debug visibility).
-   ok == 0 blocks every ENABLE chain-wide (TELE_FLAG_REQUEST_REJECTED). */
+   The full boot gate is this verdict AND the zero_sta check (g_zero_sta_mask /
+   g_boot_ok statics in motor_runtime.c): either failing blocks every ENABLE
+   chain-wide (TELE_FLAG_REQUEST_REJECTED) until the bus/params are fixed and
+   the slave is power-cycled. */
 const RsIdSweepResult *motor_runtime_sweep_result(void);
 
 #endif /* MOTOR_RUNTIME_H */

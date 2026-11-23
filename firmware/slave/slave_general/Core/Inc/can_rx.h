@@ -49,4 +49,8 @@ void can_rx_bind_ids(void);
    probe; ISR-owned). The boot sweep reads it once after its reply window. */
 void can_rx_sweep_snapshot(uint8_t out[32]);
 
+/* zero_sta (0x7029) boot capture: 1 once motor idx's Type-17 reply arrived,
+   raw value written to *raw_out. ISR-owned; single-load reads, no masking. */
+uint8_t can_rx_zero_sta(uint8_t idx, uint32_t *raw_out);
+
 #endif /* CAN_RX_H */

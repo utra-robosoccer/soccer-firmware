@@ -18,7 +18,6 @@ void rs_get_motor_id(uint8_t id, uint16_t master_id);
 
 // Comm Type 1
 void rs_mit_control_set(uint8_t id, float torque, float MechPosition, float speed, float kp, float kd);
-void rs_read_motor_state(uint8_t id);
 
 // Comm Type 3
 void rs_enable_motor(uint8_t id, uint16_t master_id);

@@ -157,6 +157,37 @@ static void can_id_sweep(void)
     g_sweep = rs_id_sweep_check(seen, cfg_ids, N_MOTORS);
 }
 
+/* Boot zero_sta check: every motor must report zero_sta (0x7029) == 1 — the
+   power-on-position-in-[-pi,pi] convention, written once via the host tools —
+   before the chain may arm. CAN TX is one-shot, so motors that have not
+   replied are re-asked, up to 3 rounds: one dropped frame must not
+   false-latch the chain. The verdict latches until reboot. */
+static uint8_t g_zero_sta_mask;   /* bit i = motor i replied with zero_sta == 1 */
+static uint8_t g_boot_ok;         /* sweep ok AND zero_sta ok on every motor    */
+
+static void zero_sta_check(void)
+{
+    uint32_t raw;
+    for (uint8_t round = 0; round < 3u; round++) {
+        uint8_t sent = 0u;
+        for (uint8_t i = 0; i < N_MOTORS; i++) {
+            if (!can_rx_zero_sta(i, &raw)) {
+                rs_read_single_param(motor_user_configs[i].id.can_id,
+                                     CAN_MASTER_ID, 0x7029u);
+                sent = 1u;
+            }
+        }
+        if (!sent) break;
+        HAL_Delay(BOOT_ZERO_STA_WINDOW_MS);
+    }
+    g_zero_sta_mask = 0u;
+    for (uint8_t i = 0; i < N_MOTORS; i++) {
+        if (can_rx_zero_sta(i, &raw) && raw == 1u) {
+            g_zero_sta_mask |= (uint8_t)(1u << i);
+        }
+    }
+}
+
 /* ENABLING CAN-send pacing (cycles): settle after the run-mode write and after the
    enable. Completion is NOT wait-based — the ENABLING→ENABLED edge fires on the
    first feedback showing rs_mode == Run after the enable went out (or times out
@@ -174,6 +205,11 @@ void motor_runtime_init(void)
         motors_rt[i].fault = DRVF_NONE;
     }
     can_id_sweep();
+    if (g_sweep.ok) {
+        zero_sta_check();   /* roster wrong → skip; the chain is blocked anyway */
+    }
+    g_boot_ok = (uint8_t)(g_sweep.ok &&
+                          g_zero_sta_mask == (uint8_t)((1u << N_MOTORS) - 1u));
     uint32_t now_ms = HAL_GetTick();
     for (uint8_t i = 0; i < N_MOTORS; i++) {
         enter_state(i, ((g_sweep.found_mask >> i) & 1u) ? DRV_DISABLED
@@ -204,12 +240,23 @@ void motor_runtime_apply_cmd(uint8_t idx, const cmd_motor_t *m, uint16_t cmd_seq
         wound = (off > MOTOR_WOUND_OFFSET_MAX || off < -MOTOR_WOUND_OFFSET_MAX) ? 1u : 0u;
     }
 
-    /* Bus gate: the boot id sweep must have matched the configured roster
-       exactly before anything arms. A blocked chain rejects every ENABLE
-       (surfaced as TELE_FLAG_REQUEST_REJECTED); DISABLE/STOP/RESET flow
+    /* Enable gate: the boot checks (id sweep + zero_sta) must have passed, and
+       THIS motor must be verified ready — DISABLED with a fresh Type-2 from
+       the ready poll showing Reset mode and no fault bits. A rejected enable
+       surfaces as TELE_FLAG_REQUEST_REJECTED; DISABLE/STOP/RESET flow
        normally. */
+    uint8_t gate_reject = 0u;
+    if (m->drive_req == DRV_REQ_ENABLE) {
+        uint8_t verified = (uint8_t)(r->state == DRV_DISABLED &&
+                                     r->motor_mode == RS_MODE_RESET &&
+                                     r->motor_fault == 0u &&
+                                     ms_since(now_ms, r->last_fb_ms) <
+                                         (int32_t)MOTOR_CAN_FB_TIMEOUT_MS);
+        gate_reject = (uint8_t)(!g_boot_ok ||
+                                (r->state == DRV_DISABLED && !verified));
+    }
     DriveReqDecision d;
-    if (m->drive_req == DRV_REQ_ENABLE && !g_sweep.ok) {
+    if (gate_reject) {
         memset(&d, 0, sizeof d);
         d.rejected   = 1u;
         d.next_state = r->state;
@@ -441,7 +488,7 @@ void motor_runtime_update(uint32_t now_ms, uint8_t cmd_fresh)
             break;
 
         case DRV_CLEARING:
-            rs_read_motor_state(cid);       /* provoke the judging Type-2 */
+            rs_disable_motor(cid, CAN_MASTER_ID);  /* provoke the judging Type-2 */
             in.clear_reply = (uint8_t)((int32_t)(r->last_fb_ms - r->state_ms) >= 0);
             in.clear_dirty = (uint8_t)(r->motor_fault != 0u ||
                                        r->motor_mode == RS_MODE_CALI);
@@ -450,9 +497,18 @@ void motor_runtime_update(uint32_t now_ms, uint8_t cmd_fresh)
             break;
 
         case DRV_DISABLED:
-            rs_read_motor_state(cid);       /* keep presence + mirrors fresh */
+            /* Ready-mode poll: the Type-4 both RE-ASSERTS the stop and provokes
+               the Type-2 whose Reset mode / fault bits / position the enable
+               gate verifies. */
+            rs_disable_motor(cid, CAN_MASTER_ID);
             in.fb_timeout =
                 (uint8_t)(ms_since(now_ms, r->last_fb_ms) >= (int32_t)MOTOR_CAN_FB_TIMEOUT_MS);
+            break;
+
+        case DRV_FAULT:
+            /* Same Type-4 poll: keeps telemetry fresh in FAULT and repairs a
+               dropped one-shot disable — the motor is re-stopped every tick. */
+            rs_disable_motor(cid, CAN_MASTER_ID);
             break;
 
         case DRV_ABSENT:
@@ -460,7 +516,7 @@ void motor_runtime_update(uint32_t now_ms, uint8_t cmd_fresh)
                re-ping — fix the bus and power-cycle. */
             break;
 
-        default:   /* DRV_BOOT / DRV_DISCOVERING / DRV_FAULT: nothing to service */
+        default:   /* DRV_BOOT / DRV_DISCOVERING: nothing to service */
             break;
         }
 
