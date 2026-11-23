@@ -38,9 +38,11 @@
 #define MOTOR_ENABLE_MON_MS       15u  /* not-Run dwell while enabled → DRVF_NOT_ENABLED */
 #define MOTOR_ENABLE_TIMEOUT_MS  100u  /* ENABLING without rs_mode==Run → DRVF_ENABLE_FAILED */
 #define MOTOR_CLEAR_TIMEOUT_MS   100u  /* CLEARING without a fresh reply → ABSENT */
-#define CAN_ID_SWEEP_WINDOW_MS   300u  /* Type-0 reply collection after the boot
-                                          id-sweep blast (sweep runs once; the
-                                          verdict latches until reboot) */
+#define CAN_ID_SWEEP_PROBE_GAP_MS  2u  /* reply window after each boot id-sweep
+                                          Type-0 probe (replies land ~0.85 ms;
+                                          an unpaced blast loses probes on some
+                                          units — the verdict latches until
+                                          reboot) */
 #define BOOT_ZERO_STA_WINDOW_MS  100u  /* Type-17 reply collection per round of
                                           the boot zero_sta check (≤3 rounds) */
 

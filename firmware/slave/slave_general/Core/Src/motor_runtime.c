@@ -148,29 +148,44 @@ static void fault_detected(uint8_t idx, uint8_t fault, uint32_t now_ms)
 }
 
 /* ── boot CAN-id sweep ───────────────────────────────────────────────────────
-   Probe every possible id with a Type-0 get-id, collect replies for one fixed
-   window (the RX ISR marks them in can_rx's bitmap), then judge the bus
-   against the configured roster. The verdict latches until reboot: a missing
-   motor or an extra id answering blocks arming chain-wide — fix the bus,
-   power-cycle. No re-ping, no re-sweep. */
+   Probe every possible id with a Type-0 get-id — ONE AT A TIME. An unpaced
+   blast saturates the bus and some units drop their probe under that load
+   (bench: RS00 ids 3,4 never answered the burst but always answer a paced
+   probe; replies land ~0.85 ms after the probe). The RX ISR marks replies in
+   can_rx's bitmap; the bus is then judged against the configured roster.
+   Configured ids still missing are probed ONCE more before latching — CAN TX
+   is one-shot, and a single lost frame must not latch the reboot-only block.
+   The verdict latches until reboot: a missing motor or an extra id answering
+   blocks arming chain-wide — fix the bus, power-cycle. */
 static RsIdSweepResult g_sweep;
 
 static void can_id_sweep(void)
 {
-    /* 0 is not a valid motor id; 0xFD is the master; 0xFE/0xFF stay reserved.
-       can_link_tx's bounded mailbox wait self-paces the blast. */
-    for (uint16_t id = 1u; id <= 0xFCu; id++) {
-        rs_get_motor_id((uint8_t)id, CAN_MASTER_ID);
-    }
-    HAL_Delay(CAN_ID_SWEEP_WINDOW_MS);
-
     uint8_t seen[32];
-    can_rx_sweep_snapshot(seen);
     uint8_t cfg_ids[N_MOTORS];
     for (uint8_t i = 0; i < N_MOTORS; i++) {
         cfg_ids[i] = motor_user_configs[i].id.can_id;
     }
+
+    /* 0 is not a valid motor id; 0xFD is the master; 0xFE/0xFF stay reserved. */
+    for (uint16_t id = 1u; id <= 0xFCu; id++) {
+        rs_get_motor_id((uint8_t)id, CAN_MASTER_ID);
+        HAL_Delay(CAN_ID_SWEEP_PROBE_GAP_MS);
+    }
+    can_rx_sweep_snapshot(seen);
     g_sweep = rs_id_sweep_check(seen, cfg_ids, N_MOTORS);
+
+    uint8_t all = (uint8_t)((1u << N_MOTORS) - 1u);
+    if (g_sweep.found_mask != all) {
+        for (uint8_t i = 0; i < N_MOTORS; i++) {
+            if (!((g_sweep.found_mask >> i) & 1u)) {
+                rs_get_motor_id(cfg_ids[i], CAN_MASTER_ID);
+                HAL_Delay(CAN_ID_SWEEP_PROBE_GAP_MS);
+            }
+        }
+        can_rx_sweep_snapshot(seen);
+        g_sweep = rs_id_sweep_check(seen, cfg_ids, N_MOTORS);
+    }
 }
 
 /* Boot zero_sta check: every motor must report zero_sta (0x7029) == 1 — the
