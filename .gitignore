@@ -43,3 +43,6 @@ configs/active
 firmware/common/include/motor_config.h
 firmware/common/include/system_config.h
 host/master_link/motor_config_gen.py
+
+# Personal, never-committed space for each contributor (notes, lessons, scratch).
+.local/

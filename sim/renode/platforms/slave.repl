@@ -1,0 +1,74 @@
+// Slave STM32F446 (one per motor chain) as this firmware configures it: Renode's stock STM32F4 platform with the clocks
+// corrected. Loaded by robot.resc (LoadPlatformDescription).
+//
+// Why the overrides: the stock stm32f4.repl clocks every timer at 10 MHz and SysTick at 72 MHz.
+// SystemClock_Config() in firmware/slave/slave_general/Core/Src/main.c sets SYSCLK = HSE 8 MHz / M 4 * N 84 / P 2
+// = 84 MHz, APB1 = SYSCLK/2 (timer kernel x2 = 84 MHz) and APB2 = SYSCLK/1, so every timer and
+// SysTick run at 84 MHz. Without this the 5 ms TIM2/TIM3 periods and HAL_GetTick() run at the
+// wrong rate. (An entry that repeats an existing name with no type updates that peripheral.)
+
+using "platforms/cpus/stm32f4.repl"
+
+cpu:
+    // Renode retires a fixed number of instructions per virtual second; the default is 100 MIPS.
+    // A Cortex-M4 at 84 MHz retires at most ~84 MIPS, so this is the closer figure, and fewer
+    // instructions per virtual second also make the emulation faster. Timing still comes from
+    // the timers, never from instruction counts.
+    PerformanceInMips: 84
+
+nvic:
+    systickFrequency: 84000000
+
+// The UART model assumes an 8 MHz clock for BRR; UART4 (debug) sits on APB1 = 42 MHz.
+uart4:
+    frequency: 42000000
+
+timer1:
+    frequency: 84000000
+
+timer2:
+    frequency: 84000000
+
+timer3:
+    frequency: 84000000
+
+timer4:
+    frequency: 84000000
+
+timer5:
+    frequency: 84000000
+
+timer6:
+    frequency: 84000000
+
+timer7:
+    frequency: 84000000
+
+timer8:
+    frequency: 84000000
+
+timer9:
+    frequency: 84000000
+
+timer10:
+    frequency: 84000000
+
+timer11:
+    frequency: 84000000
+
+timer12:
+    frequency: 84000000
+
+timer13:
+    frequency: 84000000
+
+timer14:
+    frequency: 84000000
+
+// The slave reads DWT->CYCCNT as its microsecond timebase (main-loop service gating); the stock
+// platform has no DWT. This is peripherals/CortexMDwt.cs, which derives CYCCNT from virtual time.
+// Renode 1.17 does ship a Miscellaneous.DWT, but with it this firmware ran ~6x slower (measured:
+// 6.3 s vs 1.1 s of wall time per 250 ms of virtual time), because the slave's main loop reads
+// CYCCNT millions of times per virtual second.
+dwt: Miscellaneous.CortexMDwt @ sysbus 0xE0001000
+    frequency: 84000000
