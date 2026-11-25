@@ -1,0 +1,80 @@
+// Master STM32F446 as this firmware configures it: Renode's stock STM32F4 platform with the clocks
+// corrected. Loaded by robot.resc (LoadPlatformDescription).
+//
+// Why the overrides: the stock stm32f4.repl clocks every timer at 10 MHz and SysTick at 72 MHz.
+// SystemClock_Config() in firmware/master/Core/Src/main.c sets SYSCLK = HSE 8 MHz / M 4 * N 72 / P 2
+// = 72 MHz, APB1 = SYSCLK/2 (timer kernel x2 = 72 MHz) and APB2 = SYSCLK/1, so every timer and
+// SysTick run at 72 MHz. Without this the 5 ms TIM2/TIM3 periods and HAL_GetTick() run at the
+// wrong rate. (An entry that repeats an existing name with no type updates that peripheral.)
+
+using "platforms/cpus/stm32f4.repl"
+
+cpu:
+    // Renode retires a fixed number of instructions per virtual second; the default is 100 MIPS.
+    // A Cortex-M4 at 72 MHz retires at most ~72 MIPS, so this is the closer figure, and fewer
+    // instructions per virtual second also make the emulation faster. Timing still comes from
+    // the timers, never from instruction counts.
+    PerformanceInMips: 72
+
+nvic:
+    systickFrequency: 72000000
+
+// USART2 carries the host link, which is USB CDC on the robot (shim/master_host_uart.c). frequency 0
+// turns off the UART model's baud-rate pacing, so a host frame lands at once, as a USB packet does.
+// Two measured reasons not to pace:
+//  * the model derives baud from BRR assuming an 8 MHz clock: 500 kbaud here, so a 270-byte command
+//    took 5.4 ms, longer than a 5 ms host period, and commands queued up;
+//  * Renode 1.17's paced receiver (STM32_UART.cs, added 2026-08) fills its RX queue from a clock
+//    entry that can run on the time-source thread while the CPU thread reads USART_DR, and the queue
+//    is unsynchronised. In ~1 of 6 ten-second runs at a 200 Hz host rate it corrupted, and the master
+//    read 0x00 for every host byte from then on.
+// Unpaced, received bytes are queued only from time-domain events (robot.resc / HostLink.cs). The
+// model then warns "Unknown baud rate" once per byte; robot.resc sets usart2's log level to Error.
+usart2:
+    frequency: 0
+
+// UART4 (debug output, TX only) on APB1 = 36 MHz.
+uart4:
+    frequency: 36000000
+
+timer1:
+    frequency: 72000000
+
+timer2:
+    frequency: 72000000
+
+timer3:
+    frequency: 72000000
+
+timer4:
+    frequency: 72000000
+
+timer5:
+    frequency: 72000000
+
+timer6:
+    frequency: 72000000
+
+timer7:
+    frequency: 72000000
+
+timer8:
+    frequency: 72000000
+
+timer9:
+    frequency: 72000000
+
+timer10:
+    frequency: 72000000
+
+timer11:
+    frequency: 72000000
+
+timer12:
+    frequency: 72000000
+
+timer13:
+    frequency: 72000000
+
+timer14:
+    frequency: 72000000
