@@ -130,6 +130,11 @@ RS_CONFIG = {
 }
 RS_P_MIN, RS_P_MAX = -12.57, 12.57
 
+# Enable-gate position margin (rad): an ENABLE is accepted only with the shaft
+# inside [p_min - margin, p_max + margin]. Per-slave override via an optional
+# top-level `ready_margin_rad` next to `motors` in firmware_config.yaml.
+READY_MARGIN_RAD_DEFAULT = 0.2
+
 # ── Schema v2 per-motor shape ─────────────────────────────────────────────────
 # identity: {can_id, model, joint_name}        — three names for one physical motor
 # user:     {p_min, p_max, v_max, t_max,       — tier 2: our operating envelope,
@@ -178,6 +183,7 @@ def _norm_motor(m, where):
 def gen_header(cfg, banner_src, banner_regen):
     motors = cfg["motors"]
     n = len(motors)
+    margin = _f(cfg.get("ready_margin_rad", READY_MARGIN_RAD_DEFAULT))
 
     cfg_entries = []
     for m in motors:
@@ -212,6 +218,11 @@ extern "C" {{
 #endif
 
 #define N_MOTORS {n}u
+
+/* Enable-gate position margin (rad): an ENABLE is accepted only with the shaft
+ * inside [p_min - margin, p_max + margin]; outside it is rejected (no fault,
+ * motor stays DISABLED). Optional per-slave yaml key: ready_margin_rad. */
+#define MOTOR_READY_POS_MARGIN_RAD {margin}
 
 /* ── Motor-config tiers ───────────────────────────────────────────────────────
  * 1. RS (vendor) limits — motor_rs_config.h (included above): fixed per-MODEL
@@ -471,7 +482,11 @@ def _fw_cfg(doc, section):
     slave = section.get("slave")
     motors = [_norm_motor(m, f"{slave} motor #{i}")
               for i, m in enumerate(section["motors"])]
-    return {"slave": slave, "motors": motors}
+    margin = section.get("ready_margin_rad", READY_MARGIN_RAD_DEFAULT)
+    if not isinstance(margin, (int, float)) or margin < 0:
+        sys.exit(f"{slave}: ready_margin_rad must be a non-negative number "
+                 f"(got {margin!r})")
+    return {"slave": slave, "motors": motors, "ready_margin_rad": float(margin)}
 
 
 def _fw_section(doc, slave_name):

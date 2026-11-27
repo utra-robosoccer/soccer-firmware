@@ -104,13 +104,13 @@ def main(argv=None):
                  "— is the master up, the slave powered, and the motors on the CAN bus?")
     print("telemetry live")
 
-    # Verify the master's actual cycle rate matches the generated config BEFORE stepping:
-    # N is derived from MASTER_POLL_HZ, and a wrong N would drive the policy at a rate it
-    # wasn't tuned for. MasterStatus arrives at ~20 Hz, so it's here within ~50 ms.
+    # Verify the wire contract BEFORE stepping. MasterStatus carries the schema
+    # hash (old wire only; dies at the protocol_wire.h swap) at ~20 Hz, so it's
+    # here within ~50 ms.
     mstat = link.wait_master_status(timeout=0.5)
     if mstat is None:
         link.log_event("error:no_master_status"); link.close()
-        sys.exit("no MasterStatus within 0.5 s — cannot verify the master cycle rate "
+        sys.exit("no MasterStatus within 0.5 s — cannot verify the wire schema "
                  "(is the master firmware up to date?).")
     live_hash = mstat.get("schema_hash", 0)
     if live_hash != P.SCHEMA_HASH:
@@ -119,13 +119,22 @@ def main(argv=None):
                  f"master reports 0x{live_hash:08X}. Host and firmware were generated from "
                  f"different protocol.yaml revisions — reflash the boards or update the "
                  f"host checkout; refusing to run on a mismatched wire contract.")
-    live_hz = mstat.get("master_poll_hz", 0)
-    if live_hz != mc.MASTER_POLL_HZ:
+
+    # Verify the master's ACTUAL cycle rate matches the generated config BEFORE
+    # stepping: N is derived from MASTER_POLL_HZ, and a wrong N would drive the
+    # policy at a rate it wasn't tuned for. The rate is MEASURED from telemetry
+    # time deltas (master_time_us over cycle_id), not read from a wire constant.
+    live_hz = link.measure_cycle_hz()
+    if live_hz is None:
+        link.log_event("error:rate_unmeasurable"); link.close()
+        sys.exit("could not measure the master cycle rate from telemetry "
+                 "(stalled before enough cycles) — refusing to run.")
+    if abs(live_hz - mc.MASTER_POLL_HZ) > 0.02 * mc.MASTER_POLL_HZ:
         link.log_event("error:rate_mismatch"); link.close()
         sys.exit(f"master cycle-rate mismatch: generated config MASTER_POLL_HZ="
-                 f"{mc.MASTER_POLL_HZ} Hz, but the master reports {live_hz} Hz. Regenerate "
-                 f"the host config or reflash the master; refusing to run so the policy is "
-                 f"not driven at the wrong rate.")
+                 f"{mc.MASTER_POLL_HZ} Hz, but telemetry measures {live_hz:g} Hz. "
+                 f"Regenerate the host config or reflash the master; refusing to run so "
+                 f"the policy is not driven at the wrong rate.")
 
     N = max(1, round(mc.MASTER_POLL_HZ / args.rate))
     cycle_us = 1e6 / mc.MASTER_POLL_HZ

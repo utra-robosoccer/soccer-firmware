@@ -15,23 +15,37 @@ from master_link.link import (  # noqa: F401
     MotorCommand, LinkState,
     REQ_DISABLE, REQ_ENABLE, REQ_STOP, REQ_RESET,
 )
+from master_link import motor_config_gen as _mc
 
 # v9 activation window defaults (seconds into the arm window).
 ARM_DISABLE_S = 0.15   # DISABLE: known-off baseline (no-op when already DISABLED)
 ARM_RESET_S   = 0.30   # RESET: clear any latched fault (no-op when clean)
 
+# Per-motor default gains from the generated config, keyed (slave, local). The
+# host sends gains EXPLICITLY in every tuple (the USE_CONFIG_GAINS wire flag is
+# on its way out with the protocol revamp).
+_DEFAULT_GAINS = {(m["slave"], m["idx"]): (m["default_kp"], m["default_kd"])
+                  for m in _mc.MOTORS}
+
+
+def default_gains(slave, local):
+    """(kp, kd) for one motor from the generated config."""
+    return _DEFAULT_GAINS[(slave, local)]
+
 
 def arm_command(slave, local, el, pos):
     """One motor's command during the activation window (protocol v9 reference
     flow): DISABLE → RESET → ENABLE while streaming a hold tuple at `pos` with
-    config gains. Streaming the tuple through ENABLING closes the limp window —
-    the slave latches it and applies it on the ENABLING→ENABLED edge."""
+    the config-default gains sent explicitly. Streaming the tuple through
+    ENABLING closes the limp window — the slave latches it and applies it on
+    the ENABLING→ENABLED edge."""
     if el < ARM_DISABLE_S:
         return MotorCommand(slave, local, req=REQ_DISABLE)
     if el < ARM_RESET_S:
         return MotorCommand(slave, local, req=REQ_RESET)
+    kp, kd = default_gains(slave, local)
     return MotorCommand(slave, local, req=REQ_ENABLE, valid=True, pos=pos,
-                        use_config_gains=True)
+                        kp=kp, kd=kd, use_config_gains=False)
 
 
 @dataclass

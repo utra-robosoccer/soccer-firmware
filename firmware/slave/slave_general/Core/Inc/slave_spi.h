@@ -31,6 +31,7 @@ extern volatile uint8_t data_tx_ready_flag;
 extern volatile uint8_t spi_error_flag;
 extern volatile uint8_t spi_resyncs;      // DMA realigns (wraps; host takes deltas)
 extern volatile uint32_t spi_tx_arm_fails; // HAL TX-arm failures (then retried; wraps)
+extern volatile uint32_t spi_last_exchange_us; // µs stamp of the last TxRxCplt (us_clock)
 
 void spi_dma_init(SPI_HandleTypeDef *hspi);
 void spi_write_next_tx_buf(const uint8_t* src_frame, uint8_t* dst);

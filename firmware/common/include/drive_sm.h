@@ -6,9 +6,9 @@
  * but completion is judged here (rs_mode == Run seen / timeout), not by fixed waits.
  *
  * Three entry points, all pure (state in, decision out — the caller owns storage):
- *   drive_sm_on_request(state, req, wound, fault_latched)  host request this cycle
- *   drive_sm_on_fault(state, fault_latched)                a fault was DETECTED
- *   drive_sm_on_tick(state, inputs)                        per-cycle progression
+ *   drive_sm_on_request(state, req, fault_latched)  host request this cycle
+ *   drive_sm_on_fault(state, fault_latched)         a fault was DETECTED
+ *   drive_sm_on_tick(state, inputs)                 per-cycle progression
  *
  * Latching discipline (spec §2): drive_fault latches at DETECTION, first fault wins —
  * the caller latches when a decision sets `latch_fault`, and passes fault_latched =
@@ -72,15 +72,20 @@ typedef struct {
                                tuple this cycle, else start the limp zero-poll   */
 } DriveTickDecision;
 
-static inline uint8_t drive_sm_comms_broken(uint8_t fault)
+/* Faults that react with an IMMEDIATE stop (Type-4 now, straight to FAULT; the
+ * runtime's head-of-burst repair rule keeps re-sending the stop until the
+ * motor reports Reset). Comms-broken faults have nothing to ramp against, and
+ * OVERTORQUE must cut effort NOW, not damp through it (protocol revamp: the
+ * only ramped fault left is MASTER_LOST). */
+static inline uint8_t drive_sm_fault_immediate(uint8_t fault)
 {
     return (uint8_t)(fault == DRVF_CAN_TIMEOUT || fault == DRVF_NOT_ENABLED ||
-                     fault == DRVF_MOTOR_REPORTED || fault == DRVF_ENABLE_FAILED);
+                     fault == DRVF_MOTOR_REPORTED || fault == DRVF_ENABLE_FAILED ||
+                     fault == DRVF_OVERTORQUE);
 }
 
 /* ── host request (level-triggered; see matrix in docs/protocol_v9.md §3) ──── */
 static inline DriveReqDecision drive_sm_on_request(uint8_t state, uint8_t req,
-                                                   uint8_t wound,
                                                    uint8_t fault_latched)
 {
     DriveReqDecision d;
@@ -119,15 +124,11 @@ static inline DriveReqDecision drive_sm_on_request(uint8_t state, uint8_t req,
 
     case DRV_REQ_ENABLE:
         if (state == DRV_DISABLED) {
-            if (wound) {                     /* refuse: never enable a wound shaft */
-                d.next_state  = DRV_FAULT;
-                d.latch_fault = DRVF_WOUND;
-                d.rejected    = 1u;
-            } else {
-                d.begin_enable  = 1u;
-                d.next_state    = DRV_ENABLING;
-                d.reset_cmd_seq = 1u;
-            }
+            /* Range/readiness gating is the CALLER's job (the verified enable
+               gate rejects before this machine ever sees the request). */
+            d.begin_enable  = 1u;
+            d.next_state    = DRV_ENABLING;
+            d.reset_cmd_seq = 1u;
         } else if (state == DRV_ENABLING || state == DRV_ENABLED ||
                    state == DRV_STOPPING) {
             /* repeat / racing a stop: no-op */
@@ -183,16 +184,16 @@ static inline DriveFaultDecision drive_sm_on_fault(uint8_t state, uint8_t fault,
         return d;      /* faults are only detectable with a live/driven motor  */
     }
 
-    if (drive_sm_comms_broken(fault)) {
-        /* Comms-broken: there is nothing to ramp against — Type-4 now. Also
-           abandons an in-progress stop ramp or enable handshake. */
+    if (drive_sm_fault_immediate(fault)) {
+        /* Immediate: Type-4 now, straight to FAULT. Also abandons an
+           in-progress stop ramp or enable handshake. */
         d.send_disable = 1u;
         d.abort_enable = (uint8_t)(state == DRV_ENABLING);
         d.next_state   = DRV_FAULT;
     } else {
-        /* Comms-intact (OVERTORQUE, MASTER_LOST): ramp from ENABLED; anywhere
-           else there is no meaningful motion to ramp down — Type-4 now. A
-           repeat detection while already STOPPING changes nothing. */
+        /* Ramped (MASTER_LOST only): damp from ENABLED; anywhere else there
+           is no meaningful motion to ramp down — Type-4 now. A repeat
+           detection while already STOPPING changes nothing. */
         if (state == DRV_ENABLED) {
             d.begin_stop = 1u;
             d.next_state = DRV_STOPPING;

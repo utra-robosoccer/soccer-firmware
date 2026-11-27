@@ -49,6 +49,7 @@
 #include "cachel1_armv7.h"
 #include "../../../../common/include/spi_resync.h"  /* spi_resync_poll — NSS gating */
 #include "tx_arm_timer.h"                            /* TX-arm deadline (one-shot TIM3) */
+#include "us_clock.h"                                /* exchange-complete µs stamp */
 
 /* NSS (PA4) read + bound for the resync gate. One exchange is ≤ ~1 ms even at the
    slowest prescaler, so NSS returns high well within this; the bound only guards a
@@ -57,6 +58,12 @@
 #define SPI_RESYNC_TIMEOUT_MS 5u
 
 volatile uint8_t spi_resyncs = 0;   /* wraps; host takes deltas */
+
+/* Slave µs clock at the most recent SPI exchange-complete (TxRxCplt). This is
+   the stamp telemetry reports as slave_time_us: the exchange that delivered
+   the command the staged telemetry answers (stamped in the ISR, not at
+   staging, so main-loop latency never skews it). */
+volatile uint32_t spi_last_exchange_us = 0;
 
 // SPI DMA ping-pong buffers. One half is clocked by the DMA while the other is
 // owned by the main loop; the TxRxCplt ISR swaps roles at the end of each
@@ -89,6 +96,8 @@ volatile uint32_t spi_tx_arm_fails = 0;   /* HAL_SPI_TransmitReceive_DMA arm fai
 //Callback functions redefinitions
 void HAL_SPI_TxRxCpltCallback(SPI_HandleTypeDef *hspi)
 {
+	spi_last_exchange_us = us_now();   /* stamp the exchange, ISR-side */
+
 	//Handling RX ping-pong: hand the just-filled half to main, keep the other for DMA
 	if (spi_rx_active == spi_rx_pingpong[0]){
 		spi_rx_active = spi_rx_pingpong[1];

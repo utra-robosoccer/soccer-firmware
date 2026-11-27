@@ -20,7 +20,7 @@ Run:
     python3 host/apps/run_policy.py --policy arm_timing --rate 200 --motors 0.0,0.1
 """
 from .base import (Policy, Action, MotorCommand, LinkState,
-                   REQ_DISABLE, REQ_ENABLE, REQ_RESET)
+                   REQ_DISABLE, REQ_ENABLE, REQ_RESET, default_gains)
 from master_link.protocol import DRV_ENABLED, DRV_DISABLED, DRIVE_STATE_NAMES
 from master_link.motor_config_gen import MOTORS
 
@@ -125,9 +125,10 @@ class ArmTimingPolicy(Policy):
             snap = self._snap(state, k)
             if k not in self._t_hold and snap is not None and snap.drive_state == DRV_ENABLED:
                 self._t_hold[k] = t_ns
+            kp, kd = default_gains(k[0], k[1])
             cmds.append(MotorCommand(k[0], k[1], req=REQ_ENABLE, valid=True,
                                      pos=self._hold_pos.get(k, 0.0),
-                                     use_config_gains=True))
+                                     kp=kp, kd=kd, use_config_gains=False))
 
         arm_el = (t_ns - self._t_req) / 1e9
         all_armed = all(k in self._t_hold for k in self._motors)

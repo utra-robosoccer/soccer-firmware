@@ -45,6 +45,13 @@ HAL_StatusTypeDef can_link_init(void)
     return HAL_OK;
 }
 
+void can_link_error_counters(uint8_t *tec, uint8_t *rec)
+{
+    uint32_t esr = hcan1.Instance->ESR;
+    if (tec) *tec = (uint8_t)((esr & CAN_ESR_TEC) >> CAN_ESR_TEC_Pos);
+    if (rec) *rec = (uint8_t)((esr & CAN_ESR_REC) >> CAN_ESR_REC_Pos);
+}
+
 /* Single transmit path for every CAN frame. The F446 bxCAN has only 3 TX
  * mailboxes; motor_runtime_update() bursts one frame per motor each tick,
  * so with >3 motors the later frames (e.g. CAN ids 4,5) were silently dropped

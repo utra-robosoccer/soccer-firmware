@@ -1,5 +1,6 @@
 #include "can_rx.h"
 #include "robstride.h"   /* vendor-protocol frames: rs_decode_* (wire-level RX is can_link.c) */
+#include "us_clock.h"    /* per-motor feedback µs timestamp (ISR-stamped) */
 #include <string.h>
 
 #define PI 3.1415926f
@@ -166,6 +167,7 @@ void can_link_on_frame(uint32_t ext_id, uint8_t data[8])
                    100 ms timeout and drop a present motor to terminal ABSENT.
                    The first Type-2 reply takes over within one poll cycle. */
                 target_motor->last_fb_ms = HAL_GetTick();
+                target_motor->last_fb_us = us_now();
                 can_rx_flag = 1;
             } else {
                 can_unpack_error_count++;
@@ -201,6 +203,7 @@ void can_link_on_frame(uint32_t ext_id, uint8_t data[8])
                 if (rs_decode_feedback(ext_id, data,
                                        motor_rs_config_by_id(sender_id), target_motor)) {
                     target_motor->last_fb_ms = HAL_GetTick();  // per-motor fb_age source
+                    target_motor->last_fb_us = us_now();       // per-motor feedback µs stamp
                     target_motor->fb_count++;                  // per-motor fresh-feedback tick
                     can_feedback_motor_id = sender_id;
                     can_feedback_count++;

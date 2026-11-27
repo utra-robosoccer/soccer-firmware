@@ -18,7 +18,8 @@ import math
 
 from master_link.motor_config_gen import MOTORS, MOTOR_USER_P_MIN, MOTOR_USER_P_MAX
 
-from .base import Policy, Action, MotorCommand, REQ_ENABLE, LinkState, arm_command
+from .base import (Policy, Action, MotorCommand, REQ_ENABLE, LinkState,
+                   arm_command, default_gains)
 from .sine_start import SineStart, fits_soft_limits
 
 DEFAULT_AMP_RAD    = 0.30
@@ -113,11 +114,12 @@ class LegsSinePolicy(Policy):
             self._mit_begun = True
 
         for k in self._all:
+            kp, kd = default_gains(k[0], k[1])
             if k in self._traj:                # swinging joint
                 pos, vel = self._traj[k].sample(t_ns)
                 cmds.append(MotorCommand(k[0], k[1], req=REQ_ENABLE, valid=True, pos=pos, vel=vel,
-                                         use_config_gains=True))
+                                         kp=kp, kd=kd, use_config_gains=False))
             else:                              # held joint: stiff at the captured pose
                 cmds.append(MotorCommand(k[0], k[1], req=REQ_ENABLE, valid=True, pos=self._hold[k], vel=0.0,
-                                         use_config_gains=True))
+                                         kp=kp, kd=kd, use_config_gains=False))
         return Action(motors=cmds)

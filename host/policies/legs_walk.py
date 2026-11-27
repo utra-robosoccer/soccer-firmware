@@ -57,7 +57,8 @@ import sys
 
 from master_link.motor_config_gen import MOTORS, MOTOR_USER_P_MIN, MOTOR_USER_P_MAX
 
-from .base import Policy, Action, MotorCommand, REQ_ENABLE, LinkState, arm_command
+from .base import (Policy, Action, MotorCommand, REQ_ENABLE, LinkState,
+                   arm_command, default_gains)
 
 # Defaults are the Desmos reference gait. Lengths may be in ANY consistent unit
 # — the IK output is angles, so only the ratios step:height:lift:l1:l2 matter.
@@ -399,12 +400,14 @@ class LegsWalkPolicy(Policy):
                 q0 = self._cmd(k, emit - VEL_DT)
                 q1 = self._cmd(k, emit)
                 q2 = self._cmd(k, emit + VEL_DT)
+                kp, kd = default_gains(k[0], k[1])
                 cmds.append(MotorCommand(k[0], k[1], req=REQ_ENABLE, valid=True, pos=q1,
                                          vel=(q2 - q0) / (2.0 * VEL_DT),
-                                         use_config_gains=True))
+                                         kp=kp, kd=kd, use_config_gains=False))
             else:                              # held joint: stiff at the captured pose
+                kp, kd = default_gains(k[0], k[1])
                 cmds.append(MotorCommand(k[0], k[1], req=REQ_ENABLE, valid=True, pos=self._p0[k], vel=0.0,
-                                         use_config_gains=True))
+                                         kp=kp, kd=kd, use_config_gains=False))
         return Action(motors=cmds)
 
 

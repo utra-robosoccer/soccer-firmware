@@ -21,14 +21,13 @@ typedef struct {
     float              tau;
     float              temp;
     uint8_t            motor_mode;    /* RS Type-2 status (0 reset/1 cal/2 run)   */
-    float              hold_pos;      /* home-frame setpoint (live tuple)         */
+    float              hold_pos;      /* position setpoint (live tuple), rad      */
     float              hold_vel;      /* velocity feedforward                     */
     float              cmd_kp;        /* gains of the live tuple                  */
     float              cmd_kd;
     float              cmd_tau_ff;    /* torque feedforward, clamped to ±max_tau  */
     uint8_t            have_tuple;    /* a VALID tuple arrived since ENABLE —
                                          until then ENABLED is limp (zero poll)   */
-    float              pos_offset;    /* raw - wrapped (the 2*pi multiple adopted) */
     uint8_t            motor_fault;   /* packed Type-2 fault bits (rs_fault_bits) */
     uint32_t           fault_word;    /* telemetry mirror of the latched 0x3022   */
     uint32_t           last_fb_ms;    /* snapshot's last-Type-2 stamp, for fb_age */

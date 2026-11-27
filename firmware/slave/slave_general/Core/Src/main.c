@@ -32,6 +32,7 @@
 #include "slave_spi.h"
 #include "motor_runtime.h"
 #include "tx_arm_timer.h"   /* TX-arm deadline (one-shot TIM3) — removes the telemetry lag */
+#include "us_clock.h"       /* TIM2 1 MHz free-run — the slave's µs timebase */
 #include "../../../../common/include/slave_service.h"  /* slave_service_due — forward/fallback */
 #include "spi_proto.h"     /* SPI frame codec: build telemetry, parse commands */
 
@@ -195,7 +196,9 @@ static void stage_telemetry(void)
     chain.spi_seq_echo   = spi_echo_seq;
     chain.spi_resyncs      = spi_resyncs;                      /* DMA realigns (wraps) */
     chain.spi_tx_arm_fails = (uint8_t)spi_tx_arm_fails;        /* TX-arm DMA failures (wraps) */
-    chain.slave_time_us  = (uint32_t)(HAL_GetTick() * 1000u);  /* ms→µs (no µs timer) */
+    chain.slave_time_us  = spi_last_exchange_us;  /* µs stamp of the exchange that delivered
+                                                     the command this telemetry answers
+                                                     (stamped in the TxRxCplt ISR) */
     chain.cmd_crc_errors = (uint16_t)cmd_crc_errors;
     chain.can_tx_errors  = (uint16_t)can_tx_error_count;
     for (uint8_t _i = 0; _i < N_MOTORS; _i++) {
@@ -250,6 +253,8 @@ int main(void)
   /* Bind CAN ids into the (private) motors[] before the bus starts, so the RX
      ISR's id lookup can match feedback. */
   can_rx_bind_ids();
+
+  us_clock_init();   /* µs timebase up BEFORE the CAN/SPI ISRs that stamp from it */
 
   if (can_link_init() != HAL_OK) {
     Error_Handler();

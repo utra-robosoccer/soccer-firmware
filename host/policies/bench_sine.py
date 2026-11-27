@@ -17,7 +17,8 @@ import math
 
 from master_link.motor_config_gen import MOTORS, MOTOR_USER_P_MIN, MOTOR_USER_P_MAX
 
-from .base import Policy, Action, MotorCommand, REQ_DISABLE, REQ_ENABLE, LinkState, arm_command
+from .base import (Policy, Action, MotorCommand, REQ_DISABLE, REQ_ENABLE,
+                   LinkState, arm_command, default_gains)
 from .sine_start import SineStart, fits_soft_limits
 
 DEFAULT_AMP_RAD   = 0.2
@@ -130,6 +131,8 @@ class BenchSinePolicy(Policy):
                 cmds.append(MotorCommand(k[0], k[1], req=REQ_DISABLE))
                 continue
             pos, vel = self._traj[k].sample(t_ns)
+            kp, kd = default_gains(k[0], k[1])
             cmds.append(MotorCommand(k[0], k[1], req=REQ_ENABLE, valid=True,
-                                     pos=pos, vel=vel, use_config_gains=True))
+                                     pos=pos, vel=vel, kp=kp, kd=kd,
+                                     use_config_gains=False))
         return Action(motors=cmds)

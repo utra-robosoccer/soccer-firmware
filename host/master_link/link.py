@@ -344,6 +344,37 @@ class MasterLink:
             time.sleep(0.005)
         return None
 
+    def measure_cycle_hz(self, min_cycles: int = 64, timeout: float = 1.5):
+        """Measure the master's ACTUAL cycle rate from telemetry itself:
+        master_time_us deltas over cycle_id deltas, across ~min_cycles cycles.
+        The rate is its own evidence — no wire-reported constant to trust.
+        Returns Hz (float), or None if telemetry stalls before enough cycles
+        accumulate."""
+        deadline = time.monotonic() + timeout
+        fno = self.robot_frame_no()
+        t_first = t_last = None
+        cycles = 0
+        prev_cid = None
+        while time.monotonic() < deadline and cycles < min_cycles:
+            got = self.wait_robot(fno, max(0.0, deadline - time.monotonic()))
+            if got is None:
+                break
+            state, fno, _skipped, _decode_ns = got
+            r = state.robot
+            if r is None:
+                continue
+            cid = r["cycle_id"]
+            t = r["master_time_us_mono"]
+            if prev_cid is not None:
+                cycles += (cid - prev_cid) & 0xFFFF   # u16 wrap-safe
+            prev_cid = cid
+            if t_first is None:
+                t_first = t
+            t_last = t
+        if t_first is None or cycles < 8 or t_last <= t_first:
+            return None
+        return 1e6 * cycles / (t_last - t_first)
+
     # ── startup liveness ────────────────────────────────────────────────────────
     def configured_motors(self) -> set:
         """(slave, local) keys of every motor in the active config."""

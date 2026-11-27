@@ -69,7 +69,10 @@ class _FakeLink:
             return None
         from master_link import protocol as _P
         h = self._schema_hash if self._schema_hash is not None else _P.SCHEMA_HASH
-        return {"master_poll_hz": self._poll_hz, "schema_hash": h}
+        return {"schema_hash": h}
+
+    def measure_cycle_hz(self, min_cycles=64, timeout=1.5):
+        return float(self._poll_hz)
 
     def robot_frame_no(self):
         return self._fno

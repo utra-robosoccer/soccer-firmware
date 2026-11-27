@@ -27,6 +27,11 @@ HAL_StatusTypeDef can_link_tx(uint32_t ext_id, const uint8_t msg[8]);
  * implements — dispatch by comm type, LUT, unpack. Runs in ISR context. */
 void can_link_on_frame(uint32_t ext_id, uint8_t data[8]);
 
+/* Controller error counters, straight from the bxCAN ESR register: TEC/REC
+ * (u8 each, hardware-maintained). Reported in slave telemetry at the wire
+ * swap; until then gdb-visible bus health. */
+void can_link_error_counters(uint8_t *tec, uint8_t *rec);
+
 /* Link-health counters (can_tx_error_count is reported in chain telemetry). */
 extern volatile uint32_t can_tx_ok_count;
 extern volatile uint32_t can_tx_error_count;

@@ -27,7 +27,7 @@ static uint8_t req_rej(DriveReqDecision d, uint8_t state)
 
 static DriveReqDecision R(uint8_t st, uint8_t rq)        /* plain request */
 {
-    return drive_sm_on_request(st, rq, 0u, 0u);
+    return drive_sm_on_request(st, rq, 0u);
 }
 
 int main(void)
@@ -62,11 +62,6 @@ int main(void)
     CHECK(d.next_state == DRV_ENABLING && d.begin_enable && d.reset_cmd_seq &&
           !d.rejected && !d.send_disable, "DISABLED+ENABLE → ENABLING");
 
-    /* DISABLED + ENABLE with a wound shaft: FAULT(WOUND), never enables. */
-    d = drive_sm_on_request(DRV_DISABLED, DRV_REQ_ENABLE, 1u, 0u);
-    CHECK(d.next_state == DRV_FAULT && d.latch_fault == DRVF_WOUND &&
-          d.rejected && !d.begin_enable, "wound ENABLE → FAULT(WOUND), no enable");
-
     /* ENABLING: DISABLE and STOP both abort+disable; ENABLE no-op; RESET rejected. */
     d = R(DRV_ENABLING, DRV_REQ_DISABLE);
     CHECK(d.next_state == DRV_DISABLED && d.abort_enable && d.send_disable &&
@@ -88,10 +83,10 @@ int main(void)
     CHECK(req_rej (R(DRV_ENABLED, DRV_REQ_RESET),  DRV_ENABLED), "ENABLED+RESET rejected");
 
     /* STOPPING: DISABLE cuts the ramp short — end state honours the fault latch. */
-    d = drive_sm_on_request(DRV_STOPPING, DRV_REQ_DISABLE, 0u, 0u);
+    d = drive_sm_on_request(DRV_STOPPING, DRV_REQ_DISABLE, 0u);
     CHECK(d.next_state == DRV_DISABLED && d.send_disable,
           "STOPPING+DISABLE, no fault → DISABLED");
-    d = drive_sm_on_request(DRV_STOPPING, DRV_REQ_DISABLE, 0u, 1u);
+    d = drive_sm_on_request(DRV_STOPPING, DRV_REQ_DISABLE, 1u);
     CHECK(d.next_state == DRV_FAULT && d.send_disable,
           "STOPPING+DISABLE, fault latched → FAULT (no laundering)");
     CHECK(req_noop(R(DRV_STOPPING, DRV_REQ_ENABLE), DRV_STOPPING), "STOPPING+ENABLE no-op");
@@ -108,18 +103,20 @@ int main(void)
 
     /* ── fault reactions ─────────────────────────────────────────────────── */
 
-    /* Comms-intact from ENABLED: ramp. */
-    f = drive_sm_on_fault(DRV_ENABLED, DRVF_OVERTORQUE, 0u);
-    CHECK(f.next_state == DRV_STOPPING && f.begin_stop && !f.send_disable &&
-          f.latch_fault == DRVF_OVERTORQUE, "OVERTORQUE in ENABLED → STOPPING");
+    /* Ramped (MASTER_LOST only) from ENABLED: damp through STOPPING. */
     f = drive_sm_on_fault(DRV_ENABLED, DRVF_MASTER_LOST, 0u);
     CHECK(f.next_state == DRV_STOPPING && f.begin_stop &&
           f.latch_fault == DRVF_MASTER_LOST, "MASTER_LOST in ENABLED → STOPPING");
 
-    /* Comms-intact but nothing to ramp (ENABLING): immediate. */
+    /* Ramped fault but nothing to ramp (ENABLING): immediate. */
     f = drive_sm_on_fault(DRV_ENABLING, DRVF_MASTER_LOST, 0u);
     CHECK(f.next_state == DRV_FAULT && f.send_disable && f.abort_enable,
           "MASTER_LOST in ENABLING → immediate disable");
+
+    /* OVERTORQUE is an immediate stop: cut effort NOW, no damping through it. */
+    f = drive_sm_on_fault(DRV_ENABLED, DRVF_OVERTORQUE, 0u);
+    CHECK(f.next_state == DRV_FAULT && f.send_disable && !f.begin_stop &&
+          f.latch_fault == DRVF_OVERTORQUE, "OVERTORQUE in ENABLED → immediate FAULT");
 
     /* Comms-broken: immediate from every armed state. */
     f = drive_sm_on_fault(DRV_ENABLED, DRVF_CAN_TIMEOUT, 0u);
@@ -140,10 +137,15 @@ int main(void)
           "CAN_TIMEOUT mid-ramp abandons STOPPING");
     CHECK(f.latch_fault == DRVF_NONE, "first fault wins: mid-ramp latch suppressed");
 
-    /* Comms-intact repeat during STOPPING: keep ramping. */
-    f = drive_sm_on_fault(DRV_STOPPING, DRVF_OVERTORQUE, 1u);
+    /* Ramped-fault repeat during STOPPING: keep ramping. */
+    f = drive_sm_on_fault(DRV_STOPPING, DRVF_MASTER_LOST, 1u);
     CHECK(f.next_state == DRV_STOPPING && !f.send_disable && !f.begin_stop,
-          "comms-intact repeat during STOPPING changes nothing");
+          "ramped-fault repeat during STOPPING changes nothing");
+
+    /* OVERTORQUE mid-ramp (e.g. the damp itself overloads): abandon the ramp. */
+    f = drive_sm_on_fault(DRV_STOPPING, DRVF_OVERTORQUE, 1u);
+    CHECK(f.next_state == DRV_FAULT && f.send_disable,
+          "OVERTORQUE mid-ramp abandons STOPPING");
 
     /* First-fault-wins latch suppression. */
     f = drive_sm_on_fault(DRV_ENABLED, DRVF_CAN_TIMEOUT, 1u);

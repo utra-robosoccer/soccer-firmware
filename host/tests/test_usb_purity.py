@@ -1,10 +1,10 @@
 """Master USB CDC purity guard (grep-based CI check).
 
 The master's CDC stream must carry ONLY framed protocol messages: every
-transmit goes proto_build → usb_tx_write → usb_tx.c's slot ring. These checks
+transmit goes proto_build → usb_tx_write → usb_link.c's slot ring. These checks
 make the invariant regress-proof:
 
-  1. CDC_Transmit_FS is called nowhere outside usb_tx.c (its definition lives
+  1. CDC_Transmit_FS is called nowhere outside usb_link.c (its definition lives
      in USB_DEVICE/App/usbd_cdc_if.c and is allowed there).
   2. No printf-family call in the master's own sources (Core/Src) outside the
      gated debug_printf implementation — vsnprintf into a local buffer is fine,
@@ -42,14 +42,14 @@ class UsbCdcPurity(unittest.TestCase):
         offenders = []
         for p in _sources("Core") + _sources("USB_DEVICE") + _sources("Middlewares"):
             base = os.path.basename(p)
-            if base in ("usb_tx.c", "usbd_cdc_if.c", "usbd_cdc_if.h"):
+            if base in ("usb_link.c", "usbd_cdc_if.c", "usbd_cdc_if.h"):
                 continue
             code = _strip_comments(open(p, encoding="utf-8", errors="replace").read())
             for i, line in enumerate(code.splitlines(), 1):
                 if "CDC_Transmit_FS" in line:
                     offenders.append(f"{os.path.relpath(p, ROOT)}:{i}")
         self.assertEqual(offenders, [],
-                         "CDC_Transmit_FS outside usb_tx.c — the CDC stream "
+                         "CDC_Transmit_FS outside usb_link.c — the CDC stream "
                          "must stay framed-protocol-only")
 
     def test_no_stdio_prints_in_master_sources(self):

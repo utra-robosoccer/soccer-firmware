@@ -9,30 +9,23 @@
 #include <math.h>
 #include <string.h>
 
-#define TWO_PI 6.28318530717958647692f
-
 MotorRuntime motors_rt[N_MOTORS];
 
 /* ── helpers ─────────────────────────────────────────────────────────────── */
-
-/* Wrap an angle into [-pi, pi]. */
-static float wrap_pi(float a)
-{
-    return a - TWO_PI * roundf(a / TWO_PI);
-}
 
 /* Wrap/stale-safe elapsed-time test: signed difference so a timestamp stamped
    after `now` was captured reads negative ("not yet"), not huge-unsigned. */
 static inline int32_t ms_since(uint32_t now, uint32_t t) { return (int32_t)(now - t); }
 
-/* Send an MIT command whose position is given in the home frame. pos_offset (the
-   2*pi multiple the motor adopted at power-up) is added back so the controller
-   drives the short path. Opens the cmd_seq reply window for this motor. */
-static void send_mit(uint8_t idx, float torque, float home_pos, float vel,
+/* Send an MIT command. Positions are the motor's own single-turn frame: every
+   motor is zero_sta-verified at boot (power-on reading in [-pi, pi]), so the
+   raw encoder position IS the joint angle — no wrap, no offset bookkeeping.
+   Opens the cmd_seq reply window for this motor. */
+static void send_mit(uint8_t idx, float torque, float pos, float vel,
                      float kp, float kd)
 {
     rs_mit_control_set(motor_user_configs[idx].id.can_id, torque,
-                        home_pos + motors_rt[idx].pos_offset, vel, kp, kd);
+                        pos, vel, kp, kd);
     cmd_seq_on_mit_frame(&motors_rt[idx].cmd_track, motors_rt[idx].target_cmd_seq);
 }
 
@@ -302,22 +295,15 @@ void motor_runtime_apply_cmd(uint8_t idx, const cmd_motor_t *m, uint16_t cmd_seq
     uint8_t cid = motor_user_configs[idx].id.can_id;
     uint32_t now_ms = HAL_GetTick();
 
-    /* Wound guard is consulted only on a DISABLED→ENABLING transition; compute it
-       from a fresh snapshot so the pure SM can decide. */
-    uint8_t wound = 0u;
-    if (m->drive_req == DRV_REQ_ENABLE && r->state == DRV_DISABLED) {
-        motor_t snap;
-        motor_get_snapshot(idx, &snap);
-        float off = snap.pos - wrap_pi(snap.pos);
-        wound = (off > MOTOR_WOUND_OFFSET_MAX || off < -MOTOR_WOUND_OFFSET_MAX) ? 1u : 0u;
-    }
-
-    /* Enable gate: the boot checks (id sweep + zero_sta) must have passed, and
-       THIS motor must be verified ready — DISABLED with a fresh Type-2 from
-       the ready poll showing Reset mode and no fault bits. fb_seen guards the
-       mirrors: motor_mode defaults to 0 == Reset at boot, so without at least
-       one real Type-2 the mode/fault checks would pass vacuously. A rejected
-       enable surfaces as TELE_FLAG_REQUEST_REJECTED; DISABLE/STOP/RESET flow
+    /* Enable gate: the boot checks (id sweep + zero_sta + fw version) must have
+       passed, and THIS motor must be verified ready — DISABLED with a fresh
+       Type-2 from the ready poll showing Reset mode, no fault bits, and a shaft
+       position inside the soft limits plus the ready margin (a joint parked
+       outside its envelope is a rigging problem: refuse, don't fight it in).
+       fb_seen guards the mirrors: motor_mode defaults to 0 == Reset at boot, so
+       without at least one real Type-2 the mode/fault/position checks would
+       pass vacuously. A rejected enable surfaces as TELE_FLAG_REQUEST_REJECTED
+       and the motor stays DISABLED — no fault; DISABLE/STOP/RESET flow
        normally. */
     uint8_t gate_reject = 0u;
     if (m->drive_req == DRV_REQ_ENABLE) {
@@ -326,7 +312,11 @@ void motor_runtime_apply_cmd(uint8_t idx, const cmd_motor_t *m, uint16_t cmd_seq
                                      r->motor_mode == RS_MODE_RESET &&
                                      r->motor_fault == 0u &&
                                      ms_since(now_ms, r->last_fb_ms) <
-                                         (int32_t)MOTOR_CAN_FB_TIMEOUT_MS);
+                                         (int32_t)MOTOR_CAN_FB_TIMEOUT_MS &&
+                                     r->pos >= r->cfg->user.p_min -
+                                         MOTOR_READY_POS_MARGIN_RAD &&
+                                     r->pos <= r->cfg->user.p_max +
+                                         MOTOR_READY_POS_MARGIN_RAD);
         gate_reject = (uint8_t)(!g_boot_ok ||
                                 (r->state == DRV_DISABLED && !verified));
     }
@@ -336,7 +326,7 @@ void motor_runtime_apply_cmd(uint8_t idx, const cmd_motor_t *m, uint16_t cmd_seq
         d.rejected   = 1u;
         d.next_state = r->state;
     } else {
-        d = drive_sm_on_request(r->state, m->drive_req, wound,
+        d = drive_sm_on_request(r->state, m->drive_req,
                                 (uint8_t)(r->fault != DRVF_NONE));
     }
     r->req_rejected = d.rejected;
@@ -398,9 +388,7 @@ void motor_runtime_on_feedback(uint32_t now_ms)
         motor_t snap;
         motor_get_snapshot(i, &snap);
 
-        float wrapped            = wrap_pi(snap.pos);
-        motors_rt[i].pos         = wrapped;
-        motors_rt[i].pos_offset  = snap.pos - wrapped;
+        motors_rt[i].pos         = snap.pos;  /* single-turn frame, zero_sta-verified */
         motors_rt[i].vel         = snap.rpm;
         motors_rt[i].tau         = snap.torq;
         motors_rt[i].temp        = snap.temperature;
@@ -502,8 +490,7 @@ void motor_runtime_update(uint32_t now_ms, uint8_t cmd_fresh)
                 if (r->have_tuple) {
                     send_mit(i, 0.0f, r->hold_pos, 0.0f, r->cmd_kp, r->cmd_kd);
                 } else {
-                    rs_mit_control_set(cid, 0.0f, r->pos + r->pos_offset,
-                                        0.0f, 0.0f, 0.0f);
+                    rs_mit_control_set(cid, 0.0f, r->pos, 0.0f, 0.0f, 0.0f);
                 }
                 continue;       /* grace frame sent; skip the normal service */
             }
@@ -558,8 +545,7 @@ void motor_runtime_update(uint32_t now_ms, uint8_t cmd_fresh)
                 /* Limp poll: zero gains and zero torque apply no effort but keep
                    the Type-2 feedback, enable monitor and CAN timeout alive while
                    the host has not yet sent its first tuple. */
-                rs_mit_control_set(cid, 0.0f, r->pos + r->pos_offset,
-                                    0.0f, 0.0f, 0.0f);
+                rs_mit_control_set(cid, 0.0f, r->pos, 0.0f, 0.0f, 0.0f);
             }
             break;
 

@@ -35,7 +35,7 @@ from master_link.motor_config_gen import (
 
 from .base import (
     Policy, Action, MotorCommand, LinkState,
-    REQ_DISABLE, REQ_ENABLE, REQ_RESET,
+    REQ_DISABLE, REQ_ENABLE, REQ_RESET, default_gains,
 )
 from .sine_start import SineStart
 
@@ -185,9 +185,10 @@ class Man1s1mPolicy(Policy):
             if mode == "off":
                 cmds.append(MotorCommand(s, l, req=REQ_DISABLE))
             elif mode == "hold":
+                kp, kd = default_gains(s, l)
                 cmds.append(MotorCommand(s, l, req=REQ_ENABLE, valid=True,
                                          pos=self._hold.get((s, l), 0.0),
-                                         use_config_gains=True))
+                                         kp=kp, kd=kd, use_config_gains=False))
             elif mode == "damp":
                 kd = next((m.get("default_kd", 1.0) for m in MOTORS
                            if (m["slave"], m["idx"]) == (s, l)), 1.0)
@@ -199,6 +200,8 @@ class Man1s1mPolicy(Policy):
                 tj = self._traj.get((s, l))
                 if tj is not None:
                     pos, vel = tj.sample(t_ns)
+                kp, kd = default_gains(s, l)
                 cmds.append(MotorCommand(s, l, req=REQ_ENABLE, valid=True,
-                                         pos=pos, vel=vel, use_config_gains=True))
+                                         pos=pos, vel=vel, kp=kp, kd=kd,
+                                         use_config_gains=False))
         return Action(motors=cmds)

@@ -74,8 +74,6 @@
 #define TX_ARM_DEADLINE_US  ((6u * MASTER_CYCLE_US) / 10u)
 
 /* ── Motion-safety guards (firmware tuning, not per-motor identity) ─────────── */
-#define MOTOR_WOUND_OFFSET_MAX     9.0f  /* rad — |pos_offset| above this at ENABLE
-                                            → refuse + DRVF_WOUND                 */
 #define MOTOR_FAULT_CHECK_DISABLED 0u    /* 1 = vendor-bit/Cali check in DISABLED
                                             (masked off until bench boot-rest data
                                             is clean — protocol_v9.md §8)         */
