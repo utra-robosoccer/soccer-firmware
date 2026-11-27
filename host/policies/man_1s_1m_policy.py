@@ -35,7 +35,7 @@ from master_link.motor_config_gen import (
 
 from .base import (
     Policy, Action, MotorCommand, LinkState,
-    REQ_DISABLE, REQ_ENABLE, REQ_RESET, default_gains,
+    REQ_STOP, REQ_ENABLE, default_gains,
 )
 from .sine_start import SineStart
 
@@ -176,32 +176,36 @@ class Man1s1mPolicy(Policy):
                 trajs[(s, l)] = tj
             self._traj = trajs
 
+        if reset:
+            # One SLAVE_REQ_RESET tick (motors all STOP): the slave runs one
+            # blocking clear + re-sweep round — the only way out of a latched
+            # MOTOR_FAULT / MOTOR_ABSENT. Only accepted while nothing is armed.
+            return Action(motors=[MotorCommand(s, l, req=REQ_STOP)
+                                  for (s, l, lo, hi, amp) in self._motors],
+                          reset_slaves={s for (s, l, lo, hi, amp) in self._motors})
+
         cmds = []
         for (s, l, lo, hi, amp) in self._motors:
-            if reset:
-                # One RESET tick: clears a latched fault; no-op on healthy motors.
-                cmds.append(MotorCommand(s, l, req=REQ_RESET))
-                continue
             if mode == "off":
-                cmds.append(MotorCommand(s, l, req=REQ_DISABLE))
+                cmds.append(MotorCommand(s, l, req=REQ_STOP))
             elif mode == "hold":
                 kp, kd = default_gains(s, l)
-                cmds.append(MotorCommand(s, l, req=REQ_ENABLE, valid=True,
+                cmds.append(MotorCommand(s, l, req=REQ_ENABLE,
                                          pos=self._hold.get((s, l), 0.0),
-                                         kp=kp, kd=kd, use_config_gains=False))
+                                         kp=kp, kd=kd))
             elif mode == "damp":
                 kd = next((m.get("default_kd", 1.0) for m in MOTORS
                            if (m["slave"], m["idx"]) == (s, l)), 1.0)
-                cmds.append(MotorCommand(s, l, req=REQ_ENABLE, valid=True,
+                cmds.append(MotorCommand(s, l, req=REQ_ENABLE,
                                          pos=0.0, vel=0.0, kp=0.0, kd=kd,
-                                         use_config_gains=False))
+                                         ))
             else:  # sine
                 pos = vel = 0.0
                 tj = self._traj.get((s, l))
                 if tj is not None:
                     pos, vel = tj.sample(t_ns)
                 kp, kd = default_gains(s, l)
-                cmds.append(MotorCommand(s, l, req=REQ_ENABLE, valid=True,
+                cmds.append(MotorCommand(s, l, req=REQ_ENABLE,
                                          pos=pos, vel=vel, kp=kp, kd=kd,
-                                         use_config_gains=False))
+                                         ))
         return Action(motors=cmds)

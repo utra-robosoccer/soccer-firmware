@@ -23,12 +23,9 @@ typedef enum {
     CSP_MODE        = 5   /* datasheet: reg 0x7005 valid values are 0/1/2/3/5 */
 } rs_runmode_t;
 
-/* RobStride high-level operating status (Type-2 feedback mode field). */
-typedef enum {
-    RS_MODE_RESET = 0,
-    RS_MODE_CALI,
-    RS_MODE_NORMAL
-} motor_status_t;
+/* The Type-2 feedback mode field is the wire's RsMode (protocol_wire.h:
+   RS_MODE_RESET / RS_MODE_CALI / RS_MODE_RUN) — stored here as a plain u8 so
+   this header stays free of protocol includes. */
 
 /* Decoded per-motor fault bits (from the Type-2 feedback fault field). */
 typedef struct {
@@ -46,7 +43,7 @@ typedef struct {
     uint16_t master_id;
     uint64_t mcu_id; // Unique MCU Identifier (from Type 0)
 
-    motor_status_t status;
+    uint8_t status;            /* RsMode (protocol_wire.h) */
     motor_error_t motor_errors;
     rs_runmode_t motor_mode;
 

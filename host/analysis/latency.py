@@ -25,7 +25,6 @@ Usage:  python3 host/analysis/latency.py logs/<date>/<time>_latency.bin
 """
 import argparse
 import bisect
-import struct
 import sys
 
 from master_link.datalog.reader import BinaryLogReader
@@ -81,52 +80,55 @@ def analyze(path, host_rate=None, cycle_rate=None):
     tele_ctr = []        # (ts_ns, (on_time,late,missing,duplicate)) — bracketed to the cmd window
 
     for rec in r:
+        if len(rec.payload) < P.HDR_SIZE:
+            continue
+        mt, seq, pay_len, _crc = P._HDR.unpack_from(rec.payload, 0)
+        pl = rec.payload[P.HDR_SIZE:P.HDR_SIZE + pay_len]
         if rec.kind == LOG.RX_FRAME:
-            res = P.decode_frame(bytearray(rec.payload))
-            if not res:
-                continue
-            mt, seq, ts_ms, pl, _ = res
-            if mt == P.MSG_ROBOT_TELE:
-                d = P.parse_robot_tele(pl)
-                if d:
-                    tele_cmd_rx.append((rec.ts_ns, d["last_cmd_seq_rx"]))
-                    applied_map = {}
-                    for ch in d["chains"]:
-                        sid = ch["chain_id"]
-                        for local, mo in enumerate(ch["motors"]):
-                            key = (sid, local)
-                            ms.append((rec.ts_ns, mo.tau))
-                            tele_by_motor.setdefault(key, []).append(
-                                (rec.ts_ns, mo.last_applied_seq))
-                            applied_map[key] = mo.last_applied_seq
-                    tele_frames.append((rec.ts_ns, d["cycle_id"],
-                                        d["cmd_seq_active"], applied_map))
-                    tele_ctr.append((rec.ts_ns, (d["cmd_on_time"], d["cmd_late"],
-                                                 d["cmd_missing"], d["cmd_duplicate"])))
-            elif mt == P.MSG_PING:
+            if mt == P.USB_MSG_TELE:
+                tm = P.parse_tele_master(pl)
+                if tm is None:
+                    continue
+                st = tm.status
+                tele_cmd_rx.append((rec.ts_ns, st.host.last_cmd_seq_rx))
+                applied_map = {}
+                for sid in range(min(tm.n_slaves, P.MAX_SLAVES)):
+                    if not st.spi[sid].alive:
+                        continue
+                    sl = tm.slaves[sid]
+                    for local in range(min(sl.n_motors, P.MAX_MOTORS_PER_SLAVE)):
+                        mo = sl.motors[local]
+                        key = (sid, local)
+                        ms.append((rec.ts_ns, P.dec_i16(mo.rs.tau, P.TAU_SCALE)))
+                        tele_by_motor.setdefault(key, []).append(
+                            (rec.ts_ns, mo.last_applied_seq))
+                        applied_map[key] = mo.last_applied_seq
+                tele_frames.append((rec.ts_ns, tm.cycle_id,
+                                    tm.cmd_seq_active, applied_map))
+                tele_ctr.append((rec.ts_ns, (st.host.on_time, st.host.late,
+                                             st.host.missing, st.host.duplicate)))
+            elif mt == P.USB_MSG_PING:
                 rx_ping.setdefault(seq, rec.ts_ns)
         elif rec.kind == LOG.TX_FRAME:
-            if len(rec.payload) < P.HDR_SIZE:
-                continue
-            mt, seq, src, dst, ts_ms, plen, ver, crc = struct.unpack_from(P.HDR_FMT, rec.payload)
-            if mt == P.MSG_ROBOT_CMD:
-                d = P.parse_robot_cmd(rec.payload[P.HDR_SIZE:])
-                if not d:
+            if mt == P.USB_MSG_CMD:
+                cm = P.parse_cmd_master(pl)
+                if cm is None:
                     continue
-                cmd_seq = d["cmd_seq"]
-                tx_cmd_echo.setdefault(cmd_seq, d["cycle_id"])
-                for ch in d["chains"]:
-                    sid = ch["chain_id"]
-                    for local, m in enumerate(ch["motors"]):
-                        if not (m["flags"] & P.CMD_FLAG_VALID):
-                            continue   # only VALID tuples get last_applied echoes
+                cmd_seq = cm.cmd_seq
+                tx_cmd_echo.setdefault(cmd_seq, cm.cycle_id)
+                n_slaves = (len(pl) - P._CMD_SLAVES_OFF) // 56
+                for sid in range(min(n_slaves, P.MAX_SLAVES)):
+                    for local in range(P.MAX_MOTORS_PER_SLAVE):
+                        m = cm.slaves[sid].motors[local]
+                        if m.req != P.MOTOR_REQ_ENABLE:
+                            continue   # only enabled motors apply mits → echo the seq
                         key = (sid, local)
-                        tx_step.append((rec.ts_ns, m["pos"]))
+                        tx_step.append((rec.ts_ns, P.dec_i16(m.mit.pos, P.POS_SCALE)))
                         cmd_by_motor.setdefault(key, []).append((rec.ts_ns, cmd_seq))
                         t = tick_cmds.setdefault(cmd_seq, {"ts": rec.ts_ns, "motors": set()})
                         t["ts"] = min(t["ts"], rec.ts_ns)
                         t["motors"].add(key)
-            elif mt == P.MSG_PING:
+            elif mt == P.USB_MSG_PING:
                 tx_ping.setdefault(seq, rec.ts_ns)
 
     ms.sort()

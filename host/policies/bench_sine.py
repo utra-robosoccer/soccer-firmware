@@ -1,7 +1,7 @@
 """bench_sine — headless sine bench policy (the canonical measurement driver).
 
-Enables every selected motor (DISABLE → RESET → ENABLE while streaming a hold tuple, the
-v9 reference flow) for a short settle, then starts a MIT sine CENTERED ON 0: a minimum-jerk
+Enables every selected motor (STOP baseline, then ENABLE while streaming a hold mit)
+for a short settle, then starts a MIT sine CENTERED ON 0: a minimum-jerk
 move from the motor's current position to the nearest peak (±A), then the sine from that
 peak's phase — so position and velocity are continuous from the hold through the move into
 the sine (no step, no overtorque). If ±A would exceed a
@@ -17,7 +17,7 @@ import math
 
 from master_link.motor_config_gen import MOTORS, MOTOR_USER_P_MIN, MOTOR_USER_P_MAX
 
-from .base import (Policy, Action, MotorCommand, REQ_DISABLE, REQ_ENABLE,
+from .base import (Policy, Action, MotorCommand, REQ_STOP, REQ_ENABLE,
                    LinkState, arm_command, default_gains)
 from .sine_start import SineStart, fits_soft_limits
 
@@ -109,7 +109,7 @@ class BenchSinePolicy(Policy):
         if self._dur is not None and el > self._arm_s + self._dur:
             raise KeyboardInterrupt            # clean stop via run_policy's shutdown
         cmds = []
-        if el < self._arm_s:                   # activation window: DISABLE→RESET→ENABLE+hold
+        if el < self._arm_s:                   # activation window: STOP→ENABLE+hold
             for k in self._motors:
                 snap = state.motors.get(k) if state and state.motors else None
                 p = snap.pos if snap else 0.0
@@ -127,12 +127,12 @@ class BenchSinePolicy(Policy):
         drop_now = (self._drop is not None and self._drop_at is not None
                     and el >= self._arm_s + self._drop_at)
         for k in self._motors:
-            if drop_now and k == self._drop:        # fault-isolation: CAN-disable one motor
-                cmds.append(MotorCommand(k[0], k[1], req=REQ_DISABLE))
+            if drop_now and k == self._drop:        # fault-isolation: stop one motor mid-run
+                cmds.append(MotorCommand(k[0], k[1], req=REQ_STOP))
                 continue
             pos, vel = self._traj[k].sample(t_ns)
             kp, kd = default_gains(k[0], k[1])
-            cmds.append(MotorCommand(k[0], k[1], req=REQ_ENABLE, valid=True,
+            cmds.append(MotorCommand(k[0], k[1], req=REQ_ENABLE,
                                      pos=pos, vel=vel, kp=kp, kd=kd,
-                                     use_config_gains=False))
+                                     ))
         return Action(motors=cmds)

@@ -1,6 +1,6 @@
 #include "usb_link.h"
 #include "usbd_cdc_if.h"
-#include "proto_common.h"   /* protocol.h (tele_robot_t, MSG_HEADER_SIZE) for the size guard */
+#include "proto_common.h"   /* protocol.h (tele_master_t, usb_header_t) for the size guard */
 #include <string.h>
 
 /* Frame-aware slot ring. Each slot holds one whole framed message; the pump hands
@@ -14,8 +14,8 @@
    paths now recover any OUT hiccup, and validation watches the resync/error
    counters to confirm whole-frame IN does not starve OUT. */
 #define NUM_SLOTS     16u
-#define TX_SLOT_MAX   USB_TX_SLOT_MAX  /* schema constant; largest-frame-fits assert
-                                          is generated in protocol_gen.h */
+#define TX_SLOT_MAX   USB_TX_SLOT_MAX  /* wire constant; largest-frame-fits assert
+                                          lives in protocol_wire.h */
 #define USB_FS_MPS    64u    /* bulk IN max packet size */
 
 static uint8_t  tx_slot[NUM_SLOTS][TX_SLOT_MAX];
@@ -128,7 +128,7 @@ void usb_rx_from_isr(const uint8_t *buf, uint16_t len)
    at a time (counted), so a stray byte or lost packet can't desync us permanently. */
 void usb_rx_process(usb_rx_frame_cb on_frame)
 {
-    static uint8_t  scan[768];     /* ≥ 2 × max frame (16 + 480) for headroom */
+    static uint8_t  scan[768];     /* ≥ 2 × max host→master frame (8 + 229) */
     static uint16_t scan_len = 0;
     static uint8_t  in_resync = 0;
 
@@ -139,7 +139,7 @@ void usb_rx_process(usb_rx_frame_cb on_frame)
     }
 
     uint16_t off = 0;
-    while ((uint16_t)(scan_len - off) >= MSG_HEADER_SIZE) {
+    while ((uint16_t)(scan_len - off) >= sizeof(usb_header_t)) {
         ProtoScanResult r;
         ProtoScanStatus st = proto_frame_scan(scan + off, (uint16_t)(scan_len - off), &r);
 

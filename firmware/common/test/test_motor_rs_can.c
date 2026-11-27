@@ -11,6 +11,7 @@
  * Built: gcc -std=c11 -Wall -Wextra -Werror -I firmware/common/include ... */
 #include <stdint.h>
 #include <stdio.h>
+#include "protocol_wire.h"   /* RsMode (RS_MODE_RUN) */
 #include "motor_rs_can.h"
 
 static uint32_t g_lcg = 0x00C0FFEEu;
@@ -77,7 +78,7 @@ static int golden_checks(void)
     if (!rs_decode_feedback(fb_ext, fb, &motor_rs_configs[MOTOR_MODEL_RS02], &m)) {
         fprintf(stderr, "feedback: rejected\n"); return 0;
     }
-    if (m.status != RS_MODE_NORMAL || m.motor_errors.overheat ||
+    if (m.status != RS_MODE_RUN || m.motor_errors.overheat ||
         !near(m.pos, 0.0f, 0.001f) || !near(m.rpm, 0.0f, 0.002f) ||
         !near(m.torq, 0.0f, 0.001f) || !near(m.temperature, 28.0f, 0.001f)) {
         fprintf(stderr, "feedback: fields pos=%f rpm=%f torq=%f temp=%f\n",

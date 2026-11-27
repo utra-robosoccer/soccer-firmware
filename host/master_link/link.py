@@ -2,7 +2,7 @@
 
 Opens the port (auto-detecting the master by USB VID:PID), runs an RX thread that
 decodes frames and keeps a thread-safe latest-state store, and exposes a small API
-to send MIT / control commands. Binary logging (raw TX/RX frames, discards, events,
+to send command frames. Binary logging (raw TX/RX frames, discards, events,
 loop timing) starts the moment the port opens; nothing on the hot path formats or
 decodes for logging — it only enqueues raw bytes to a background writer.
 """
@@ -27,32 +27,33 @@ MASTER_VID = 0x0483
 MASTER_PID = 0x5740
 
 # Startup liveness: at port open the master's USB buffer drains a stale burst (old
-# master_ts_ms arriving faster than real time), then jumps to the live stream. A motor's
-# telemetry is "live" once master_ts_ms advances in step with host monotonic time for
-# LIVE_N consecutive MOTOR_STATE frames.
+# telemetry arriving faster than real time), then jumps to the live stream. The link
+# is "live" once time_master_us advances in step with host monotonic time for
+# LIVE_N consecutive telemetry frames.
 LIVE_N = 5
 LIVE_TOL_MS = 3.0
 
 
 class _LiveDetector:
-    """Per motor. Feed (master_ts_ms, recv_ns) for each MOTOR_STATE frame; latches live
-    once the master tick advances consistently with host monotonic time for N frames.
-    The stale burst (Δhost ≪ Δmaster) and the post-burst jump both reset the counter, so
-    live latches only on the genuine live stream. Pure/deterministic for testing."""
+    """Feed (master_ms, recv_ns) per telemetry frame (master_ms derived from
+    tele_master_t.time_master_us); latches live once the master clock advances
+    consistently with host monotonic time for N frames. The stale burst
+    (Δhost ≪ Δmaster) and the post-burst jump both reset the counter, so live
+    latches only on the genuine live stream. Pure/deterministic for testing."""
 
     def __init__(self, n: int = LIVE_N, tol_ms: float = LIVE_TOL_MS):
         self._n = n
         self._tol = tol_ms
-        self._prev_ms: int | None = None
+        self._prev_ms: float | None = None
         self._prev_ns: int | None = None
         self._count = 0
         self.live = False
 
-    def update(self, master_ts_ms: int, recv_ns: int) -> bool:
+    def update(self, master_ms: float, recv_ns: int) -> bool:
         if self.live:
             return True
         if self._prev_ms is not None:
-            dm = master_ts_ms - self._prev_ms                 # master tick delta (ms)
+            dm = master_ms - self._prev_ms                    # master clock delta (ms)
             dh = (recv_ns - self._prev_ns) / 1e6              # host monotonic delta (ms)
             if 0 < dm <= 200 and abs(dm - dh) <= max(self._tol, 0.5 * dm):
                 self._count += 1
@@ -60,37 +61,32 @@ class _LiveDetector:
                     self.live = True
             else:
                 self._count = 0
-        self._prev_ms = master_ts_ms
+        self._prev_ms = master_ms
         self._prev_ns = recv_ns
         return self.live
 
 
 # ── command / state types (owned here; policies import them) ──────────────────
-# Mode-request constants mirror protocol.MotorModeReq (re-exported for policies).
-REQ_DISABLE = P.DRV_REQ_DISABLE
-REQ_ENABLE  = P.DRV_REQ_ENABLE
-REQ_STOP    = P.DRV_REQ_STOP
-REQ_RESET   = P.DRV_REQ_RESET
+REQ_STOP   = P.MOTOR_REQ_STOP
+REQ_ENABLE = P.MOTOR_REQ_ENABLE
 
-# Armed drive states (tele_motor_t.drive_state): the motor may produce torque.
-_ARMED_STATES = (P.DRV_ENABLING, P.DRV_ENABLED, P.DRV_STOPPING)
+# Armed motor states (tele_motor_t.state): the motor may produce torque.
+_ARMED_STATES = (P.MOTOR_ENABLING, P.MOTOR_ENABLED, P.MOTOR_STOPPING)
 
 
 @dataclass
 class MotorCommand:
-    """One motor's level-triggered drive request + MIT tuple for a tick (protocol
-    v9). The request always applies; the tuple only under valid=True — an enabled
-    motor with no valid tuple yet is LIMP, so streaming starts with the ENABLE."""
+    """One motor's level-triggered request + MIT tuple for a tick. The mit is
+    applied every cycle while the motor is ENABLED (all-zero = limp), so
+    streaming starts with the ENABLE."""
     slave: int
     local: int
-    req: int = P.DRV_REQ_DISABLE      # DriveReq
-    valid: bool = False               # the MIT tuple below is live
+    req: int = P.MOTOR_REQ_STOP      # MotorReq
     pos: float = 0.0
     vel: float = 0.0
     kp: float = 0.0
     kd: float = 0.0
     tau_ff: float = 0.0
-    use_config_gains: bool = True     # ignore wire kp/kd, use the slave's config
 
 
 @dataclass(frozen=True)
@@ -98,44 +94,55 @@ class MotorSnap:
     slave: int
     local: int
     gidx: int | None
-    drive_state: int    # DriveState (DRV_*)
-    drive_fault: int    # MotorFaultCause
+    state: int          # MotorState
+    fault: int          # MotorFault
+    flags: int          # MOTOR_FLAG_*
     pos: float
     vel: float
     tau: float
     temp: float
-    rs_mode: int        # RS Type-2 run mode (0 reset/1 cal/2 normal)
+    rs_mode: int        # RsMode (0 reset / 1 cali / 2 run)
     rs_fault_bits: int
-    flags: int          # TELE_FLAG_*
     rs_fault_word: int
-    fb_age: int
     last_applied_seq: int
-    master_ts_ms: int   # MsgHeader.ts_ms (master tick at emit)
+    time_slave_us: int  # slave clock at this motor's last feedback frame
+    slave_time_us: int  # slave clock at the SPI exchange (tele_slave_t stamp)
     recv_ns: int        # host monotonic_ns at receipt
 
     @property
-    def request_rejected(self) -> bool: return bool(self.flags & P.TELE_FLAG_REQUEST_REJECTED)
+    def state_name(self) -> str: return P.MOTOR_STATE_NAMES.get(self.state, f"?{self.state}")
     @property
-    def saturated(self) -> bool: return bool(self.flags & P.TELE_FLAG_SATURATED)
+    def fault_name(self) -> str: return P.MOTOR_FAULT_NAMES.get(self.fault, f"?{self.fault}")
     @property
-    def drive_state_name(self) -> str: return P.DRIVE_STATE_NAMES.get(self.drive_state, f"?{self.drive_state}")
+    def rs_mode_name(self) -> str: return P.RS_MODE_NAMES.get(self.rs_mode, f"?{self.rs_mode}")
     @property
-    def drive_fault_name(self) -> str: return P.DRIVE_FAULT_NAMES.get(self.drive_fault, f"?{self.drive_fault}")
+    def ready(self) -> bool: return bool(self.flags & P.MOTOR_FLAG_READY)
+    @property
+    def request_rejected(self) -> bool: return bool(self.flags & P.MOTOR_FLAG_REQ_REJECTED)
+    @property
+    def cmd_stale(self) -> bool: return bool(self.flags & P.MOTOR_FLAG_CMD_STALE)
+    @property
+    def saturated(self) -> bool: return bool(self.flags & P.MOTOR_FLAG_SATURATED)
+    @property
+    def fb_age_us(self) -> int:
+        """Age of this motor's feedback at the SPI exchange (slave clock, wrap-safe)."""
+        return (self.slave_time_us - self.time_slave_us) & 0xFFFFFFFF
 
 
 @dataclass(frozen=True)
 class LinkState:
     motors: dict            # (slave, local) -> MotorSnap
-    master: dict | None     # schema_hash, slave_proto_mismatch, uptime_ms, link_errors, rates
-    slaves: dict            # slave_id -> dict(motors_alive, crc_errors, cmd_crc_errors, seq_gaps)
-    robot: dict | None      # tele_robot_t meta: cycle_id, last_cmd_seq_rx, cmd_seq_active,
-                            #   cmd_on_time/late/missing/duplicate, robot_state,
-                            #   chain_link {slave: CHAIN_LINK_*}, ...
+    slaves: dict            # slave -> dict(alive, state, n_motors, time_slave_us,
+                            #   boot {...}, spi {...}, can {...})
+    status: dict | None     # status_master_t: host {...}, usb {...},
+                            #   spi {slave: {...}}, cycle_overruns
+    robot: dict | None      # tele meta: cycle_id, time_master_us(+_mono),
+                            #   cmd_seq_active, robot_state, n_slaves, imu, recv_ns
     stamp_ns: int
 
     def armed_motors(self):
         """(slave, local) of motors currently in an armed lifecycle."""
-        return [k for k, m in self.motors.items() if m.drive_state in _ARMED_STATES]
+        return [k for k, m in self.motors.items() if m.state in _ARMED_STATES]
 
 
 class MasterLink:
@@ -149,7 +156,7 @@ class MasterLink:
         # exclusive=True takes a POSIX advisory lock (TIOCEXCL) so nothing else
         # (ModemManager, a second script) can open the port and inject bytes.
         # Blocking read: a small serial timeout lets _rx_loop park on read() and wake the
-        # instant a frame lands (no busy-poll), so each tele_robot_t is decoded ASAP.
+        # instant a frame lands (no busy-poll), so each tele_master_t is decoded ASAP.
         self._ser = serial.Serial(self.port, baud, timeout=0.1, exclusive=True)
         try:
             self._ser.reset_input_buffer()   # flush kernel buffer; live-detect handles the rest
@@ -160,15 +167,15 @@ class MasterLink:
         day = os.path.join(log_dir, now.strftime("%Y-%m-%d"))
         self.log_path = os.path.join(day, now.strftime("%H-%M-%S") + f"_{policy_name}.bin")
         meta = config_meta.build_log_meta(policy_name)
-        self._log = BinaryLogWriter(self.log_path, meta, proto_version=P.PROTO_VERSION)
+        self._log = BinaryLogWriter(self.log_path, meta)
 
         self._gidx = {(m["slave"], m["idx"]): g for g, m in enumerate(_mc.MOTORS)}
 
         self._lock = threading.Lock()
         self._motors: dict = {}
-        self._master: dict | None = None
         self._slaves: dict = {}
-        self._robot: dict | None = None  # latest tele_robot_t meta (cycle_id etc.)
+        self._status: dict | None = None
+        self._robot: dict | None = None  # latest tele_master_t meta (cycle_id etc.)
         self._cycle_id = 0               # last master cycle_id seen (echoed in commands)
         # Telemetry-driven stepping: a monotonic frame counter + a condition the runner
         # waits on (wait_robot). Coalescing is implicit — a waiter gets the NEWEST frame
@@ -177,9 +184,9 @@ class MasterLink:
         self._robot_cond = threading.Condition(self._lock)
         self._robot_frame_no = 0
         self._robot_decode_ns = 0
-        self._mtu = U32Unwrapper()       # unwrap the 32-bit master_time_us (wraps ~71 min)
-        self._live: dict = {}            # (slave, local) -> _LiveDetector
-        self._live_logged = False        # EVENT "live" emitted once, on first live motor
+        self._mtu = U32Unwrapper()       # unwrap the 32-bit time_master_us (wraps ~71 min)
+        self._live = _LiveDetector()     # one per link: time_master_us vs host clock
+        self._live_logged = False        # EVENT "live" emitted once, on latch
 
         self._tx_lock = threading.Lock()
         self._rx_frames = 0
@@ -190,7 +197,6 @@ class MasterLink:
         self._cmd_seq = 0
         self._discard_records = 0
         self._discard_bytes = 0
-        self._version_frames = 0
 
         self._stop = threading.Event()
         self._rx = threading.Thread(target=self._rx_loop, name="master-link-rx", daemon=True)
@@ -211,11 +217,6 @@ class MasterLink:
                 self._discard_records += 1
                 self._discard_bytes += len(data)
             self._log.write(LOG.RX_DISCARD, data)
-        elif reason == "version":
-            with self._lock:
-                self._version_frames += 1
-            # Logged as a raw RX_FRAME; convert_log flags wrong-version frames.
-            self._log.write(LOG.RX_FRAME, data)
 
     def _on_frame(self, raw: bytes) -> None:
         with self._lock:
@@ -238,73 +239,93 @@ class MasterLink:
                 r = P.decode_frame(buf, on_reject=self._on_reject, on_frame=self._on_frame)
                 if r is None:
                     break
-                mt, _seq, ts_ms, pl, consumed = r
+                mt, _seq, pl, consumed = r
                 del buf[:consumed]      # decode_frame does not remove accepted frames
-                self._ingest(mt, ts_ms, pl, time.monotonic_ns())
+                self._ingest(mt, pl, time.monotonic_ns())
 
-    def _ingest(self, mt: int, ts_ms: int, pl: bytes, recv_ns: int) -> None:
-        if mt == P.MSG_ROBOT_TELE:
-            t_dec0 = time.monotonic_ns()
-            d = P.parse_robot_tele(pl)
-            if not d:
-                return
-            log_live = False
-            with self._lock:
-                self._robot = dict(cycle_id=d["cycle_id"], master_time_us=d["master_time_us"],
-                                   master_time_us_mono=self._mtu.update(d["master_time_us"]),
-                                   last_cmd_seq_rx=d["last_cmd_seq_rx"],
-                                   cmd_seq_active=d["cmd_seq_active"],
-                                   cmd_on_time=d["cmd_on_time"], cmd_late=d["cmd_late"],
-                                   cmd_missing=d["cmd_missing"], cmd_duplicate=d["cmd_duplicate"],
-                                   n_chains=d["n_chains"], robot_state=d["robot_state"],
-                                   chain_link={ch["chain_id"]: ch["link"]
-                                               for ch in d["chains"]},
-                                   recv_ns=recv_ns)
-                self._cycle_id = d["cycle_id"]
-                for ch in d["chains"]:
-                    sid = ch["chain_id"]
-                    for local, mo in enumerate(ch["motors"]):
-                        key = (sid, local)
-                        self._motors[key] = MotorSnap(
-                            slave=sid, local=local, gidx=self._gidx.get(key),
-                            drive_state=mo.drive_state, drive_fault=mo.drive_fault,
-                            pos=mo.pos, vel=mo.vel,
-                            tau=mo.tau, temp=mo.temp, rs_mode=mo.rs_mode,
-                            rs_fault_bits=mo.rs_fault_bits, flags=mo.flags,
-                            rs_fault_word=mo.rs_fault_word, fb_age=mo.fb_age_ms,
-                            last_applied_seq=mo.last_applied_seq,
-                            master_ts_ms=ts_ms, recv_ns=recv_ns)
-                        det = self._live.get(key)
-                        if det is None:
-                            det = _LiveDetector()
-                            self._live[key] = det
-                        if det.update(ts_ms, recv_ns) and not self._live_logged:
-                            self._live_logged = True
-                            log_live = True
-                self._robot_frame_no += 1
-                self._robot_decode_ns = time.monotonic_ns() - t_dec0
-                self._robot_cond.notify_all()
-            if log_live:
-                self._log.write(LOG.EVENT, b"live")
-        elif mt == P.MSG_MASTER_STATUS:
-            d = P.parse_master_status(pl)
-            if d:
-                d["recv_ns"] = recv_ns
-                with self._lock:
-                    self._master = d
-        elif mt == P.MSG_SLAVE_STATUS:
-            d = P.parse_slave_status(pl)
-            if d:
-                with self._lock:
-                    self._slaves[d["slave_id"]] = d
+    def _ingest(self, mt: int, pl: bytes, recv_ns: int) -> None:
+        if mt != P.USB_MSG_TELE:
+            return
+        t_dec0 = time.monotonic_ns()
+        tm = P.parse_tele_master(pl)
+        if tm is None:
+            return
+        log_live = False
+        with self._lock:
+            self._robot = dict(
+                cycle_id=tm.cycle_id, time_master_us=tm.time_master_us,
+                time_master_us_mono=self._mtu.update(tm.time_master_us),
+                cmd_seq_active=tm.cmd_seq_active, robot_state=tm.robot_state,
+                n_slaves=tm.n_slaves,
+                imu=dict(accel=list(tm.imu.accel), gyro=list(tm.imu.gyro),
+                         seq=tm.imu.seq, flags=tm.imu.flags, errors=tm.imu.errors),
+                recv_ns=recv_ns)
+            self._cycle_id = tm.cycle_id
+            st = tm.status
+            self._status = dict(
+                host=dict(lost=st.host.lost, last_cmd_seq_rx=st.host.last_cmd_seq_rx,
+                          on_time=st.host.on_time, late=st.host.late,
+                          missing=st.host.missing, duplicate=st.host.duplicate),
+                usb=dict(rx_frames=st.usb.rx_frames, rx_errors=st.usb.rx_errors,
+                         rx_resyncs=st.usb.rx_resyncs,
+                         rx_discarded_bytes=st.usb.rx_discarded_bytes,
+                         tx_drops=st.usb.tx_drops),
+                spi={s: dict(alive=st.spi[s].alive, crc_errors=st.spi[s].crc_errors,
+                             seq_gaps=st.spi[s].seq_gaps)
+                     for s in range(min(tm.n_slaves, P.MAX_SLAVES))},
+                cycle_overruns=st.cycle_overruns)
+            for sid in range(min(tm.n_slaves, P.MAX_SLAVES)):
+                sl = tm.slaves[sid]
+                alive = bool(st.spi[sid].alive)
+                self._slaves[sid] = dict(
+                    alive=alive, state=sl.state, n_motors=sl.n_motors,
+                    time_slave_us=sl.time_slave_us,
+                    boot=dict(found_mask=sl.status.boot.found_mask,
+                              unexpected_id=sl.status.boot.unexpected_id,
+                              zero_sta_fail_mask=sl.status.boot.zero_sta_fail_mask,
+                              version_fail_mask=sl.status.boot.version_fail_mask),
+                    spi=dict(cmd_crc_errors=sl.status.spi.cmd_crc_errors,
+                             resyncs=sl.status.spi.resyncs,
+                             tx_arm_fails=sl.status.spi.tx_arm_fails,
+                             seq_echo=sl.status.spi.seq_echo),
+                    can=dict(tx_errors=sl.status.can.tx_errors,
+                             tec=sl.status.can.tec, rec=sl.status.can.rec))
+                if not alive:
+                    continue   # a dead slave's slot is zeroed — keep the last snaps
+                nm = min(sl.n_motors, P.MAX_MOTORS_PER_SLAVE)
+                for local in range(nm):
+                    mo = sl.motors[local]
+                    key = (sid, local)
+                    self._motors[key] = MotorSnap(
+                        slave=sid, local=local, gidx=self._gidx.get(key),
+                        state=mo.state, fault=mo.fault, flags=mo.flags,
+                        pos=P.dec_i16(mo.rs.pos, P.POS_SCALE),
+                        vel=P.dec_i16(mo.rs.vel, P.VEL_SCALE),
+                        tau=P.dec_i16(mo.rs.tau, P.TAU_SCALE),
+                        temp=P.dec_i16(mo.rs.temp, P.TEMP_SCALE),
+                        rs_mode=mo.rs.mode, rs_fault_bits=mo.rs.fault_bits,
+                        rs_fault_word=mo.rs.fault_word,
+                        last_applied_seq=mo.last_applied_seq,
+                        time_slave_us=mo.rs.time_slave_us,
+                        slave_time_us=sl.time_slave_us,
+                        recv_ns=recv_ns)
+            if (self._live.update(tm.time_master_us / 1000.0, recv_ns)
+                    and not self._live_logged):
+                self._live_logged = True
+                log_live = True
+            self._robot_frame_no += 1
+            self._robot_decode_ns = time.monotonic_ns() - t_dec0
+            self._robot_cond.notify_all()
+        if log_live:
+            self._log.write(LOG.EVENT, b"live")
 
     # ── snapshot ──────────────────────────────────────────────────────────────
     def _snapshot_locked(self) -> LinkState:
         """Build a LinkState. Caller MUST hold self._lock."""
         return LinkState(
             motors=dict(self._motors),
-            master=dict(self._master) if self._master else None,
             slaves={k: dict(v) for k, v in self._slaves.items()},
+            status=dict(self._status) if self._status else None,
             robot=dict(self._robot) if self._robot else None,
             stamp_ns=time.monotonic_ns())
 
@@ -313,12 +334,12 @@ class MasterLink:
             return self._snapshot_locked()
 
     def robot_frame_no(self) -> int:
-        """Current telemetry frame counter (monotonic; bumped per tele_robot_t)."""
+        """Current telemetry frame counter (monotonic; bumped per tele_master_t)."""
         with self._lock:
             return self._robot_frame_no
 
     def wait_robot(self, after_frame: int, timeout: float):
-        """Block until a tele_robot_t newer than `after_frame` arrives, then return
+        """Block until a tele_master_t newer than `after_frame` arrives, then return
         (state, frame_no, skipped, decode_ns) for the NEWEST frame — coalescing, so a
         caller that was busy gets the latest and `skipped` counts the frames it missed.
         Returns None on timeout (treat as a telemetry stall)."""
@@ -333,20 +354,9 @@ class MasterLink:
             skipped = fno - after_frame - 1 if after_frame >= 0 else 0
             return (self._snapshot_locked(), fno, skipped, self._robot_decode_ns)
 
-    def wait_master_status(self, timeout: float = 1.0):
-        """Block until at least one MasterStatus has been received; return its dict
-        (which includes master_poll_hz) or None on timeout."""
-        deadline = time.monotonic() + timeout
-        while time.monotonic() < deadline:
-            with self._lock:
-                if self._master is not None:
-                    return dict(self._master)
-            time.sleep(0.005)
-        return None
-
     def measure_cycle_hz(self, min_cycles: int = 64, timeout: float = 1.5):
         """Measure the master's ACTUAL cycle rate from telemetry itself:
-        master_time_us deltas over cycle_id deltas, across ~min_cycles cycles.
+        time_master_us deltas over cycle_id deltas, across ~min_cycles cycles.
         The rate is its own evidence — no wire-reported constant to trust.
         Returns Hz (float), or None if telemetry stalls before enough cycles
         accumulate."""
@@ -364,7 +374,7 @@ class MasterLink:
             if r is None:
                 continue
             cid = r["cycle_id"]
-            t = r["master_time_us_mono"]
+            t = r["time_master_us_mono"]
             if prev_cid is not None:
                 cycles += (cid - prev_cid) & 0xFFFF   # u16 wrap-safe
             prev_cid = cid
@@ -381,9 +391,15 @@ class MasterLink:
         return set(self._gidx.keys())
 
     def live_motors(self) -> set:
-        """(slave, local) keys whose telemetry has been confirmed live (see _LiveDetector)."""
+        """(slave, local) keys considered live: the telemetry stream itself is
+        confirmed live (see _LiveDetector) AND the motor's slave is answering
+        the master's SPI polls (status.spi[slave].alive)."""
         with self._lock:
-            return {k for k, d in self._live.items() if d.live}
+            if not self._live.live or self._status is None:
+                return set()
+            spi = self._status["spi"]
+            return {k for k in self._gidx
+                    if spi.get(k[0], {}).get("alive")}
 
     def wait_until_live(self, keys=None, timeout: float = 2.0):
         """Block until every key in `keys` (default: all configured motors) is live.
@@ -405,10 +421,8 @@ class MasterLink:
             try:
                 self._ser.write(frame)
                 # No flush(): pyserial flush()=tcdrain() blocks the caller (the
-                # runner thread) until the OS drains the TX buffer. The earlier
-                # write starvation was the saturated 714 B telemetry stream, now
-                # fixed by the master transmitting only the populated tele prefix
-                # (~26 KB/s), so the link isn't saturated and writes deliver promptly.
+                # runner thread) until the OS drains the TX buffer; the link is
+                # not saturated, so writes deliver promptly on their own.
             except (serial.SerialException, OSError) as e:
                 with self._lock:
                     self._tx_errors += 1
@@ -419,9 +433,13 @@ class MasterLink:
         self._log.write(LOG.TX_FRAME, frame, ts_ns=ts)
         return True
 
-    def send_robot_cmd(self, cmds, echo_cycle: int | None = None) -> None:
-        """Send one MSG_ROBOT_CMD (cmd_robot_t) for this tick from a list of
-        MotorCommand. Commands are grouped into per-slave chains (chain_id = slave).
+    def send_robot_cmd(self, cmds, echo_cycle: int | None = None,
+                       reset_slaves=()) -> None:
+        """Send one USB_MSG_CMD (cmd_master_t) for this tick from a list of
+        MotorCommand. The payload always carries every configured slave at its
+        fixed slot (exactly CMD_MASTER_SIZE(N_SLAVES) bytes — the master rejects
+        any other length); motors without a command default to STOP with a zero
+        mit, so motors a policy does not drive stay off.
 
         All motors in one call share a single cmd_seq (one per tick): latency.py
         treats a tick as applied once every commanded motor reports
@@ -430,10 +448,10 @@ class MasterLink:
 
         cycle_id echoes `echo_cycle` — the master cycle the command was COMPUTED FROM
         (the telemetry-driven runner passes the stepped frame's cycle_id) — or the last
-        cycle seen if unset. The master classifies on_time/late against this echo."""
-        cmds = list(cmds)
-        if not cmds:
-            return
+        cycle seen if unset. The master classifies on_time/late against this echo.
+
+        reset_slaves: slave indices whose SLAVE_REQ_RESET to assert this tick
+        (level-triggered; hold it until telemetry shows the outcome, then drop)."""
         seq = self._cmd_seq + 1
         if seq > 0xFFFF:
             seq = 1
@@ -444,32 +462,20 @@ class MasterLink:
             with self._lock:
                 cycle_id = self._cycle_id
 
-        # Group by slave → chains. Each command is placed AT ITS LOCAL SLOT (the
-        # slave applies motors[i] to motor i); un-commanded slots on an addressed
-        # slave are zero-filled, i.e. DISABLE with no tuple — a cmd_robot_t
-        # addresses whole slaves, and motors a policy does not drive stay off.
-        by_slave: dict = {}
+        reset_slaves = set(reset_slaves)
+        slaves = [dict(req=(P.SLAVE_REQ_RESET if s in reset_slaves
+                            else P.SLAVE_REQ_NONE),
+                       motors=[dict(req=P.MOTOR_REQ_STOP)
+                               for _ in range(P.MAX_MOTORS_PER_SLAVE)])
+                  for s in range(_mc.N_SLAVES)]
         for c in cmds:
-            by_slave.setdefault(c.slave, {})[c.local] = c
-        chains = []
-        for sid in sorted(by_slave):
-            slots = by_slave[sid]
-            motors = []
-            for local in range(max(slots) + 1):
-                c = slots.get(local)
-                if c is None:
-                    motors.append(dict(drive_req=P.DRV_REQ_DISABLE, flags=0))
-                    continue
-                flags = P.CMD_FLAG_VALID if c.valid else 0
-                if c.use_config_gains:
-                    flags |= P.CMD_FLAG_USE_CONFIG_GAINS
-                motors.append(dict(drive_req=c.req, pos=c.pos, vel=c.vel,
-                                   kp=c.kp, kd=c.kd, tau_ff=c.tau_ff, flags=flags))
-            chains.append(dict(chain_id=sid, motors=motors))
+            if 0 <= c.slave < _mc.N_SLAVES and 0 <= c.local < P.MAX_MOTORS_PER_SLAVE:
+                slaves[c.slave]["motors"][c.local] = dict(
+                    req=c.req, pos=c.pos, vel=c.vel, kp=c.kp, kd=c.kd,
+                    tau_ff=c.tau_ff)
 
-        payload = P.pack_robot_cmd(cycle_id, seq, chains)
-        self._write_frame(P.encode_frame(P.MSG_ROBOT_CMD, P.NODE_JETSON,
-                                         P.NODE_MASTER, payload))
+        payload = P.pack_cmd_master(cycle_id, seq, slaves)
+        self._write_frame(P.encode_frame(P.USB_MSG_CMD, payload))
 
     # ── log helpers (for the runner) ──────────────────────────────────────────
     def log_event(self, text: str) -> None:
@@ -488,7 +494,7 @@ class MasterLink:
         with self._lock:
             return dict(rx_frames=self._rx_frames, tx_frames=self._tx_frames,
                         tx_errors=self._tx_errors, discard_records=self._discard_records,
-                        discard_bytes=self._discard_bytes, version_frames=self._version_frames,
+                        discard_bytes=self._discard_bytes,
                         log_dropped=self._log.dropped)
 
     def close(self) -> None:

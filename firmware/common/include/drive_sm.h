@@ -1,20 +1,21 @@
-/* drive_sm — pure protocol-v9 drive state machine (HAL-free, host-testable).
+/* drive_sm — pure per-motor drive state machine (HAL-free, host-testable).
  *
  * Implements the request × state matrix, fault-reaction table and transient-state
- * progression of docs/protocol_v9.md. Replaces mode_sm (the v8 mode-request machine)
- * when the slave runtime swaps over; arm_sm keeps sequencing ENABLING's CAN sends,
- * but completion is judged here (rs_mode == Run seen / timeout), not by fixed waits.
+ * progression over the protocol_wire.h MotorState/MotorReq/MotorFault enums.
+ * arm_sm keeps sequencing ENABLING's CAN sends; completion is judged here
+ * (rs_mode == Run seen / timeout), not by fixed waits.
  *
  * Three entry points, all pure (state in, decision out — the caller owns storage):
  *   drive_sm_on_request(state, req, fault_latched)  host request this cycle
- *   drive_sm_on_fault(state, fault_latched)         a fault was DETECTED
+ *   drive_sm_on_fault(state, fault, fault_latched)  a fault was DETECTED
  *   drive_sm_on_tick(state, inputs)                 per-cycle progression
  *
- * Latching discipline (spec §2): drive_fault latches at DETECTION, first fault wins —
- * the caller latches when a decision sets `latch_fault`, and passes fault_latched =
- * (drive_fault != DRVF_NONE) back in. A fault-triggered STOPPING therefore ends in
- * FAULT even if a DISABLE lands mid-ramp. drive_fault is cleared on CLEARING entry
- * (clear_fault), so a re-latch reports the current fault, not the original one.
+ * Latching discipline: fault latches at DETECTION, first fault wins — the caller
+ * latches when a decision sets `latch_fault`, and passes fault_latched =
+ * (fault != MOTOR_FAULT_NONE) back in. A fault-triggered STOPPING therefore ends
+ * in MOTOR_FAULT even if a STOP lands mid-ramp. There is no per-motor clear:
+ * MOTOR_FAULT and MOTOR_ABSENT leave only through SLAVE_REQ_RESET (the slave-level
+ * blocking re-sweep), which re-initializes the runtime outside this machine.
  */
 #ifndef DRIVE_SM_H
 #define DRIVE_SM_H
@@ -27,27 +28,24 @@
 extern "C" {
 #endif
 
-/* Decision from a host drive request. At most one send_* / begin_* is set. */
+/* Decision from a host motor request. At most one send_* / begin_* is set. */
 typedef struct {
-    uint8_t next_state;     /* DriveState                                        */
-    uint8_t rejected;       /* set TELE_FLAG_REQUEST_REJECTED                    */
-    uint8_t send_disable;   /* emit Type-4 (plain stop) now                      */
-    uint8_t send_clear;     /* emit Type-4 Byte0=1 (stop + clear RS fault) now   */
+    uint8_t next_state;     /* MotorState                                        */
+    uint8_t rejected;       /* set MOTOR_FLAG_REQ_REJECTED                       */
+    uint8_t send_stop;      /* emit Type-4 (plain stop) now                      */
     uint8_t begin_enable;   /* start the ENABLING CAN sequence (arm_sm)          */
-    uint8_t begin_stop;     /* start the stop ramp                               */
+    uint8_t begin_stop;     /* start the controlled-stop damp                    */
     uint8_t abort_enable;   /* cancel an in-progress ENABLING sequence           */
-    uint8_t latch_fault;    /* DRVF_* to latch (DRVF_NONE = nothing)             */
-    uint8_t clear_fault;    /* zero drive_fault (CLEARING entry)                 */
     uint8_t reset_cmd_seq;  /* re-baseline cmd_seq tracking                      */
 } DriveReqDecision;
 
 /* Decision from a detected fault. */
 typedef struct {
     uint8_t next_state;
-    uint8_t latch_fault;    /* DRVF_* to latch; DRVF_NONE if first-fault-wins
+    uint8_t latch_fault;    /* MOTOR_FAULT_* to latch; NONE if first-fault-wins
                                suppressed it (an earlier fault is already latched) */
-    uint8_t send_disable;   /* immediate Type-4 (comms-broken reaction)          */
-    uint8_t begin_stop;     /* enter the stop ramp (comms-intact reaction)       */
+    uint8_t send_stop;      /* immediate Type-4 (EMERGENCY reaction)             */
+    uint8_t begin_stop;     /* enter the damp (CONTROLLED reaction)              */
     uint8_t abort_enable;   /* cancel an in-progress ENABLING sequence           */
 } DriveFaultDecision;
 
@@ -55,111 +53,65 @@ typedef struct {
 typedef struct {
     uint8_t run_seen;       /* ENABLING: fresh feedback showed rs_mode == Run     */
     uint8_t enable_timeout; /* ENABLING: ENABLE_TIMEOUT_MS elapsed since begin    */
-    uint8_t clear_reply;    /* CLEARING: fresh Type-2 seen since entry            */
-    uint8_t clear_dirty;    /* CLEARING: that reply still carries fault bits/Cali */
-    uint8_t clear_timeout;  /* CLEARING: CLEAR_TIMEOUT_MS elapsed since entry     */
-    uint8_t stop_done;      /* STOPPING: ramp finished (ramp sent its disable)    */
-    uint8_t fault_latched;  /* drive_fault != DRVF_NONE                           */
+    uint8_t stop_done;      /* STOPPING: damp dwell finished (ramp sent its stop) */
+    uint8_t fault_latched;  /* fault != MOTOR_FAULT_NONE                          */
     uint8_t fb_timeout;     /* DISABLED: feedback older than the ABSENT threshold */
-    uint8_t fb_fresh;       /* ABSENT: any feedback arrived                       */
 } DriveTickInputs;
 
 typedef struct {
     uint8_t next_state;
-    uint8_t latch_fault;    /* DRVF_* to latch (ENABLE_FAILED / MOTOR_REPORTED)  */
-    uint8_t send_disable;   /* emit Type-4 now (failed enable)                   */
-    uint8_t enter_enabled;  /* ENABLING→ENABLED edge: apply any latched valid
-                               tuple this cycle, else start the limp zero-poll   */
+    uint8_t latch_fault;    /* MOTOR_FAULT_* to latch (ENABLE_FAILED)            */
+    uint8_t send_stop;      /* emit Type-4 now (failed enable)                   */
+    uint8_t enter_enabled;  /* ENABLING→ENABLED edge: apply the latched mit now  */
 } DriveTickDecision;
 
-/* Faults that react with an IMMEDIATE stop (Type-4 now, straight to FAULT; the
- * runtime's head-of-burst repair rule keeps re-sending the stop until the
+/* Faults that react with an EMERGENCY stop (Type-4 now, straight to MOTOR_FAULT;
+ * the runtime's head-of-burst repair rule keeps re-sending the stop until the
  * motor reports Reset). Comms-broken faults have nothing to ramp against, and
- * OVERTORQUE must cut effort NOW, not damp through it (protocol revamp: the
- * only ramped fault left is MASTER_LOST). */
+ * OVERTORQUE must cut effort NOW, not damp through it. The only CONTROLLED
+ * fault is MASTER_LOST. */
 static inline uint8_t drive_sm_fault_immediate(uint8_t fault)
 {
-    return (uint8_t)(fault == DRVF_CAN_TIMEOUT || fault == DRVF_NOT_ENABLED ||
-                     fault == DRVF_MOTOR_REPORTED || fault == DRVF_ENABLE_FAILED ||
-                     fault == DRVF_OVERTORQUE);
+    return (uint8_t)(fault != MOTOR_FAULT_NONE && fault != MOTOR_FAULT_MASTER_LOST);
 }
 
-/* ── host request (level-triggered; see matrix in docs/protocol_v9.md §3) ──── */
+/* ── host request (level-triggered) ───────────────────────────────────────── */
 static inline DriveReqDecision drive_sm_on_request(uint8_t state, uint8_t req,
                                                    uint8_t fault_latched)
 {
     DriveReqDecision d;
     memset(&d, 0, sizeof(d));
-    d.next_state  = state;
-    d.latch_fault = DRVF_NONE;
-
-    /* CLEARING ignores every request until it resolves (no rejected flag). */
-    if (state == DRV_CLEARING) return d;
-
-    /* BOOT/DISCOVERING accept nothing. */
-    if (state == DRV_BOOT || state == DRV_DISCOVERING) {
-        d.rejected = 1u;
-        return d;
-    }
+    d.next_state = state;
 
     switch (req) {
-    case DRV_REQ_DISABLE:
-        if (state == DRV_ENABLING) {
-            d.abort_enable = 1u;
-            d.send_disable = 1u;
-            d.next_state   = DRV_DISABLED;
-            d.reset_cmd_seq = 1u;
-        } else if (state == DRV_ENABLED) {
-            d.send_disable = 1u;
-            d.next_state   = DRV_DISABLED;
-            d.reset_cmd_seq = 1u;
-        } else if (state == DRV_STOPPING) {
-            d.send_disable = 1u;             /* cut the ramp short            */
-            d.next_state   = fault_latched ? (uint8_t)DRV_FAULT
-                                           : (uint8_t)DRV_DISABLED;
-            d.reset_cmd_seq = 1u;
-        }
-        /* ABSENT / DISABLED / FAULT: no-op (FAULT stays latched). */
-        break;
-
-    case DRV_REQ_ENABLE:
-        if (state == DRV_DISABLED) {
-            /* Range/readiness gating is the CALLER's job (the verified enable
-               gate rejects before this machine ever sees the request). */
-            d.begin_enable  = 1u;
-            d.next_state    = DRV_ENABLING;
-            d.reset_cmd_seq = 1u;
-        } else if (state == DRV_ENABLING || state == DRV_ENABLED ||
-                   state == DRV_STOPPING) {
-            /* repeat / racing a stop: no-op */
-        } else {
-            d.rejected = 1u;                 /* ABSENT / FAULT                */
-        }
-        break;
-
-    case DRV_REQ_STOP:
-        if (state == DRV_ENABLED) {
+    case MOTOR_REQ_STOP:
+        if (state == MOTOR_ENABLED) {
             d.begin_stop    = 1u;
-            d.next_state    = DRV_STOPPING;
+            d.next_state    = MOTOR_STOPPING;
             d.reset_cmd_seq = 1u;
-        } else if (state == DRV_ENABLING) {  /* nothing to ramp yet           */
+        } else if (state == MOTOR_ENABLING) {  /* nothing to ramp yet          */
             d.abort_enable  = 1u;
-            d.send_disable  = 1u;
-            d.next_state    = DRV_DISABLED;
+            d.send_stop     = 1u;
+            d.next_state    = fault_latched ? (uint8_t)MOTOR_FAULT
+                                            : (uint8_t)MOTOR_DISABLED;
             d.reset_cmd_seq = 1u;
         }
-        /* ABSENT / DISABLED / STOPPING / FAULT: no-op. */
+        /* ABSENT / DISABLED / STOPPING / FAULT: no-op (STOP is the resting
+           request; FAULT stays latched until SLAVE_REQ_RESET). */
         break;
 
-    case DRV_REQ_RESET:
-        if (state == DRV_FAULT) {
-            d.clear_fault = 1u;              /* re-latch reports the CURRENT fault */
-            d.send_clear  = 1u;              /* Type-4 Byte0=1 on entry        */
-            d.next_state  = DRV_CLEARING;
-        } else if (state == DRV_DISABLED) {
-            /* no-op: already clean */
+    case MOTOR_REQ_ENABLE:
+        if (state == MOTOR_DISABLED) {
+            /* Readiness gating (fresh feedback, Reset mode, no fault bits,
+               position in range) is the CALLER's job — the verified enable
+               gate rejects before this machine ever sees the request. */
+            d.begin_enable  = 1u;
+            d.next_state    = MOTOR_ENABLING;
+            d.reset_cmd_seq = 1u;
+        } else if (state == MOTOR_ENABLING || state == MOTOR_ENABLED) {
+            /* level-triggered repeat: no-op */
         } else {
-            d.rejected = 1u;                 /* ABSENT / ENABLING / ENABLED / STOPPING */
+            d.rejected = 1u;                 /* ABSENT / STOPPING / FAULT     */
         }
         break;
 
@@ -170,96 +122,80 @@ static inline DriveReqDecision drive_sm_on_request(uint8_t state, uint8_t req,
     return d;
 }
 
-/* ── fault detected (spec §4). The caller latches `latch_fault` if nonzero. ── */
+/* ── fault detected. The caller latches `latch_fault` if nonzero. ──────────── */
 static inline DriveFaultDecision drive_sm_on_fault(uint8_t state, uint8_t fault,
                                                    uint8_t fault_latched)
 {
     DriveFaultDecision d;
     memset(&d, 0, sizeof(d));
     d.next_state  = state;
-    d.latch_fault = fault_latched ? (uint8_t)DRVF_NONE : fault;  /* first wins */
+    d.latch_fault = fault_latched ? (uint8_t)MOTOR_FAULT_NONE : fault; /* first wins */
 
-    if (state != DRV_ENABLING && state != DRV_ENABLED && state != DRV_STOPPING &&
-        state != DRV_DISABLED) {
+    if (state != MOTOR_ENABLING && state != MOTOR_ENABLED &&
+        state != MOTOR_STOPPING && state != MOTOR_DISABLED) {
         return d;      /* faults are only detectable with a live/driven motor  */
     }
 
     if (drive_sm_fault_immediate(fault)) {
-        /* Immediate: Type-4 now, straight to FAULT. Also abandons an
-           in-progress stop ramp or enable handshake. */
-        d.send_disable = 1u;
-        d.abort_enable = (uint8_t)(state == DRV_ENABLING);
-        d.next_state   = DRV_FAULT;
+        /* EMERGENCY: Type-4 now, straight to FAULT. Also abandons an
+           in-progress damp or enable handshake. */
+        d.send_stop    = 1u;
+        d.abort_enable = (uint8_t)(state == MOTOR_ENABLING);
+        d.next_state   = MOTOR_FAULT;
     } else {
-        /* Ramped (MASTER_LOST only): damp from ENABLED; anywhere else there
-           is no meaningful motion to ramp down — Type-4 now. A repeat
+        /* CONTROLLED (MASTER_LOST only): damp from ENABLED; anywhere else
+           there is no meaningful motion to ramp down — Type-4 now. A repeat
            detection while already STOPPING changes nothing. */
-        if (state == DRV_ENABLED) {
+        if (state == MOTOR_ENABLED) {
             d.begin_stop = 1u;
-            d.next_state = DRV_STOPPING;
-        } else if (state == DRV_STOPPING) {
+            d.next_state = MOTOR_STOPPING;
+        } else if (state == MOTOR_STOPPING) {
             /* already ramping; the latch (if first) is the only effect */
         } else {
-            d.send_disable = 1u;
-            d.abort_enable = (uint8_t)(state == DRV_ENABLING);
-            d.next_state   = DRV_FAULT;
+            d.send_stop    = 1u;
+            d.abort_enable = (uint8_t)(state == MOTOR_ENABLING);
+            d.next_state   = MOTOR_FAULT;
         }
     }
     return d;
 }
 
-/* ── per-cycle progression of the transient states (spec §2). ──────────────── */
+/* ── per-cycle progression of the transient states ─────────────────────────── */
 static inline DriveTickDecision drive_sm_on_tick(uint8_t state,
                                                  const DriveTickInputs *in)
 {
     DriveTickDecision d;
     memset(&d, 0, sizeof(d));
     d.next_state  = state;
-    d.latch_fault = DRVF_NONE;
+    d.latch_fault = MOTOR_FAULT_NONE;
 
     switch (state) {
-    case DRV_ENABLING:
+    case MOTOR_ENABLING:
         if (in->run_seen) {
-            d.next_state    = DRV_ENABLED;
+            d.next_state    = MOTOR_ENABLED;
             d.enter_enabled = 1u;
         } else if (in->enable_timeout) {
-            d.latch_fault  = in->fault_latched ? (uint8_t)DRVF_NONE
-                                               : (uint8_t)DRVF_ENABLE_FAILED;
-            d.send_disable = 1u;
-            d.next_state   = DRV_FAULT;
+            d.latch_fault = in->fault_latched ? (uint8_t)MOTOR_FAULT_NONE
+                                              : (uint8_t)MOTOR_FAULT_ENABLE_FAILED;
+            d.send_stop   = 1u;
+            d.next_state  = MOTOR_FAULT;
         }
         break;
 
-    case DRV_CLEARING:
-        if (in->clear_reply) {
-            if (in->clear_dirty) {
-                d.latch_fault = DRVF_MOTOR_REPORTED;   /* fresh latch: fault was
-                                                          cleared on entry      */
-                d.next_state  = DRV_FAULT;
-            } else {
-                d.next_state = DRV_DISABLED;
-            }
-        } else if (in->clear_timeout) {
-            d.next_state = DRV_ABSENT;
-        }
-        break;
-
-    case DRV_STOPPING:
+    case MOTOR_STOPPING:
         if (in->stop_done) {
-            d.next_state = in->fault_latched ? (uint8_t)DRV_FAULT
-                                             : (uint8_t)DRV_DISABLED;
+            d.next_state = in->fault_latched ? (uint8_t)MOTOR_FAULT
+                                             : (uint8_t)MOTOR_DISABLED;
         }
         break;
 
-    case DRV_DISABLED:
-        if (in->fb_timeout) d.next_state = DRV_ABSENT;
+    case MOTOR_DISABLED:
+        /* Feedback gone stale while off → the motor fell off the bus. ABSENT
+           is terminal until SLAVE_REQ_RESET re-runs the sweep. */
+        if (in->fb_timeout) d.next_state = MOTOR_ABSENT;
         break;
 
-    case DRV_ABSENT:
-        if (in->fb_fresh) d.next_state = DRV_DISABLED;
-        break;
-
-    default:
+    default:   /* ABSENT (terminal), ENABLED, FAULT: nothing time-driven here */
         break;
     }
     return d;

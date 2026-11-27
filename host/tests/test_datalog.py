@@ -15,7 +15,7 @@ class DatalogRoundTrip(unittest.TestCase):
             meta = {"git_commit": "abc123", "git_dirty": True,
                     "config_name": "1s_5m", "config_hash": "deadbeef",
                     "producer": "listen", "config_yaml": {"slave0.yaml": "slave: slave0\n"}}
-            w = BinaryLogWriter(path, meta, proto_version=1)
+            w = BinaryLogWriter(path, meta)
             recs = [
                 (fmt.RX_FRAME,    b"\x01\x02raw-rx"),
                 (fmt.TX_FRAME,    b"\x07tx-bytes"),
@@ -30,7 +30,7 @@ class DatalogRoundTrip(unittest.TestCase):
             self.assertEqual(w.dropped, 0)
 
             r = BinaryLogReader(path)
-            self.assertEqual(r.header["proto_version"], 1)
+            self.assertEqual(r.header["reserved"], 0)
             self.assertEqual(r.header["log_fmt_version"], fmt.LOG_FMT_VERSION)
             self.assertEqual(r.header["meta"]["config_name"], "1s_5m")
             self.assertEqual(r.header["meta"]["config_yaml"]["slave0.yaml"], "slave: slave0\n")
@@ -45,7 +45,7 @@ class DatalogRoundTrip(unittest.TestCase):
     def test_loop_timing_decode(self):
         with tempfile.TemporaryDirectory() as d:
             path = os.path.join(d, "s.bin")
-            w = BinaryLogWriter(path, {}, proto_version=1)
+            w = BinaryLogWriter(path, {})
             w.write(fmt.LOOP_TIMING, fmt.LOOP_TIMING_FMT.pack(42, 20_000_000, 1000, 2000, -300))
             w.close()
             rec = next(iter(BinaryLogReader(path)))
@@ -57,7 +57,7 @@ class DatalogRoundTrip(unittest.TestCase):
             path = os.path.join(d, "s.bin")
             # Tiny queue + a stalled writer thread would be racy; instead flood fast
             # with a tiny cap so put_nowait overflows before the drainer keeps up.
-            w = BinaryLogWriter(path, {}, proto_version=1, queue_max=8, flush_interval=100.0)
+            w = BinaryLogWriter(path, {}, queue_max=8, flush_interval=100.0)
             for i in range(5000):
                 w.write(fmt.EVENT, b"x" * 32)
             w.close()

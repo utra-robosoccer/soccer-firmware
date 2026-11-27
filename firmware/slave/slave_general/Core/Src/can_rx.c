@@ -92,6 +92,19 @@ void can_rx_sweep_snapshot(uint8_t out[32])
     __enable_irq();
 }
 
+// Re-arm the boot captures for a SLAVE_REQ_RESET re-sweep: clear the id-sweep
+// bitmap and the zero_sta / fw-version capture state so the re-run judges fresh
+// replies, not boot leftovers.
+void can_rx_boot_rearm(void)
+{
+    __disable_irq();
+    memset(sweep_seen, 0, sizeof(sweep_seen));
+    zero_sta_seen = 0u;
+    fw_ver_seen   = 0u;
+    fw_ver_expect = 0u;
+    __enable_irq();
+}
+
 // zero_sta boot capture: returns 1 once motor idx's 0x7029 reply arrived and
 // writes its raw value. Single aligned loads, and the ISR stores the value
 // before the seen bit — no masking needed.

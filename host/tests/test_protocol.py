@@ -1,21 +1,15 @@
 """Tests for the canonical host protocol library (host/master_link/protocol.py),
-PROTO_VERSION 3 robot/chain/motor hierarchy.
+the hand-written ctypes mirror of protocol_wire.h.
 
-Covers: fixed-point encode/decode round trips + saturation, cmd/tele pack↔parse
-round trips, wrong-version drop+count, wrap-aware seq compare, and a cross-language
-fixture that compiles firmware/common/test/gen_fixture.c and byte-compares a full
-cmd_robot_t and tele_robot_t against the Python packers.
+Covers: fixed-point encode/decode round trips + saturation, command pack/parse
+and telemetry parse round trips with exact truncated sizes, the frame codec
+(round trip, bad CRC, unknown type, resync over junk, discard callback), and
+the wrap-aware seq compare. The byte-exact C↔Python layout pin lives in
+test_wire_fixture.py.
 """
-import os
-import shutil
-import struct
-import subprocess
 import unittest
 
-HERE = os.path.dirname(os.path.abspath(__file__))
-ROOT = os.path.abspath(os.path.join(HERE, "..", ".."))   # host/tests → host → repo root
-
-import master_link.protocol as P  # noqa: E402
+import master_link.protocol as P
 
 
 class FixedPoint(unittest.TestCase):
@@ -45,79 +39,121 @@ class FixedPoint(unittest.TestCase):
 
 class CmdRoundTrip(unittest.TestCase):
     def test_pack_parse(self):
-        chains = [{"chain_id": 0, "motors": [
-            {"drive_req": P.DRV_REQ_ENABLE, "pos": 0.5, "vel": -1.25, "kp": 15.0,
-             "kd": 1.0, "tau_ff": 0.3, "flags": P.CMD_FLAG_VALID}]}]
-        b = P.pack_robot_cmd(7, 42, chains)
-        self.assertEqual(len(b), P.SZ_CMD_ROBOT)
-        d = P.parse_robot_cmd(b)
-        self.assertEqual((d["cycle_id"], d["cmd_seq"], d["n_chains"]), (7, 42, 1))
-        m = d["chains"][0]["motors"][0]
-        self.assertEqual(m["drive_req"], P.DRV_REQ_ENABLE)
-        self.assertAlmostEqual(m["pos"], 0.5, places=3)
-        self.assertAlmostEqual(m["vel"], -1.25, places=2)
-        self.assertAlmostEqual(m["kp"], 15.0, places=1)
-        self.assertEqual(m["flags"] & P.CMD_FLAG_VALID, P.CMD_FLAG_VALID)
+        slaves = [{"req": P.SLAVE_REQ_RESET, "motors": [
+            {"req": P.MOTOR_REQ_ENABLE, "pos": 0.5, "vel": -1.25, "kp": 15.0,
+             "kd": 1.0, "tau_ff": 0.3}]}]
+        b = P.pack_cmd_master(7, 42, slaves, test=0xB0)
+        self.assertEqual(len(b), P.cmd_master_size(1))
+        cm = P.parse_cmd_master(b)
+        self.assertEqual((cm.cycle_id, cm.cmd_seq, cm.test), (7, 42, 0xB0))
+        self.assertEqual(cm.slaves[0].req, P.SLAVE_REQ_RESET)
+        m = cm.slaves[0].motors[0]
+        self.assertEqual(m.req, P.MOTOR_REQ_ENABLE)
+        self.assertAlmostEqual(P.dec_i16(m.mit.pos, P.POS_SCALE), 0.5, places=3)
+        self.assertAlmostEqual(P.dec_i16(m.mit.vel, P.VEL_SCALE), -1.25, places=2)
+        self.assertAlmostEqual(P.dec_u16(m.mit.kp, P.KP_SCALE), 15.0, places=1)
+        # Unspecified slots default to STOP + zero mit (the forced-stop shape).
+        m1 = cm.slaves[0].motors[1]
+        self.assertEqual((m1.req, m1.mit.pos, m1.mit.kp), (P.MOTOR_REQ_STOP, 0, 0))
+
+    def test_exact_sizes(self):
+        for n in range(1, P.MAX_SLAVES + 1):
+            b = P.pack_cmd_master(0, 1, [{} for _ in range(n)])
+            self.assertEqual(len(b), P.cmd_master_size(n))
+        self.assertEqual(P.cmd_master_size(P.MAX_SLAVES), 229)
+        self.assertIsNone(P.parse_cmd_master(b"\x00"))   # shorter than the prefix
 
 
 class TeleRoundTrip(unittest.TestCase):
+    def _make(self, n_slaves=1):
+        tm = P.TeleMaster()
+        tm.cycle_id = 9
+        tm.time_master_us = 123456
+        tm.cmd_seq_active = 41
+        tm.robot_state = P.ROBOT_READY
+        tm.n_slaves = n_slaves
+        tm.status.host.last_cmd_seq_rx = 42
+        tm.status.host.on_time = 1000
+        tm.status.host.late = 7
+        tm.status.spi[0].alive = 1
+        sl = tm.slaves[0]
+        sl.time_slave_us = 7777
+        sl.state = P.SLAVE_READY
+        sl.n_motors = 5
+        mo = sl.motors[0]
+        mo.state = P.MOTOR_ENABLED
+        mo.fault = P.MOTOR_FAULT_NONE
+        mo.flags = P.MOTOR_FLAG_SATURATED
+        mo.last_applied_seq = 0x1234
+        mo.rs.pos, _ = P.enc_i16(0.5, P.POS_SCALE)
+        mo.rs.vel, _ = P.enc_i16(-1.25, P.VEL_SCALE)
+        mo.rs.mode = P.RS_MODE_RUN
+        mo.rs.fault_bits = 0x0A
+        mo.rs.fault_word = 0xDEADBEEF
+        mo.rs.time_slave_us = 7000
+        return tm
+
     def test_pack_parse(self):
-        pr, _ = P.enc_i16(0.5, P.POS_SCALE)
-        vr, _ = P.enc_i16(-1.25, P.VEL_SCALE)
-        tr, _ = P.enc_i16(0.3, P.TAU_SCALE)
-        motor = dict(pos_raw=pr, vel_raw=vr, tau_raw=tr, temp_c=42,
-                     drive_state=P.DRV_ENABLED,
-                     drive_fault=P.DRVF_NONE, rs_mode=2, rs_fault_bits=0x0A,
-                     flags=P.TELE_FLAG_SATURATED, fb_age_ms=250,
-                     rs_fault_word=0xDEADBEEF, last_applied_seq=0x1234)
-        chains = [dict(chain_id=0, spi_seq_echo=0x2A, slave_time_us=7777,
-                       cmd_crc_errors=3, can_tx_errors=1, spi_tx_arm_fails=4, motors=[motor])]
-        b = P.pack_robot_tele(9, 123456, 42, 41, P.ROBOT_STATE_NAMES and 1, chains,
-                              cmd_on_time=1000, cmd_late=7, cmd_missing=3, cmd_duplicate=2)
-        self.assertEqual(len(b), P.SZ_TELE_ROBOT)
-        d = P.parse_robot_tele(b)
-        self.assertEqual((d["cycle_id"], d["last_cmd_seq_rx"], d["n_chains"]), (9, 42, 1))
-        self.assertEqual((d["cmd_seq_active"], d["cmd_on_time"], d["cmd_late"],
-                          d["cmd_missing"], d["cmd_duplicate"]), (41, 1000, 7, 3, 2))
-        ch = d["chains"][0]
-        self.assertEqual((ch["spi_seq_echo"], ch["cmd_crc_errors"], ch["can_tx_errors"]),
-                         (0x2A, 3, 1))
-        mo = ch["motors"][0]
-        self.assertAlmostEqual(mo.pos, 0.5, places=3)
-        self.assertAlmostEqual(mo.vel, -1.25, places=2)
-        self.assertEqual(mo.drive_state_name, "ENABLED")
-        self.assertEqual(mo.rs_mode_name, "NORMAL")
+        b = P.pack_tele_master(self._make())
+        self.assertEqual(len(b), P.tele_master_size(1))
+        tm = P.parse_tele_master(b)
+        self.assertIsNotNone(tm)
+        self.assertEqual((tm.cycle_id, tm.cmd_seq_active, tm.n_slaves), (9, 41, 1))
+        self.assertEqual(tm.robot_state, P.ROBOT_READY)
+        self.assertEqual(tm.status.host.last_cmd_seq_rx, 42)
+        self.assertEqual((tm.status.host.on_time, tm.status.host.late), (1000, 7))
+        sl = tm.slaves[0]
+        self.assertEqual((sl.state, sl.time_slave_us), (P.SLAVE_READY, 7777))
+        mo = sl.motors[0]
+        self.assertEqual(P.MOTOR_STATE_NAMES[mo.state], "ENABLED")
+        self.assertEqual(P.RS_MODE_NAMES[mo.rs.mode], "RUN")
+        self.assertAlmostEqual(P.dec_i16(mo.rs.pos, P.POS_SCALE), 0.5, places=3)
+        self.assertEqual(mo.rs.fault_word, 0xDEADBEEF)
         self.assertEqual(mo.last_applied_seq, 0x1234)
-        self.assertTrue(mo.saturated)
+        # Truncation: the absent slave slots come back zeroed.
+        self.assertEqual(tm.slaves[3].state, 0)
+
+    def test_truncated_short_rejected(self):
+        b = P.pack_tele_master(self._make())
+        self.assertIsNone(P.parse_tele_master(b[:P.tele_master_size(1) - 1]))
+        self.assertIsNone(P.parse_tele_master(b"\x00" * 4))
 
 
 class FrameCodec(unittest.TestCase):
     def test_round_trip(self):
-        payload = P.pack_robot_cmd(1, 1, [{"chain_id": 0, "motors": [
-            {"drive_req": P.DRV_REQ_ENABLE, "flags": P.CMD_FLAG_VALID}]}])
-        fr = P.encode_frame(P.MSG_ROBOT_CMD, P.NODE_JETSON, P.NODE_MASTER, payload)
+        payload = P.pack_cmd_master(1, 1, [{}])
+        fr = P.encode_frame(P.USB_MSG_CMD, payload, seq=77)
         r = P.decode_frame(bytearray(fr))
         self.assertIsNotNone(r)
-        self.assertEqual(r[0], P.MSG_ROBOT_CMD)
-        self.assertEqual(r[3], payload)
+        mt, seq, pl, consumed = r
+        self.assertEqual((mt, seq, pl, consumed),
+                         (P.USB_MSG_CMD, 77, payload, len(fr)))
 
     def test_bad_crc_resyncs(self):
-        fr = bytearray(P.encode_frame(P.MSG_PING, P.NODE_JETSON, P.NODE_MASTER))
+        fr = bytearray(P.encode_frame(P.USB_MSG_PING))
         fr[-1] ^= 0x01
         self.assertIsNone(P.decode_frame(bytearray(fr)))
 
-    def test_wrong_version_dropped_and_counted(self):
-        wrong = (P.PROTO_VERSION + 1) & 0xFF
-        fr = bytearray(P.encode_frame(P.MSG_PING, P.NODE_JETSON, P.NODE_MASTER))
-        fr[12] = wrong                  # ver_flags low byte
-        fr[14] = 0
-        fr[15] = 0
-        crc = P.crc16(bytes(fr))
-        fr[14] = crc & 0xFF
-        fr[15] = (crc >> 8) & 0xFF
-        before = P.version_errors
+    def test_junk_then_frame_recovers_with_discard(self):
+        good = P.encode_frame(P.USB_MSG_PING, b"\xAA", seq=5)
+        buf = bytearray(b"\x00" * 14 + good)
+        discards = []
+        r = P.decode_frame(buf, on_reject=lambda why, b: discards.append((why, b)))
+        self.assertIsNotNone(r)
+        mt, seq, pl, consumed = r
+        self.assertEqual((mt, seq, pl), (P.USB_MSG_PING, 5, b"\xAA"))
+        self.assertEqual(discards, [("discard", b"\x00" * 14)])
+
+    def test_unknown_type_dropped(self):
+        fr = bytearray(P.encode_frame(P.USB_MSG_PING))
+        fr[0] = 0x7F       # unknown type; CRC now also wrong — both paths drop
         self.assertIsNone(P.decode_frame(bytearray(fr)))
-        self.assertEqual(P.version_errors, before + 1)
+
+    def test_incomplete_waits(self):
+        fr = P.encode_frame(P.USB_MSG_CMD, b"\x01" * 20)
+        buf = bytearray(fr[:-5])
+        self.assertIsNone(P.decode_frame(buf))
+        self.assertEqual(len(buf), len(fr) - 5)   # nothing consumed while waiting
 
 
 class WrapAwareSeq(unittest.TestCase):
@@ -129,52 +165,6 @@ class WrapAwareSeq(unittest.TestCase):
         self.assertFalse(P.seq_ge(65535, 2))
         self.assertTrue(P.seq_ge(0x7FFF, 0))
         self.assertFalse(P.seq_ge(0, 0x7FFF))
-
-
-class CrossLanguageFixture(unittest.TestCase):
-    """Byte-compare the C-packed fixture against the Python-packed equivalent."""
-
-    def _build_and_run(self):
-        gcc = shutil.which("gcc") or shutil.which("cc")
-        if gcc is None:
-            self.skipTest("no C compiler available")
-        src = os.path.join(ROOT, "firmware", "common", "test", "gen_fixture.c")
-        inc = os.path.join(ROOT, "firmware", "common", "include")
-        exe = os.path.join(HERE, "_gen_fixture_bin")
-        subprocess.check_call([gcc, "-std=c11", "-Wall", "-Wextra", "-Werror",
-                               "-I", inc, src, "-o", exe])
-        try:
-            out = subprocess.check_output([exe]).decode()
-        finally:
-            os.remove(exe)
-        fields = {}
-        for line in out.splitlines():
-            parts = line.split()
-            fields[parts[0]] = bytes(int(x, 16) for x in parts[1:])
-        return fields
-
-    def test_cmd_and_tele_match_c(self):
-        got = self._build_and_run()
-
-        chains = [{"chain_id": 0, "motors": [
-            {"drive_req": P.DRV_REQ_ENABLE, "pos": 0.5, "vel": -1.25, "kp": 15.0,
-             "kd": 1.0, "tau_ff": 0.3, "flags": P.CMD_FLAG_VALID}]}]
-        py_cmd = P.pack_robot_cmd(7, 42, chains, reserved=0xDE)
-        self.assertEqual(py_cmd, got["ROBOTCMD"], "cmd_robot_t layout drift C↔Python")
-
-        pr, _ = P.enc_i16(0.5, P.POS_SCALE)
-        vr, _ = P.enc_i16(-1.25, P.VEL_SCALE)
-        tr, _ = P.enc_i16(0.3, P.TAU_SCALE)
-        motor = dict(pos_raw=pr, vel_raw=vr, tau_raw=tr, temp_c=42,
-                     drive_state=P.DRV_ENABLED,
-                     drive_fault=P.DRVF_NONE, rs_mode=2, rs_fault_bits=0x0A,
-                     flags=P.TELE_FLAG_SATURATED, fb_age_ms=250,
-                     rs_fault_word=0xDEADBEEF, last_applied_seq=0x1234)
-        tchains = [dict(chain_id=0, spi_seq_echo=0x2A, slave_time_us=7777,
-                        cmd_crc_errors=3, can_tx_errors=1, spi_tx_arm_fails=4, motors=[motor])]
-        py_tele = P.pack_robot_tele(9, 123456, 42, 41, 1, tchains,
-                                    cmd_on_time=1000, cmd_late=7, cmd_missing=3, cmd_duplicate=2)
-        self.assertEqual(py_tele, got["ROBOTTELE"], "tele_robot_t layout drift C↔Python")
 
 
 if __name__ == "__main__":

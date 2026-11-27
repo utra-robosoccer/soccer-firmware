@@ -401,13 +401,13 @@ class LegsWalkPolicy(Policy):
                 q1 = self._cmd(k, emit)
                 q2 = self._cmd(k, emit + VEL_DT)
                 kp, kd = default_gains(k[0], k[1])
-                cmds.append(MotorCommand(k[0], k[1], req=REQ_ENABLE, valid=True, pos=q1,
+                cmds.append(MotorCommand(k[0], k[1], req=REQ_ENABLE, pos=q1,
                                          vel=(q2 - q0) / (2.0 * VEL_DT),
-                                         kp=kp, kd=kd, use_config_gains=False))
+                                         kp=kp, kd=kd))
             else:                              # held joint: stiff at the captured pose
                 kp, kd = default_gains(k[0], k[1])
-                cmds.append(MotorCommand(k[0], k[1], req=REQ_ENABLE, valid=True, pos=self._p0[k], vel=0.0,
-                                         kp=kp, kd=kd, use_config_gains=False))
+                cmds.append(MotorCommand(k[0], k[1], req=REQ_ENABLE, pos=self._p0[k], vel=0.0,
+                                         kp=kp, kd=kd))
         return Action(motors=cmds)
 
 

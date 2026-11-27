@@ -1,9 +1,13 @@
-/* Host golden/oracle tests for the SPI frame codec (spi_proto.c), PROTO_VERSION 3.
+/* Host golden/oracle tests for the SPI frame codec (spi_proto.c).
  *
- * One chain per slave → fixed-size frames. Asserts:
- *   - spi_proto_build_tele writes the tele_chain_t verbatim + a correct CRC;
- *   - spi_proto_parse_cmd round-trips the header + cmd_chain_t on a valid frame,
- *     and rejects a frame with a corrupted CRC-covered byte.
+ * Fixed-size frames (protocol_wire.h): spi_cmd_frame_t = 64 B
+ * {spi_header_t, cmd_slave_t, crc16}, spi_tele_frame_t = 138 B
+ * {tele_slave_t, crc16}, both CRC16-CCITT over everything before the crc field,
+ * CRC stored little-endian. Asserts:
+ *   - spi_proto_build_tele writes the tele_slave_t verbatim + a correct CRC;
+ *   - spi_proto_parse_cmd round-trips header + cmd_slave_t on a valid frame,
+ *     and rejects a frame with any corrupted CRC-covered byte;
+ *   - a frozen golden command frame parses to frozen field values (layout pin).
  * Exit 0 = all pass; nonzero = failure (message on stderr).
  *
  * Build (see host/tests/test_spi_proto.py):
@@ -11,10 +15,11 @@
  *       firmware/common/test/test_spi_proto.c .../spi_proto.c -o test_spi_proto
  */
 #include "spi_proto.h"
-#include "spi_gate.h"
+#include "protocol.h"
 #include <stdio.h>
 #include <string.h>
 #include <stdint.h>
+#include <stddef.h>
 
 static int failures = 0;
 #define CHECK(cond, msg) do { if (!(cond)) { \
@@ -23,167 +28,101 @@ static int failures = 0;
 static uint32_t lcg_state = 0x12345678u;
 static uint32_t lcg(void) { lcg_state = lcg_state * 1664525u + 1013904223u; return lcg_state; }
 
-static void fill_cmd_chain(cmd_chain_t *c)
+static void fill_random(void *p, size_t n)
 {
-    memset(c, 0, sizeof(*c));
-    c->chain_id = (uint8_t)(lcg() & 0xFFu);
-    c->n_motors = (uint8_t)(1u + (lcg() % MAX_MOTORS_PER_CHAIN));
-    for (uint8_t i = 0; i < MAX_MOTORS_PER_CHAIN; i++) {
-        c->motors[i].drive_req = (uint8_t)(lcg() % 4u);
-        c->motors[i].pos      = (int16_t)(lcg() & 0xFFFFu);
-        c->motors[i].vel      = (int16_t)(lcg() & 0xFFFFu);
-        c->motors[i].kp       = (uint16_t)(lcg() & 0xFFFFu);
-        c->motors[i].kd       = (uint16_t)(lcg() & 0xFFFFu);
-        c->motors[i].tau_ff   = (int16_t)(lcg() & 0xFFFFu);
-        c->motors[i].flags    = (uint8_t)(lcg() & 0xFFu);
-    }
+    uint8_t *b = (uint8_t *)p;
+    for (size_t i = 0; i < n; i++) b[i] = (uint8_t)(lcg() & 0xFFu);
 }
 
-static void fill_tele_chain(tele_chain_t *t)
+/* Reference encoder for a command frame: lay the bytes out by offsetof, CRC LE. */
+static void ref_build_cmd(uint8_t *frame, const spi_header_t *hdr, const cmd_slave_t *cmd)
 {
-    memset(t, 0, sizeof(*t));
-    t->chain_id       = (uint8_t)(lcg() & 0xFFu);
-    t->n_motors       = (uint8_t)(1u + (lcg() % MAX_MOTORS_PER_CHAIN));
-    t->spi_seq_echo   = (uint8_t)(lcg() & 0xFFu);
-    t->slave_time_us  = lcg();
-    t->cmd_crc_errors = (uint16_t)(lcg() & 0xFFFFu);
-    t->can_tx_errors  = (uint16_t)(lcg() & 0xFFFFu);
-    for (uint8_t i = 0; i < MAX_MOTORS_PER_CHAIN; i++) {
-        t->motors[i].pos              = (int16_t)(lcg() & 0xFFFFu);
-        t->motors[i].vel              = (int16_t)(lcg() & 0xFFFFu);
-        t->motors[i].tau              = (int16_t)(lcg() & 0xFFFFu);
-        t->motors[i].temp_c           = (uint8_t)(lcg() & 0xFFu);
-        t->motors[i].drive_state      = (uint8_t)(lcg() % 9u);
-        t->motors[i].drive_fault      = (uint8_t)(lcg() % 8u);
-        t->motors[i].rs_mode          = (uint8_t)(lcg() % 3u);
-        t->motors[i].rs_fault_bits    = (uint8_t)(lcg() & 0xFFu);
-        t->motors[i].flags            = (uint8_t)(lcg() & 0xFFu);
-        t->motors[i].fb_age_ms        = (uint8_t)(lcg() & 0xFFu);
-        t->motors[i].rs_fault_word    = lcg();
-        t->motors[i].last_applied_seq = (uint16_t)(lcg() & 0xFFFFu);
-    }
-}
-
-/* Build a command frame the way the master does, for parse round-trip tests. */
-static void build_cmd_frame(uint8_t *frame, uint8_t opcode, uint8_t spi_seq,
-                            uint16_t cycle_id, uint16_t cmd_seq, const cmd_chain_t *chain)
-{
-    memset(frame, 0, SPI_CMD_FRAME_SIZE);
-    frame[0] = opcode;
-    frame[1] = spi_seq;
-    frame[2] = (uint8_t)(cycle_id & 0xFFu);
-    frame[3] = (uint8_t)(cycle_id >> 8);
-    frame[4] = (uint8_t)(cmd_seq & 0xFFu);
-    frame[5] = (uint8_t)(cmd_seq >> 8);
-    memcpy(&frame[SPI_CMD_HDR_BYTES], chain, sizeof(cmd_chain_t));
-    spi_trailer_write(&frame[SPI_CMD_TRAILER_OFF]);   /* version gate (v9.1) */
-    uint16_t crc = proto_crc16(frame, SPI_CMD_CRC_OFF);
-    frame[SPI_CMD_CRC_OFF]     = (uint8_t)(crc & 0xFFu);
-    frame[SPI_CMD_CRC_OFF + 1] = (uint8_t)(crc >> 8);
-}
-
-/* Re-CRC a frame after a deliberate payload/trailer edit (CRC stays valid). */
-static void recrc_cmd_frame(uint8_t *frame)
-{
-    uint16_t crc = proto_crc16(frame, SPI_CMD_CRC_OFF);
-    frame[SPI_CMD_CRC_OFF]     = (uint8_t)(crc & 0xFFu);
-    frame[SPI_CMD_CRC_OFF + 1] = (uint8_t)(crc >> 8);
-}
-
-static void test_build_tele(void)
-{
-    for (int trial = 0; trial < 2000; trial++) {
-        tele_chain_t t;
-        fill_tele_chain(&t);
-        uint8_t frame[SPI_TELE_FRAME_SIZE];
-        spi_proto_build_tele(frame, &t);
-        CHECK(memcmp(frame, &t, sizeof(tele_chain_t)) == 0,
-              "tele frame prefix != tele_chain_t");
-        CHECK(spi_trailer_match(&frame[SPI_TELE_TRAILER_OFF]) == 1u,
-              "tele trailer not this build's");
-        uint16_t crc = proto_crc16(frame, SPI_TELE_CRC_OFF);
-        CHECK(frame[SPI_TELE_CRC_OFF] == (uint8_t)(crc & 0xFFu) &&
-              frame[SPI_TELE_CRC_OFF + 1] == (uint8_t)(crc >> 8), "tele CRC mismatch");
-    }
-}
-
-static void test_parse_cmd(void)
-{
-    for (int trial = 0; trial < 2000; trial++) {
-        cmd_chain_t c;
-        fill_cmd_chain(&c);
-        uint8_t opcode  = (lcg() & 1u) ? SPI_OP_ROBOT_CMD : SPI_OP_NOP;
-        uint8_t spi_seq = (uint8_t)(lcg() & 0xFFu);
-        uint16_t cyc    = (uint16_t)(lcg() & 0xFFFFu);
-        uint16_t cseq   = (uint16_t)(lcg() & 0xFFFFu);
-
-        uint8_t frame[SPI_CMD_FRAME_SIZE];
-        build_cmd_frame(frame, opcode, spi_seq, cyc, cseq, &c);
-
-        SpiCmdHdr   hdr;
-        cmd_chain_t out;
-        CHECK(spi_proto_parse_cmd(frame, &hdr, &out) == SPI_PARSE_OK,
-              "valid cmd rejected");
-        CHECK(hdr.opcode == opcode && hdr.spi_seq == spi_seq &&
-              hdr.cycle_id == cyc && hdr.cmd_seq == cseq, "cmd header mismatch");
-        CHECK(memcmp(&out, &c, sizeof(cmd_chain_t)) == 0, "cmd_chain_t mismatch");
-
-        /* CRC-intact frame from a differently-versioned master → MISMATCH and
-           zeroed outputs (the payload must never be applied). */
-        uint8_t mm[SPI_CMD_FRAME_SIZE];
-        memcpy(mm, frame, SPI_CMD_FRAME_SIZE);
-        mm[SPI_CMD_TRAILER_OFF] ^= 0x01u;       /* wrong proto_version */
-        recrc_cmd_frame(mm);
-        SpiCmdHdr   hdrm;
-        cmd_chain_t outm;
-        CHECK(spi_proto_parse_cmd(mm, &hdrm, &outm) == SPI_PARSE_MISMATCH,
-              "mismatched cmd not flagged");
-        CHECK(hdrm.opcode == 0u && hdrm.cmd_seq == 0u, "mismatch hdr not zeroed");
-        memcpy(mm, frame, SPI_CMD_FRAME_SIZE);
-        mm[SPI_CMD_TRAILER_OFF + 2] ^= 0x40u;   /* wrong schema hash byte */
-        recrc_cmd_frame(mm);
-        CHECK(spi_proto_parse_cmd(mm, &hdrm, &outm) == SPI_PARSE_MISMATCH,
-              "hash-mismatched cmd not flagged");
-
-        /* Recovery: the original matching frame parses OK again (stateless). */
-        CHECK(spi_proto_parse_cmd(frame, &hdr, &out) == SPI_PARSE_OK,
-              "recovery after mismatch failed");
-
-        /* Corrupt a CRC-covered byte → must reject. */
-        frame[0] ^= 0xFFu;
-        SpiCmdHdr   hdr2;
-        cmd_chain_t out2;
-        CHECK(spi_proto_parse_cmd(frame, &hdr2, &out2) == SPI_PARSE_BAD,
-              "corrupt cmd accepted");
-    }
-}
-
-/* Frozen golden: a fixed tele_chain_t pins absolute structural bytes + CRC. */
-static void test_golden(void)
-{
-    tele_chain_t t;
-    memset(&t, 0, sizeof(t));
-    t.chain_id = 0x03u; t.n_motors = 1u; t.spi_seq_echo = 0x2Au;
-    t.slave_time_us = 7777u; t.cmd_crc_errors = 3u; t.can_tx_errors = 1u;
-    t.motors[0].pos = 5000; t.motors[0].drive_state = DRV_ENABLED; t.motors[0].rs_mode = 2u;
-    t.motors[0].last_applied_seq = 0x1234u;
-
-    uint8_t frame[SPI_TELE_FRAME_SIZE];
-    spi_proto_build_tele(frame, &t);
-    /* byte 2 is tele_chain_t.link (master-authored; the slave sends 0). */
-    CHECK(frame[0] == 0x03u && frame[1] == 0x01u && frame[2] == 0x00u &&
-          frame[3] == 0x2Au, "golden header bytes");
-    uint16_t crc = proto_crc16(frame, SPI_TELE_CRC_OFF);
-    CHECK(frame[SPI_TELE_CRC_OFF] == (uint8_t)(crc & 0xFFu) &&
-          frame[SPI_TELE_CRC_OFF + 1] == (uint8_t)(crc >> 8), "golden CRC");
+    memset(frame, 0, sizeof(spi_cmd_frame_t));
+    memcpy(frame + offsetof(spi_cmd_frame_t, hdr), hdr, sizeof(*hdr));
+    memcpy(frame + offsetof(spi_cmd_frame_t, cmd), cmd, sizeof(*cmd));
+    uint16_t crc = proto_crc16(frame, offsetof(spi_cmd_frame_t, crc16));
+    frame[offsetof(spi_cmd_frame_t, crc16)]      = (uint8_t)(crc & 0xFFu);
+    frame[offsetof(spi_cmd_frame_t, crc16) + 1u] = (uint8_t)(crc >> 8);
 }
 
 int main(void)
 {
-    test_build_tele();
-    test_parse_cmd();
-    test_golden();
-    if (failures == 0) { printf("spi_proto golden tests: OK\n"); return 0; }
-    fprintf(stderr, "spi_proto golden tests: %d FAILURE(S)\n", failures);
-    return 1;
+    /* ── telemetry build: verbatim struct + correct CRC, randomized ─────────── */
+    for (int it = 0; it < 2000; it++) {
+        tele_slave_t t;
+        fill_random(&t, sizeof(t));
+        uint8_t frame[sizeof(spi_tele_frame_t)];
+        memset(frame, 0xEE, sizeof(frame));
+        spi_proto_build_tele(frame, &t);
+
+        CHECK(memcmp(frame, &t, sizeof(t)) == 0, "tele payload verbatim");
+        uint16_t crc = proto_crc16(frame, offsetof(spi_tele_frame_t, crc16));
+        uint16_t got = (uint16_t)(frame[offsetof(spi_tele_frame_t, crc16)]
+                     | ((uint16_t)frame[offsetof(spi_tele_frame_t, crc16) + 1u] << 8));
+        CHECK(got == crc, "tele CRC little-endian over payload");
+    }
+
+    /* ── command parse: round-trip + reject-on-corruption, randomized ───────── */
+    for (int it = 0; it < 2000; it++) {
+        spi_header_t h;
+        cmd_slave_t c;
+        fill_random(&h, sizeof(h));
+        fill_random(&c, sizeof(c));
+        uint8_t frame[sizeof(spi_cmd_frame_t)];
+        ref_build_cmd(frame, &h, &c);
+
+        spi_header_t ph;
+        cmd_slave_t pc;
+        CHECK(spi_proto_parse_cmd(frame, &ph, &pc) == 1u, "valid cmd accepted");
+        CHECK(memcmp(&ph, &h, sizeof(h)) == 0, "header round-trip");
+        CHECK(memcmp(&pc, &c, sizeof(c)) == 0, "cmd round-trip");
+
+        /* corrupt one CRC-covered byte (or a CRC byte) → rejected */
+        uint16_t pos = (uint16_t)(lcg() % sizeof(spi_cmd_frame_t));
+        frame[pos] ^= (uint8_t)(1u << (lcg() % 8u));
+        CHECK(spi_proto_parse_cmd(frame, &ph, &pc) == 0u, "corrupted cmd rejected");
+    }
+
+    /* ── frozen golden command frame: pins the layout itself ────────────────── */
+    {
+        spi_header_t h;
+        memset(&h, 0, sizeof(h));
+        h.opcode   = SPI_OP_CMD;
+        h.spi_seq  = 0xA5u;
+        h.cycle_id = 0xBEEF;
+        h.cmd_seq  = 0x1234;
+
+        cmd_slave_t c;
+        memset(&c, 0, sizeof(c));
+        c.req = SLAVE_REQ_RESET;
+        for (uint8_t i = 0; i < MAX_MOTORS_PER_SLAVE; i++) {
+            c.motors[i].req        = (uint8_t)(i & 1u);     /* STOP/ENABLE alternating */
+            c.motors[i].mit.pos    = (int16_t)(1000 * (i + 1));
+            c.motors[i].mit.vel    = (int16_t)(-200 * (i + 1));
+            c.motors[i].mit.kp     = (uint16_t)(300u + i);
+            c.motors[i].mit.kd     = (uint16_t)(40u + i);
+            c.motors[i].mit.tau_ff = (int16_t)(7 * (i + 1));
+        }
+        uint8_t frame[sizeof(spi_cmd_frame_t)];
+        ref_build_cmd(frame, &h, &c);
+
+        /* Spot-check frozen absolute offsets (hdr 6 B, motor stride 11 B). */
+        CHECK(frame[0] == SPI_OP_CMD, "golden: opcode at byte 0");
+        CHECK(frame[1] == 0xA5u, "golden: seq at byte 1");
+        CHECK(frame[2] == 0xEFu && frame[3] == 0xBEu, "golden: cycle_id LE at 2..3");
+        CHECK(frame[4] == 0x34u && frame[5] == 0x12u, "golden: cmd_seq LE at 4..5");
+        CHECK(frame[6] == SLAVE_REQ_RESET, "golden: slave req at byte 6");
+        CHECK(frame[7] == 0u, "golden: motor0 req");
+        CHECK(frame[8] == 0xE8u && frame[9] == 0x03u, "golden: motor0 pos=1000 LE");
+        CHECK(frame[18] == 1u, "golden: motor1 req at 7+11");
+
+        spi_header_t ph; cmd_slave_t pc;
+        CHECK(spi_proto_parse_cmd(frame, &ph, &pc) == 1u, "golden parses");
+        CHECK(pc.motors[4].mit.pos == 5000 && pc.motors[4].mit.vel == -1000,
+              "golden: motor4 fields");
+    }
+
+    if (failures) { fprintf(stderr, "%d failure(s)\n", failures); return 1; }
+    printf("OK spi_proto\n");
+    return 0;
 }

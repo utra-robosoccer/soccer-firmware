@@ -4,12 +4,15 @@ File = header, then a stream of records.
 
 Header:
     magic            4s   b"RLOG"
-    log_fmt_version  u16
-    proto_version    u16  (protocol.PROTO_VERSION at write time)
+    log_fmt_version  u16  (2 — the protocol_wire.h era; 1 logs carried the old
+                           16 B MsgHeader frames and a proto_version field here)
+    reserved         u16  (0; v1 wrote protocol.PROTO_VERSION — the wire has no
+                           version anymore, the repo commit in meta pins it)
     wall_start_ns    u64  time.time_ns()      — wall clock at start
     mono_start_ns    u64  time.monotonic_ns() — record timestamps share this clock
     meta_len         u32
-    meta             meta_len bytes of UTF-8 JSON (git, config name/hash/yaml, producer)
+    meta             meta_len bytes of UTF-8 JSON (git commit/dirty, config
+                     name/hash/yaml, producer)
 
 Record (repeated):
     kind    u8
@@ -28,7 +31,7 @@ Record kinds and their payloads:
 import struct
 
 MAGIC = b"RLOG"
-LOG_FMT_VERSION = 1
+LOG_FMT_VERSION = 2
 
 # ── record kinds ────────────────────────────────────────────────────────────
 RX_FRAME    = 1
@@ -46,7 +49,7 @@ KIND_NAMES = {
 }
 
 # ── struct layouts ──────────────────────────────────────────────────────────
-_HEADER_FIXED = struct.Struct("<4sHHQQI")   # magic, fmt_ver, proto_ver, wall, mono, meta_len
+_HEADER_FIXED = struct.Struct("<4sHHQQI")   # magic, fmt_ver, reserved, wall, mono, meta_len
 _REC_HEADER   = struct.Struct("<BQI")       # kind, mono_ns, length
 
 # LOOP_TIMING payload: seq (u64) + period/step/send/lateness (i64 ns).
@@ -58,9 +61,9 @@ LOOP_TIMING_FMT = struct.Struct("<Qqqqq")
 LOG_DROP_FMT = struct.Struct("<IQQ")   # dropped_count, first_mono_ns, last_mono_ns
 
 
-def pack_header(proto_version: int, wall_start_ns: int, mono_start_ns: int,
+def pack_header(wall_start_ns: int, mono_start_ns: int,
                 meta_bytes: bytes) -> bytes:
-    return _HEADER_FIXED.pack(MAGIC, LOG_FMT_VERSION, proto_version,
+    return _HEADER_FIXED.pack(MAGIC, LOG_FMT_VERSION, 0,
                               wall_start_ns, mono_start_ns, len(meta_bytes)) + meta_bytes
 
 

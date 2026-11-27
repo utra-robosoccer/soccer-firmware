@@ -23,7 +23,7 @@
 #include <string.h>
 
 #include "motor_rs_config.h"   /* MotorRsConfig (tier-1 vendor ranges), MOTOR_RS_P_MIN/MAX */
-#include "motor_types.h"       /* motor_t, motor_status_t, rs_runmode_t */
+#include "motor_types.h"       /* motor_t, rs_runmode_t */
 
 #ifdef __cplusplus
 extern "C" {
@@ -221,7 +221,7 @@ static inline uint8_t rs_decode_feedback(uint32_t ext_id, const uint8_t data[8],
         return 0;
     }
 
-    motor->status = (motor_status_t)((data_field & RS_FB_DATA_MODE_MASK) >> 14);
+    motor->status = (uint8_t)((data_field & RS_FB_DATA_MODE_MASK) >> 14);  /* RsMode */
 
     uint8_t fault_byte = (uint8_t)((data_field & RS_FB_DATA_FAULT_MASK) >> 8);
     motor->motor_errors.undervoltage   = (fault_byte >> FAULT_BIT_UNDERVOLTAGE)   & 0x01;

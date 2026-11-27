@@ -1,7 +1,9 @@
-/* Pure (HAL-free) tests for the protocol-v9 drive state machine (drive_sm.h).
- * Covers every cell of the request × state matrix (docs/protocol_v9.md §3), every
- * fault-reaction row (§4) including the latch-at-detection rule, and the
- * transient-state tick table. Exit 0 = OK. */
+/* Pure (HAL-free) tests for the drive state machine (drive_sm.h) over the
+ * protocol_wire.h MotorState/MotorReq/MotorFault enums. Covers every cell of
+ * the request × state matrix, every fault-reaction row (EMERGENCY vs the one
+ * CONTROLLED fault, MASTER_LOST) including the first-fault-wins latch rule,
+ * and the transient-state tick table (ENABLING / STOPPING / DISABLED→ABSENT,
+ * with ABSENT terminal). Exit 0 = OK. */
 #include "drive_sm.h"
 #include <stdio.h>
 
@@ -12,17 +14,15 @@ static int failures = 0;
 /* A decision with no actions and no state change. */
 static uint8_t req_noop(DriveReqDecision d, uint8_t state)
 {
-    return (uint8_t)(d.next_state == state && !d.rejected && !d.send_disable &&
-                     !d.send_clear && !d.begin_enable && !d.begin_stop &&
-                     !d.abort_enable && d.latch_fault == DRVF_NONE &&
-                     !d.clear_fault && !d.reset_cmd_seq);
+    return (uint8_t)(d.next_state == state && !d.rejected && !d.send_stop &&
+                     !d.begin_enable && !d.begin_stop && !d.abort_enable &&
+                     !d.reset_cmd_seq);
 }
 
 static uint8_t req_rej(DriveReqDecision d, uint8_t state)
 {
-    return (uint8_t)(d.next_state == state && d.rejected && !d.send_disable &&
-                     !d.send_clear && !d.begin_enable && !d.begin_stop &&
-                     d.latch_fault == DRVF_NONE && !d.clear_fault);
+    return (uint8_t)(d.next_state == state && d.rejected && !d.send_stop &&
+                     !d.begin_enable && !d.begin_stop && !d.abort_enable);
 }
 
 static DriveReqDecision R(uint8_t st, uint8_t rq)        /* plain request */
@@ -39,180 +39,153 @@ int main(void)
 
     /* ── request × state matrix ──────────────────────────────────────────── */
 
-    /* BOOT / DISCOVERING: everything rejected. */
-    for (uint8_t st = DRV_BOOT; st <= DRV_DISCOVERING; st++)
-        for (uint8_t rq = DRV_REQ_DISABLE; rq <= DRV_REQ_RESET; rq++)
-            CHECK(req_rej(R(st, rq), st), "BOOT/DISCOVERING reject everything");
+    /* ABSENT: terminal — STOP no-op, ENABLE rejected. */
+    CHECK(req_noop(R(MOTOR_ABSENT, MOTOR_REQ_STOP),   MOTOR_ABSENT), "ABSENT+STOP no-op");
+    CHECK(req_rej (R(MOTOR_ABSENT, MOTOR_REQ_ENABLE), MOTOR_ABSENT), "ABSENT+ENABLE rejected");
 
-    /* CLEARING: everything ignored silently (no rejected flag). */
-    for (uint8_t rq = DRV_REQ_DISABLE; rq <= DRV_REQ_RESET; rq++)
-        CHECK(req_noop(R(DRV_CLEARING, rq), DRV_CLEARING), "CLEARING ignores all requests");
+    /* DISABLED: STOP is the resting request; ENABLE begins the handshake
+       (readiness gating is the caller's verified-enable gate). */
+    CHECK(req_noop(R(MOTOR_DISABLED, MOTOR_REQ_STOP), MOTOR_DISABLED), "DISABLED+STOP no-op");
+    d = R(MOTOR_DISABLED, MOTOR_REQ_ENABLE);
+    CHECK(d.next_state == MOTOR_ENABLING && d.begin_enable && d.reset_cmd_seq &&
+          !d.rejected && !d.send_stop, "DISABLED+ENABLE → ENABLING");
 
-    /* ABSENT: DISABLE/STOP no-op, ENABLE/RESET rejected. */
-    CHECK(req_noop(R(DRV_ABSENT, DRV_REQ_DISABLE), DRV_ABSENT), "ABSENT+DISABLE no-op");
-    CHECK(req_noop(R(DRV_ABSENT, DRV_REQ_STOP),    DRV_ABSENT), "ABSENT+STOP no-op");
-    CHECK(req_rej (R(DRV_ABSENT, DRV_REQ_ENABLE),  DRV_ABSENT), "ABSENT+ENABLE rejected");
-    CHECK(req_rej (R(DRV_ABSENT, DRV_REQ_RESET),   DRV_ABSENT), "ABSENT+RESET rejected");
+    /* ENABLING: STOP aborts the handshake (nothing to ramp yet); ENABLE no-op. */
+    d = R(MOTOR_ENABLING, MOTOR_REQ_STOP);
+    CHECK(d.next_state == MOTOR_DISABLED && d.abort_enable && d.send_stop &&
+          d.reset_cmd_seq, "ENABLING+STOP aborts → DISABLED");
+    d = drive_sm_on_request(MOTOR_ENABLING, MOTOR_REQ_STOP, 1u);
+    CHECK(d.next_state == MOTOR_FAULT && d.abort_enable && d.send_stop,
+          "ENABLING+STOP with latch → FAULT (no laundering)");
+    CHECK(req_noop(R(MOTOR_ENABLING, MOTOR_REQ_ENABLE), MOTOR_ENABLING),
+          "ENABLING+ENABLE no-op");
 
-    /* DISABLED: only ENABLE acts. */
-    CHECK(req_noop(R(DRV_DISABLED, DRV_REQ_DISABLE), DRV_DISABLED), "DISABLED+DISABLE no-op");
-    CHECK(req_noop(R(DRV_DISABLED, DRV_REQ_STOP),    DRV_DISABLED), "DISABLED+STOP no-op");
-    CHECK(req_noop(R(DRV_DISABLED, DRV_REQ_RESET),   DRV_DISABLED), "DISABLED+RESET no-op");
-    d = R(DRV_DISABLED, DRV_REQ_ENABLE);
-    CHECK(d.next_state == DRV_ENABLING && d.begin_enable && d.reset_cmd_seq &&
-          !d.rejected && !d.send_disable, "DISABLED+ENABLE → ENABLING");
-
-    /* ENABLING: DISABLE and STOP both abort+disable; ENABLE no-op; RESET rejected. */
-    d = R(DRV_ENABLING, DRV_REQ_DISABLE);
-    CHECK(d.next_state == DRV_DISABLED && d.abort_enable && d.send_disable &&
-          d.reset_cmd_seq, "ENABLING+DISABLE aborts handshake");
-    d = R(DRV_ENABLING, DRV_REQ_STOP);
-    CHECK(d.next_state == DRV_DISABLED && d.abort_enable && d.send_disable,
-          "ENABLING+STOP = DISABLE (nothing to ramp)");
-    CHECK(req_noop(R(DRV_ENABLING, DRV_REQ_ENABLE), DRV_ENABLING), "ENABLING+ENABLE no-op");
-    CHECK(req_rej (R(DRV_ENABLING, DRV_REQ_RESET),  DRV_ENABLING), "ENABLING+RESET rejected");
-
-    /* ENABLED: DISABLE now; STOP ramps; ENABLE no-op; RESET rejected. */
-    d = R(DRV_ENABLED, DRV_REQ_DISABLE);
-    CHECK(d.next_state == DRV_DISABLED && d.send_disable && !d.begin_stop &&
-          d.reset_cmd_seq, "ENABLED+DISABLE → Type-4 now");
-    d = R(DRV_ENABLED, DRV_REQ_STOP);
-    CHECK(d.next_state == DRV_STOPPING && d.begin_stop && !d.send_disable &&
+    /* ENABLED: STOP ramps; ENABLE no-op. */
+    d = R(MOTOR_ENABLED, MOTOR_REQ_STOP);
+    CHECK(d.next_state == MOTOR_STOPPING && d.begin_stop && !d.send_stop &&
           d.reset_cmd_seq, "ENABLED+STOP → STOPPING");
-    CHECK(req_noop(R(DRV_ENABLED, DRV_REQ_ENABLE), DRV_ENABLED), "ENABLED+ENABLE no-op");
-    CHECK(req_rej (R(DRV_ENABLED, DRV_REQ_RESET),  DRV_ENABLED), "ENABLED+RESET rejected");
+    CHECK(req_noop(R(MOTOR_ENABLED, MOTOR_REQ_ENABLE), MOTOR_ENABLED),
+          "ENABLED+ENABLE no-op");
 
-    /* STOPPING: DISABLE cuts the ramp short — end state honours the fault latch. */
-    d = drive_sm_on_request(DRV_STOPPING, DRV_REQ_DISABLE, 0u);
-    CHECK(d.next_state == DRV_DISABLED && d.send_disable,
-          "STOPPING+DISABLE, no fault → DISABLED");
-    d = drive_sm_on_request(DRV_STOPPING, DRV_REQ_DISABLE, 1u);
-    CHECK(d.next_state == DRV_FAULT && d.send_disable,
-          "STOPPING+DISABLE, fault latched → FAULT (no laundering)");
-    CHECK(req_noop(R(DRV_STOPPING, DRV_REQ_ENABLE), DRV_STOPPING), "STOPPING+ENABLE no-op");
-    CHECK(req_noop(R(DRV_STOPPING, DRV_REQ_STOP),   DRV_STOPPING), "STOPPING+STOP no-op");
-    CHECK(req_rej (R(DRV_STOPPING, DRV_REQ_RESET),  DRV_STOPPING), "STOPPING+RESET rejected");
+    /* STOPPING: both requests inert while the ramp runs. */
+    CHECK(req_noop(R(MOTOR_STOPPING, MOTOR_REQ_STOP),   MOTOR_STOPPING), "STOPPING+STOP no-op");
+    CHECK(req_rej (R(MOTOR_STOPPING, MOTOR_REQ_ENABLE), MOTOR_STOPPING), "STOPPING+ENABLE rejected");
 
-    /* FAULT: latched; only RESET leaves, into CLEARING with the wire clear. */
-    CHECK(req_noop(R(DRV_FAULT, DRV_REQ_DISABLE), DRV_FAULT), "FAULT+DISABLE stays latched");
-    CHECK(req_noop(R(DRV_FAULT, DRV_REQ_STOP),    DRV_FAULT), "FAULT+STOP no-op");
-    CHECK(req_rej (R(DRV_FAULT, DRV_REQ_ENABLE),  DRV_FAULT), "FAULT+ENABLE rejected");
-    d = R(DRV_FAULT, DRV_REQ_RESET);
-    CHECK(d.next_state == DRV_CLEARING && d.send_clear && d.clear_fault &&
-          !d.rejected, "FAULT+RESET → CLEARING, clears fault code on entry");
+    /* FAULT: latched — STOP no-op, ENABLE rejected. Only SLAVE_REQ_RESET
+       (outside this machine) leaves FAULT. */
+    CHECK(req_noop(R(MOTOR_FAULT, MOTOR_REQ_STOP),   MOTOR_FAULT), "FAULT+STOP stays latched");
+    CHECK(req_rej (R(MOTOR_FAULT, MOTOR_REQ_ENABLE), MOTOR_FAULT), "FAULT+ENABLE rejected");
+
+    /* Unknown request value: rejected everywhere. */
+    CHECK(req_rej(R(MOTOR_ENABLED, 0x7Fu), MOTOR_ENABLED), "unknown req rejected");
+
+    /* ── fault classification ────────────────────────────────────────────── */
+    CHECK(!drive_sm_fault_immediate(MOTOR_FAULT_NONE), "NONE not immediate");
+    CHECK(!drive_sm_fault_immediate(MOTOR_FAULT_MASTER_LOST), "MASTER_LOST controlled");
+    CHECK(drive_sm_fault_immediate(MOTOR_FAULT_FEEDBACK_TIMEOUT) &&
+          drive_sm_fault_immediate(MOTOR_FAULT_ENABLE_FAILED) &&
+          drive_sm_fault_immediate(MOTOR_FAULT_LOST_ENABLE) &&
+          drive_sm_fault_immediate(MOTOR_FAULT_OVERTORQUE) &&
+          drive_sm_fault_immediate(MOTOR_FAULT_RS_REPORTED),
+          "all other faults are EMERGENCY");
 
     /* ── fault reactions ─────────────────────────────────────────────────── */
 
-    /* Ramped (MASTER_LOST only) from ENABLED: damp through STOPPING. */
-    f = drive_sm_on_fault(DRV_ENABLED, DRVF_MASTER_LOST, 0u);
-    CHECK(f.next_state == DRV_STOPPING && f.begin_stop &&
-          f.latch_fault == DRVF_MASTER_LOST, "MASTER_LOST in ENABLED → STOPPING");
+    /* CONTROLLED (MASTER_LOST) from ENABLED: damp through STOPPING. */
+    f = drive_sm_on_fault(MOTOR_ENABLED, MOTOR_FAULT_MASTER_LOST, 0u);
+    CHECK(f.next_state == MOTOR_STOPPING && f.begin_stop && !f.send_stop &&
+          f.latch_fault == MOTOR_FAULT_MASTER_LOST, "MASTER_LOST in ENABLED → STOPPING");
 
-    /* Ramped fault but nothing to ramp (ENABLING): immediate. */
-    f = drive_sm_on_fault(DRV_ENABLING, DRVF_MASTER_LOST, 0u);
-    CHECK(f.next_state == DRV_FAULT && f.send_disable && f.abort_enable,
-          "MASTER_LOST in ENABLING → immediate disable");
+    /* CONTROLLED fault but nothing to ramp (ENABLING): immediate. */
+    f = drive_sm_on_fault(MOTOR_ENABLING, MOTOR_FAULT_MASTER_LOST, 0u);
+    CHECK(f.next_state == MOTOR_FAULT && f.send_stop && f.abort_enable,
+          "MASTER_LOST in ENABLING → immediate stop");
 
     /* OVERTORQUE is an immediate stop: cut effort NOW, no damping through it. */
-    f = drive_sm_on_fault(DRV_ENABLED, DRVF_OVERTORQUE, 0u);
-    CHECK(f.next_state == DRV_FAULT && f.send_disable && !f.begin_stop &&
-          f.latch_fault == DRVF_OVERTORQUE, "OVERTORQUE in ENABLED → immediate FAULT");
+    f = drive_sm_on_fault(MOTOR_ENABLED, MOTOR_FAULT_OVERTORQUE, 0u);
+    CHECK(f.next_state == MOTOR_FAULT && f.send_stop && !f.begin_stop &&
+          f.latch_fault == MOTOR_FAULT_OVERTORQUE, "OVERTORQUE in ENABLED → immediate FAULT");
 
     /* Comms-broken: immediate from every armed state. */
-    f = drive_sm_on_fault(DRV_ENABLED, DRVF_CAN_TIMEOUT, 0u);
-    CHECK(f.next_state == DRV_FAULT && f.send_disable && !f.begin_stop,
-          "CAN_TIMEOUT in ENABLED → immediate disable");
-    f = drive_sm_on_fault(DRV_ENABLED, DRVF_NOT_ENABLED, 0u);
-    CHECK(f.next_state == DRV_FAULT && f.send_disable, "NOT_ENABLED → immediate");
-    f = drive_sm_on_fault(DRV_ENABLING, DRVF_CAN_TIMEOUT, 0u);
-    CHECK(f.next_state == DRV_FAULT && f.send_disable && f.abort_enable,
-          "CAN_TIMEOUT in ENABLING aborts the handshake");
-    f = drive_sm_on_fault(DRV_DISABLED, DRVF_MOTOR_REPORTED, 0u);
-    CHECK(f.next_state == DRV_FAULT && f.send_disable &&
-          f.latch_fault == DRVF_MOTOR_REPORTED, "vendor bits in DISABLED → FAULT");
+    f = drive_sm_on_fault(MOTOR_ENABLED, MOTOR_FAULT_FEEDBACK_TIMEOUT, 0u);
+    CHECK(f.next_state == MOTOR_FAULT && f.send_stop && !f.begin_stop,
+          "FEEDBACK_TIMEOUT in ENABLED → immediate stop");
+    f = drive_sm_on_fault(MOTOR_ENABLED, MOTOR_FAULT_LOST_ENABLE, 0u);
+    CHECK(f.next_state == MOTOR_FAULT && f.send_stop, "LOST_ENABLE → immediate");
+    f = drive_sm_on_fault(MOTOR_ENABLING, MOTOR_FAULT_FEEDBACK_TIMEOUT, 0u);
+    CHECK(f.next_state == MOTOR_FAULT && f.send_stop && f.abort_enable,
+          "FEEDBACK_TIMEOUT in ENABLING aborts the handshake");
+    f = drive_sm_on_fault(MOTOR_DISABLED, MOTOR_FAULT_RS_REPORTED, 0u);
+    CHECK(f.next_state == MOTOR_FAULT && f.send_stop &&
+          f.latch_fault == MOTOR_FAULT_RS_REPORTED, "vendor bits in DISABLED → FAULT");
 
     /* Comms-broken during STOPPING abandons the ramp. */
-    f = drive_sm_on_fault(DRV_STOPPING, DRVF_CAN_TIMEOUT, 1u);
-    CHECK(f.next_state == DRV_FAULT && f.send_disable,
-          "CAN_TIMEOUT mid-ramp abandons STOPPING");
-    CHECK(f.latch_fault == DRVF_NONE, "first fault wins: mid-ramp latch suppressed");
+    f = drive_sm_on_fault(MOTOR_STOPPING, MOTOR_FAULT_FEEDBACK_TIMEOUT, 1u);
+    CHECK(f.next_state == MOTOR_FAULT && f.send_stop,
+          "FEEDBACK_TIMEOUT mid-ramp abandons STOPPING");
+    CHECK(f.latch_fault == MOTOR_FAULT_NONE, "first fault wins: mid-ramp latch suppressed");
 
-    /* Ramped-fault repeat during STOPPING: keep ramping. */
-    f = drive_sm_on_fault(DRV_STOPPING, DRVF_MASTER_LOST, 1u);
-    CHECK(f.next_state == DRV_STOPPING && !f.send_disable && !f.begin_stop,
-          "ramped-fault repeat during STOPPING changes nothing");
+    /* CONTROLLED-fault repeat during STOPPING: keep ramping. */
+    f = drive_sm_on_fault(MOTOR_STOPPING, MOTOR_FAULT_MASTER_LOST, 1u);
+    CHECK(f.next_state == MOTOR_STOPPING && !f.send_stop && !f.begin_stop,
+          "MASTER_LOST repeat during STOPPING changes nothing");
 
     /* OVERTORQUE mid-ramp (e.g. the damp itself overloads): abandon the ramp. */
-    f = drive_sm_on_fault(DRV_STOPPING, DRVF_OVERTORQUE, 1u);
-    CHECK(f.next_state == DRV_FAULT && f.send_disable,
+    f = drive_sm_on_fault(MOTOR_STOPPING, MOTOR_FAULT_OVERTORQUE, 1u);
+    CHECK(f.next_state == MOTOR_FAULT && f.send_stop,
           "OVERTORQUE mid-ramp abandons STOPPING");
 
     /* First-fault-wins latch suppression. */
-    f = drive_sm_on_fault(DRV_ENABLED, DRVF_CAN_TIMEOUT, 1u);
-    CHECK(f.latch_fault == DRVF_NONE && f.next_state == DRV_FAULT,
-          "second fault still disables but does not re-latch");
+    f = drive_sm_on_fault(MOTOR_ENABLED, MOTOR_FAULT_FEEDBACK_TIMEOUT, 1u);
+    CHECK(f.latch_fault == MOTOR_FAULT_NONE && f.next_state == MOTOR_FAULT,
+          "second fault still stops but does not re-latch");
 
     /* Faults are ignored in non-live states. */
-    f = drive_sm_on_fault(DRV_FAULT, DRVF_CAN_TIMEOUT, 1u);
-    CHECK(f.next_state == DRV_FAULT && !f.send_disable, "fault in FAULT: no action");
-    f = drive_sm_on_fault(DRV_ABSENT, DRVF_CAN_TIMEOUT, 0u);
-    CHECK(f.next_state == DRV_ABSENT && !f.send_disable, "fault in ABSENT: no action");
+    f = drive_sm_on_fault(MOTOR_FAULT, MOTOR_FAULT_FEEDBACK_TIMEOUT, 1u);
+    CHECK(f.next_state == MOTOR_FAULT && !f.send_stop, "fault in FAULT: no action");
+    f = drive_sm_on_fault(MOTOR_ABSENT, MOTOR_FAULT_FEEDBACK_TIMEOUT, 0u);
+    CHECK(f.next_state == MOTOR_ABSENT && !f.send_stop, "fault in ABSENT: no action");
 
     /* ── ticks ───────────────────────────────────────────────────────────── */
     memset(&in, 0, sizeof(in));
 
-    /* ENABLING: run seen → ENABLED (edge flagged); timeout → ENABLE_FAILED. */
+    /* ENABLING: Run seen → ENABLED (edge flagged); timeout → ENABLE_FAILED. */
     in.run_seen = 1u;
-    t = drive_sm_on_tick(DRV_ENABLING, &in);
-    CHECK(t.next_state == DRV_ENABLED && t.enter_enabled, "Run seen → ENABLED edge");
+    t = drive_sm_on_tick(MOTOR_ENABLING, &in);
+    CHECK(t.next_state == MOTOR_ENABLED && t.enter_enabled, "Run seen → ENABLED edge");
     memset(&in, 0, sizeof(in));
     in.enable_timeout = 1u;
-    t = drive_sm_on_tick(DRV_ENABLING, &in);
-    CHECK(t.next_state == DRV_FAULT && t.send_disable &&
-          t.latch_fault == DRVF_ENABLE_FAILED, "enable timeout → ENABLE_FAILED");
+    t = drive_sm_on_tick(MOTOR_ENABLING, &in);
+    CHECK(t.next_state == MOTOR_FAULT && t.send_stop &&
+          t.latch_fault == MOTOR_FAULT_ENABLE_FAILED, "enable timeout → ENABLE_FAILED");
     in.fault_latched = 1u;
-    t = drive_sm_on_tick(DRV_ENABLING, &in);
-    CHECK(t.latch_fault == DRVF_NONE && t.next_state == DRV_FAULT,
+    t = drive_sm_on_tick(MOTOR_ENABLING, &in);
+    CHECK(t.latch_fault == MOTOR_FAULT_NONE && t.next_state == MOTOR_FAULT,
           "enable timeout with earlier latch keeps the first fault");
     memset(&in, 0, sizeof(in));
-    t = drive_sm_on_tick(DRV_ENABLING, &in);
-    CHECK(t.next_state == DRV_ENABLING, "ENABLING holds while waiting");
-
-    /* CLEARING: clean / dirty / silent. */
-    in.clear_reply = 1u;
-    t = drive_sm_on_tick(DRV_CLEARING, &in);
-    CHECK(t.next_state == DRV_DISABLED && t.latch_fault == DRVF_NONE,
-          "clean reply → DISABLED");
-    in.clear_dirty = 1u;
-    t = drive_sm_on_tick(DRV_CLEARING, &in);
-    CHECK(t.next_state == DRV_FAULT && t.latch_fault == DRVF_MOTOR_REPORTED,
-          "dirty reply → FAULT(MOTOR_REPORTED) re-latched");
-    memset(&in, 0, sizeof(in));
-    in.clear_timeout = 1u;
-    t = drive_sm_on_tick(DRV_CLEARING, &in);
-    CHECK(t.next_state == DRV_ABSENT, "no reply → ABSENT");
+    t = drive_sm_on_tick(MOTOR_ENABLING, &in);
+    CHECK(t.next_state == MOTOR_ENABLING, "ENABLING holds while waiting");
 
     /* STOPPING completion honours the latch. */
     memset(&in, 0, sizeof(in));
     in.stop_done = 1u;
-    t = drive_sm_on_tick(DRV_STOPPING, &in);
-    CHECK(t.next_state == DRV_DISABLED, "requested stop completes → DISABLED");
+    t = drive_sm_on_tick(MOTOR_STOPPING, &in);
+    CHECK(t.next_state == MOTOR_DISABLED, "requested stop completes → DISABLED");
     in.fault_latched = 1u;
-    t = drive_sm_on_tick(DRV_STOPPING, &in);
-    CHECK(t.next_state == DRV_FAULT, "fault-triggered stop completes → FAULT");
+    t = drive_sm_on_tick(MOTOR_STOPPING, &in);
+    CHECK(t.next_state == MOTOR_FAULT, "fault-triggered stop completes → FAULT");
 
-    /* Presence: DISABLED ⇄ ABSENT. */
+    /* Presence: DISABLED → ABSENT on silence; ABSENT is TERMINAL (no tick,
+       request, or fault brings it back — only SLAVE_REQ_RESET re-sweeps). */
     memset(&in, 0, sizeof(in));
     in.fb_timeout = 1u;
-    t = drive_sm_on_tick(DRV_DISABLED, &in);
-    CHECK(t.next_state == DRV_ABSENT, "feedback timeout → ABSENT");
+    t = drive_sm_on_tick(MOTOR_DISABLED, &in);
+    CHECK(t.next_state == MOTOR_ABSENT, "feedback timeout → ABSENT");
     memset(&in, 0, sizeof(in));
-    in.fb_fresh = 1u;
-    t = drive_sm_on_tick(DRV_ABSENT, &in);
-    CHECK(t.next_state == DRV_DISABLED, "reply while ABSENT → DISABLED");
-    memset(&in, 0, sizeof(in));
-    t = drive_sm_on_tick(DRV_ENABLED, &in);
-    CHECK(t.next_state == DRV_ENABLED, "ENABLED has no tick transitions");
+    t = drive_sm_on_tick(MOTOR_ABSENT, &in);
+    CHECK(t.next_state == MOTOR_ABSENT, "ABSENT is terminal on tick");
+    t = drive_sm_on_tick(MOTOR_ENABLED, &in);
+    CHECK(t.next_state == MOTOR_ENABLED, "ENABLED has no tick transitions");
 
     if (failures) { fprintf(stderr, "%d failure(s)\n", failures); return 1; }
     printf("OK drive_sm\n");

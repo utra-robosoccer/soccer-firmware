@@ -4,7 +4,7 @@ Covers the task-5 loop: run_policy steps on cycle_id % N == 0 off scripted telem
 echoes the stepped cycle_id, counts coalesced skips / late-step catch-up / dropped steps,
 passes MASTER time (not host arrival) into step(), refuses to start on a cycle-rate
 mismatch, and exits cleanly on a telemetry stall. Plus: man_1s_1m derives its MIT phase
-from the injected t_ns (no wall clock), and listen requests IDLE each tick.
+from the injected t_ns (no wall clock), and listen requests STOP each tick.
 """
 import io
 import math
@@ -20,7 +20,7 @@ ROOT = os.path.abspath(os.path.join(HERE, "..", ".."))
 sys.path.insert(0, os.path.join(ROOT, "host", "apps"))   # run_policy is a script, not a pkg
 
 from policies.base import (  # noqa: E402
-    Policy, Action, REQ_DISABLE, REQ_ENABLE, REQ_RESET, MotorCommand)
+    Policy, Action, REQ_STOP, REQ_ENABLE, MotorCommand)
 from policies.man_1s_1m_policy import Man1s1mPolicy, SINE_OMEGA, SINE_FREQ_HZ  # noqa: E402
 from master_link import motor_config_gen as mc            # noqa: E402
 
@@ -46,30 +46,20 @@ class _FakeLink:
     frame counter jumps for that frame (1 = contiguous, >1 = coalesced ⇒ skips). Master
     time is cycle_id-derived so step() time is predictable. When frames run out, wait_robot
     returns None (a telemetry stall)."""
-    def __init__(self, frames=(), poll_hz=POLL_HZ, have_master=True,
-                 schema_hash=None):
+    def __init__(self, frames=(), poll_hz=POLL_HZ):
         self.port = "fake"
         self.log_path = os.devnull
         self.stats = dict(rx_frames=0, tx_frames=0, tx_errors=0, discard_records=0,
-                          discard_bytes=0, version_frames=0, log_dropped=0)
+                          discard_bytes=0, log_dropped=0)
         self._frames = list(frames)
         self._poll_hz = poll_hz
-        self._have_master = have_master
-        self._schema_hash = schema_hash          # None = report the host's own
         self._i = -1
         self._fno = 0
-        self.sent = []          # list of (echo_cycle, [modes])
+        self.sent = []          # list of (echo_cycle, [reqs])
 
     # startup / verification
     def wait_until_live(self, keys=None, timeout=2.0):
         return True, set()
-
-    def wait_master_status(self, timeout=1.0):
-        if not self._have_master:
-            return None
-        from master_link import protocol as _P
-        h = self._schema_hash if self._schema_hash is not None else _P.SCHEMA_HASH
-        return {"schema_hash": h}
 
     def measure_cycle_hz(self, min_cycles=64, timeout=1.5):
         return float(self._poll_hz)
@@ -96,7 +86,7 @@ class _FakeLink:
         skipped = max(0, self._fno - after_frame - 1)
         return (_FakeState(self._robot(cid)), self._fno, skipped, 1000)
 
-    def send_robot_cmd(self, cmds, echo_cycle=None):
+    def send_robot_cmd(self, cmds, echo_cycle=None, reset_slaves=()):
         self.sent.append((echo_cycle, [c.req for c in cmds]))
 
     def log_event(self, text): pass
@@ -105,7 +95,7 @@ class _FakeLink:
 
 
 class _StepPolicy(Policy):
-    """Records (t_ns, cycle_id) per step and sends one IDLE command (so echo is exercised)."""
+    """Records (t_ns, cycle_id) per step and sends one STOP command (so echo is exercised)."""
     name = "stepcap"
     steps = []
 
@@ -114,14 +104,13 @@ class _StepPolicy(Policy):
 
     def step(self, state, t_ns):
         _StepPolicy.steps.append((t_ns, state.robot["cycle_id"]))
-        return Action(motors=[MotorCommand(0, 0, req=REQ_DISABLE)])
+        return Action(motors=[MotorCommand(0, 0, req=REQ_STOP)])
 
 
-def _run(frames, rate, poll_hz=POLL_HZ, have_master=True, schema_hash=None):
+def _run(frames, rate, poll_hz=POLL_HZ):
     """Run the runner against a scripted link; return (link, stdout, exit_code|None)."""
     import run_policy
-    link = _FakeLink(frames, poll_hz=poll_hz, have_master=have_master,
-                     schema_hash=schema_hash)
+    link = _FakeLink(frames, poll_hz=poll_hz)
     out = io.StringIO()
     code = None
     with mock.patch.object(run_policy, "MasterLink", lambda *a, **k: link), \
@@ -187,18 +176,6 @@ class RunPolicyRefusals(unittest.TestCase):
         self.assertIn("100", code)                           # and the live value
         self.assertEqual(_StepPolicy.steps, [])              # never stepped
 
-    def test_no_master_status_refuses(self):
-        link, out, code = _run([(0, 1)], rate=200, have_master=False)
-        self.assertIsInstance(code, str)
-        self.assertIn("MasterStatus", code)
-
-    def test_schema_hash_mismatch_refuses(self):
-        link, out, code = _run([(0, 1)], rate=200, schema_hash=0xDEADBEEF)
-        self.assertIsInstance(code, str)
-        self.assertIn("schema", code.lower())
-        self.assertIn("0xDEADBEEF", code)                    # names the live value
-        self.assertEqual(_StepPolicy.steps, [])              # never stepped
-
     def test_stall_exits_clean(self):
         link, out, code = _run([(0, 1), (1, 1)], rate=200)   # then frames run out → stall
         self.assertEqual(code, 1)
@@ -234,7 +211,6 @@ class ManMitUsesInjectedTime(unittest.TestCase):
 
         a0 = p.step(st, t0)                          # sine start → move begins at p0
         self.assertEqual(a0.motors[0].req, REQ_ENABLE)
-        self.assertTrue(a0.motors[0].valid)
         self.assertAlmostEqual(a0.motors[0].pos, 0.2, places=5)   # first cmd == current pos
         self.assertAlmostEqual(a0.motors[0].vel, 0.0, places=5)   # zero velocity at start
 
@@ -243,12 +219,11 @@ class ManMitUsesInjectedTime(unittest.TestCase):
         self.assertAlmostEqual(a0b.motors[0].pos, a0.motors[0].pos, places=6)
         self.assertAlmostEqual(a0b.motors[0].vel, a0.motors[0].vel, places=6)
 
-    def test_listen_requests_disable(self):
+    def test_listen_requests_stop(self):
         from policies.listen_policy import ListenPolicy
         act = ListenPolicy().step(_FakeState(), 123)
         self.assertTrue(act.motors)
-        self.assertTrue(all(c.req == REQ_DISABLE and not c.valid
-                            for c in act.motors))
+        self.assertTrue(all(c.req == REQ_STOP for c in act.motors))
 
 
 class SineStartTraj(unittest.TestCase):
@@ -302,13 +277,12 @@ class BenchSineBehavior(unittest.TestCase):
         p = BenchSinePolicy(amp=0.1, freq=0.4, motors="all", arm_s=1.0, move_speed=0.5)
         st = _FakeState(motors={k: _Snap(0.3)})
         p.setup(st, 0)
-        a = p.step(st, int(0.1e9))                        # activation: DISABLE first
-        self.assertEqual(a.motors[0].req, REQ_DISABLE)
-        a = p.step(st, int(0.2e9))                        # then RESET
-        self.assertEqual(a.motors[0].req, REQ_RESET)
-        a = p.step(st, int(0.5e9))                        # then ENABLE + hold tuple
+        a = p.step(st, int(0.1e9))                        # activation: STOP baseline
+        self.assertEqual(a.motors[0].req, REQ_STOP)
+        a = p.step(st, int(0.2e9))                        # still the STOP baseline
+        self.assertEqual(a.motors[0].req, REQ_STOP)
+        a = p.step(st, int(0.5e9))                        # then ENABLE + hold mit
         self.assertEqual(a.motors[0].req, REQ_ENABLE)
-        self.assertTrue(a.motors[0].valid)
         self.assertAlmostEqual(a.motors[0].pos, 0.3, places=5)
         a = p.step(st, int(1.0e9))                        # stream start → first cmd == p0
         self.assertEqual(a.motors[0].req, REQ_ENABLE)

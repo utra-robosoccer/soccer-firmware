@@ -1,10 +1,10 @@
 """arm_timing — measure per-motor DISABLED→ENABLED (enable) latency host-side.
 
 Phases (all timing on the MASTER clock, t_ns):
-  [0, idle_s/2)      send DISABLE every tick (known-off baseline);
-  [idle_s/2, idle_s) send RESET every tick (clears any latched fault);
-  [idle_s, ...)      send ENABLE + a VALID hold tuple (current position, config
-                     gains) every tick — the v9 reference flow — and record:
+  [0, idle_s)        send STOP every tick (known-off baseline; a latched fault
+                     needs run_policy --reset-slaves first — no auto-clear);
+  [idle_s, ...)      send ENABLE + a hold mit (current position, config
+                     gains) every tick and record:
                        t_req  = t_ns of the FIRST tick an ENABLE was sent,
                        t_hold = t_ns of the first telemetry showing ENABLED;
   all enabled (or --arm-timeout) → short settle, print the table, stop cleanly
@@ -20,8 +20,8 @@ Run:
     python3 host/apps/run_policy.py --policy arm_timing --rate 200 --motors 0.0,0.1
 """
 from .base import (Policy, Action, MotorCommand, LinkState,
-                   REQ_DISABLE, REQ_ENABLE, REQ_RESET, default_gains)
-from master_link.protocol import DRV_ENABLED, DRV_DISABLED, DRIVE_STATE_NAMES
+                   REQ_STOP, REQ_ENABLE, default_gains)
+from master_link.protocol import MOTOR_ENABLED, MOTOR_DISABLED, MOTOR_STATE_NAMES
 from master_link.motor_config_gen import MOTORS
 
 IDLE_SECONDS      = 0.5    # disable/reset known-state window
@@ -80,8 +80,8 @@ class ArmTimingPolicy(Policy):
         print(f"  {'motor':>6}  {'arm time':>9}  {'final state':>11}  fault")
         for k in self._motors:
             snap = self._snap(state, k)
-            sname = snap.drive_state_name if snap else "no-tele"
-            cause = snap.drive_fault_name if snap else "-"
+            sname = snap.state_name if snap else "no-tele"
+            cause = snap.fault_name if snap else "-"
             t_h = self._t_hold.get(k)
             if t_h is not None and self._t_req is not None:
                 ms = (t_h - self._t_req) / 1e6
@@ -100,11 +100,10 @@ class ArmTimingPolicy(Policy):
         el = (t_ns - self._t0) / 1e9
         cmds = []
 
-        # Phase A: known disabled state (DISABLE, then RESET for latched faults).
+        # Phase A: known disabled state (STOP baseline).
         if el < self._idle_s:
-            req = REQ_DISABLE if el < self._idle_s / 2.0 else REQ_RESET
             for k in self._motors:
-                cmds.append(MotorCommand(k[0], k[1], req=req))
+                cmds.append(MotorCommand(k[0], k[1], req=REQ_STOP))
             return Action(motors=cmds)
 
         # Phase B: ENABLE + hold tuple every tick; time the first ENABLED sighting.
@@ -112,23 +111,23 @@ class ArmTimingPolicy(Policy):
             self._t_req = t_ns
             for k in self._motors:
                 snap = self._snap(state, k)
-                self._baseline[k] = snap.drive_state if snap else None
+                self._baseline[k] = snap.state if snap else None
                 # Capture the hold target ONCE — re-sampling each tick would let a
                 # loaded joint sag (the target would follow the measured position).
                 self._hold_pos[k] = snap.pos if snap else 0.0
-                if snap is not None and snap.drive_state != DRV_DISABLED:
+                if snap is not None and snap.state != MOTOR_DISABLED:
                     print(f"arm_timing: s{k[0]}.m{k[1]} not DISABLED at ENABLE start "
-                          f"({DRIVE_STATE_NAMES.get(snap.drive_state, snap.drive_state)}) — "
+                          f"({MOTOR_STATE_NAMES.get(snap.state, snap.state)}) — "
                           f"its number will not be a clean DISABLED→ENABLED measurement")
 
         for k in self._motors:
             snap = self._snap(state, k)
-            if k not in self._t_hold and snap is not None and snap.drive_state == DRV_ENABLED:
+            if k not in self._t_hold and snap is not None and snap.state == MOTOR_ENABLED:
                 self._t_hold[k] = t_ns
             kp, kd = default_gains(k[0], k[1])
-            cmds.append(MotorCommand(k[0], k[1], req=REQ_ENABLE, valid=True,
+            cmds.append(MotorCommand(k[0], k[1], req=REQ_ENABLE,
                                      pos=self._hold_pos.get(k, 0.0),
-                                     kp=kp, kd=kd, use_config_gains=False))
+                                     kp=kp, kd=kd))
 
         arm_el = (t_ns - self._t_req) / 1e9
         all_armed = all(k in self._t_hold for k in self._motors)

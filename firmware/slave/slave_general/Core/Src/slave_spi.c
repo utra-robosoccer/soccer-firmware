@@ -57,7 +57,7 @@
 #define SPI_NSS_HIGH()        ((GPIOA->IDR & GPIO_PIN_4) != 0u)
 #define SPI_RESYNC_TIMEOUT_MS 5u
 
-volatile uint8_t spi_resyncs = 0;   /* wraps; host takes deltas */
+volatile uint16_t spi_resyncs = 0;  /* wraps; host takes deltas */
 
 /* Slave µs clock at the most recent SPI exchange-complete (TxRxCplt). This is
    the stamp telemetry reports as slave_time_us: the exchange that delivered
@@ -240,7 +240,7 @@ uint8_t slave_spi_resync(SPI_HandleTypeDef *hspi)
 	data_receive_flag = 0;                                // drop the misaligned frame
 	if (HAL_SPI_TransmitReceive_DMA(hspi, spi_tx_active, spi_rx_active, PAYLOAD_LENGTH) != HAL_OK)
 		spi_tx_arm_fails++;                               // CRC next exchange → resync retries
-	spi_resyncs++;                                        // wraps naturally (uint8_t)
+	spi_resyncs++;                                        // wraps naturally (uint16_t)
 	HAL_NVIC_EnableIRQ(TIM3_IRQn);                        // next TxRxCplt restarts the deadline
 	return 1u;
 }

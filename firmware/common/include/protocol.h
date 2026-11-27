@@ -4,16 +4,15 @@
 /* Wire protocol — thin wrapper.
  *
  * Every wire LAYOUT (structs, enums, flag bits, fixed-point scales, constants)
- * is generated from firmware/common/protocol.yaml into protocol_gen.h — edit
- * the schema and re-run scripts/gen_protocol.py, never the generated header.
- * This file keeps only the hand-written non-layout code: the fixed-point
- * encode/decode helpers, CRC16-CCITT, and the USB frame builder/scanner. */
+ * is hand-written in protocol_wire.h — edit that file directly. This file adds
+ * the non-layout code: the fixed-point encode/decode helpers, CRC16-CCITT, and
+ * the USB frame builder/scanner. Include THIS file, not protocol_wire.h. */
 
 #include <stdint.h>
 #include <stddef.h>
 #include <string.h>
 
-#include "protocol_gen.h"
+#include "protocol_wire.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -98,27 +97,27 @@ static inline uint16_t proto_crc16(const uint8_t *data, size_t len)
     return proto_crc16_update(PROTO_CRC_INIT, data, len);
 }
 
-/* Compute CRC for a complete message (header.crc16 must be 0) */
+/* Compute CRC for a complete USB frame (header with crc16 = 0, then payload). */
 static inline uint16_t proto_frame_crc(const void *hdr_raw,
                                         const uint8_t *payload,
                                         uint16_t pay_len)
 {
-    MsgHeader tmp;
-    memcpy(&tmp, hdr_raw, MSG_HEADER_SIZE);
+    usb_header_t tmp;
+    memcpy(&tmp, hdr_raw, sizeof(usb_header_t));
     tmp.crc16 = 0u;
-    uint16_t crc = proto_crc16((const uint8_t *)&tmp, MSG_HEADER_SIZE);
+    uint16_t crc = proto_crc16((const uint8_t *)&tmp, sizeof(usb_header_t));
     if (pay_len > 0u && payload != NULL) {
         crc = proto_crc16_update(crc, payload, pay_len);
     }
     return crc;
 }
 
-/* True for any defined MsgType — a cheap header-plausibility gate for resync. */
-static inline uint8_t proto_msg_type_known(uint8_t t)
+/* True for any defined UsbMsgType — a cheap header-plausibility gate for
+ * resync (the CRC is the real check; this just makes scanning garbage cheap). */
+static inline uint8_t proto_msg_type_known(uint16_t t)
 {
     switch (t) {
-        case MSG_PING: case MSG_MASTER_STATUS: case MSG_SLAVE_STATUS:
-        case MSG_ROBOT_CMD: case MSG_ROBOT_TELE: return 1u;
+        case USB_MSG_PING: case USB_MSG_CMD: case USB_MSG_TELE: return 1u;
         default: return 0u;
     }
 }
@@ -137,7 +136,8 @@ typedef enum {
 } ProtoScanStatus;
 
 typedef struct {
-    uint8_t        type;        /* FRAME: message type                 */
+    uint16_t       type;        /* FRAME: message type (UsbMsgType)    */
+    uint16_t       seq;         /* FRAME: sender's frame counter        */
     uint16_t       pay_len;     /* FRAME: payload length               */
     const uint8_t *payload;     /* FRAME: -> payload within buf         */
     uint16_t       consumed;    /* FRAME: whole frame; RESYNC: bytes to drop */
@@ -146,31 +146,30 @@ typedef struct {
 static inline ProtoScanStatus proto_frame_scan(const uint8_t *buf, uint16_t len,
                                                ProtoScanResult *out)
 {
-    if (len < MSG_HEADER_SIZE) return PROTO_SCAN_NEED_MORE;
+    if (len < sizeof(usb_header_t)) return PROTO_SCAN_NEED_MORE;
 
-    MsgHeader hdr;
-    memcpy(&hdr, buf, MSG_HEADER_SIZE);
+    usb_header_t hdr;
+    memcpy(&hdr, buf, sizeof(hdr));
 
     /* Header-first plausibility (cheap) — reject garbage without hashing it. */
-    if (!proto_msg_type_known((uint8_t)hdr.type) ||
-        (uint8_t)(hdr.ver_flags & 0xFFu) != PROTO_VERSION ||
-        hdr.len > PROTO_MAX_PAYLOAD) {
+    if (!proto_msg_type_known(hdr.type) || hdr.len > USB_MAX_PAYLOAD) {
         out->consumed = 1u;
         return PROTO_SCAN_RESYNC;
     }
 
-    uint16_t total = (uint16_t)(MSG_HEADER_SIZE + hdr.len);
+    uint16_t total = (uint16_t)(sizeof(usb_header_t) + hdr.len);
     if (len < total) return PROTO_SCAN_NEED_MORE;    /* header ok; await the body */
 
     /* Header plausible and complete → now verify the CRC. */
-    if (proto_frame_crc(&hdr, buf + MSG_HEADER_SIZE, hdr.len) != hdr.crc16) {
+    if (proto_frame_crc(&hdr, buf + sizeof(usb_header_t), hdr.len) != hdr.crc16) {
         out->consumed = 1u;
         return PROTO_SCAN_RESYNC;
     }
 
-    out->type     = (uint8_t)hdr.type;
+    out->type     = hdr.type;
+    out->seq      = hdr.seq;
     out->pay_len  = hdr.len;
-    out->payload  = buf + MSG_HEADER_SIZE;
+    out->payload  = buf + sizeof(usb_header_t);
     out->consumed = total;
     return PROTO_SCAN_FRAME;
 }
@@ -178,28 +177,24 @@ static inline ProtoScanStatus proto_frame_scan(const uint8_t *buf, uint16_t len,
 /* Build a framed message into out[].  Returns total bytes written, 0 = error. */
 static inline uint16_t proto_build(uint8_t *out, uint16_t cap,
                                     uint16_t type, uint16_t seq,
-                                    uint8_t src,  uint8_t dst,
-                                    uint32_t ts_ms,
                                     const uint8_t *payload, uint16_t pay_len)
 {
-    uint16_t total = (uint16_t)(MSG_HEADER_SIZE + pay_len);
+    uint16_t total = (uint16_t)(sizeof(usb_header_t) + pay_len);
     if (total > cap) return 0u;
 
-    MsgHeader hdr;
-    memset(&hdr, 0, sizeof(hdr));
-    hdr.type      = type;
-    hdr.seq       = seq;
-    hdr.src       = src;
-    hdr.dst       = dst;
-    hdr.ts_ms     = ts_ms;
-    hdr.len       = pay_len;
-    hdr.ver_flags = PROTO_VERSION;   /* low byte = version, high byte reserved 0 */
+    usb_header_t hdr;
+    hdr.type  = type;
+    hdr.seq   = seq;
+    hdr.len   = pay_len;
+    hdr.crc16 = 0u;
 
-    memcpy(out, &hdr, MSG_HEADER_SIZE);
+    memcpy(out, &hdr, sizeof(hdr));
     if (pay_len > 0u && payload != NULL) {
-        memcpy(out + MSG_HEADER_SIZE, payload, pay_len);
+        memcpy(out + sizeof(usb_header_t), payload, pay_len);
     }
-    ((MsgHeader *)out)->crc16 = proto_crc16(out, total);
+    uint16_t crc = proto_crc16(out, total);
+    out[offsetof(usb_header_t, crc16)]      = (uint8_t)(crc & 0xFFu);
+    out[offsetof(usb_header_t, crc16) + 1u] = (uint8_t)(crc >> 8);
     return total;
 }
 

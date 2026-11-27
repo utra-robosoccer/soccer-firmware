@@ -17,7 +17,7 @@ import time
 from master_link import config_meta
 from master_link import motor_config_gen as mc
 from master_link import protocol as P
-from master_link.link import MasterLink, MotorCommand, REQ_DISABLE
+from master_link.link import MasterLink, MotorCommand, REQ_STOP
 from policies.listen_policy import ListenPolicy
 from policies.man_1s_1m_policy import Man1s1mPolicy
 from policies.bench_sine import BenchSinePolicy
@@ -60,6 +60,9 @@ def main(argv=None):
     ap.add_argument("--log-dir", default="logs", help="log directory (default: logs/)")
     ap.add_argument("--mirror-signals", action="store_true",
                     help="mirror telemetry signals to stdout (for debugging)")
+    ap.add_argument("--reset-slaves", action="store_true",
+                    help="before running, clear latched motor faults via a "
+                         "slave-level reset (blocking re-sweep) on every slave")
     # Only the selected policy registers its own CLI args (e.g. --amp/--freq/--motors/--dur).
     if pcls_pre is not None and hasattr(pcls_pre, "add_args"):
         pcls_pre.add_args(ap)
@@ -104,21 +107,9 @@ def main(argv=None):
                  "— is the master up, the slave powered, and the motors on the CAN bus?")
     print("telemetry live")
 
-    # Verify the wire contract BEFORE stepping. MasterStatus carries the schema
-    # hash (old wire only; dies at the protocol_wire.h swap) at ~20 Hz, so it's
-    # here within ~50 ms.
-    mstat = link.wait_master_status(timeout=0.5)
-    if mstat is None:
-        link.log_event("error:no_master_status"); link.close()
-        sys.exit("no MasterStatus within 0.5 s — cannot verify the wire schema "
-                 "(is the master firmware up to date?).")
-    live_hash = mstat.get("schema_hash", 0)
-    if live_hash != P.SCHEMA_HASH:
-        link.log_event("error:schema_mismatch"); link.close()
-        sys.exit(f"wire-schema mismatch: host SCHEMA_HASH 0x{P.SCHEMA_HASH:08X}, but the "
-                 f"master reports 0x{live_hash:08X}. Host and firmware were generated from "
-                 f"different protocol.yaml revisions — reflash the boards or update the "
-                 f"host checkout; refusing to run on a mismatched wire contract.")
+    # There is no wire version/schema check anymore: the 8-byte header + CRC +
+    # exact-length command accept are the contract. Telemetry decoding at all
+    # (live-detect above) plus the measured rate below are the sanity gates.
 
     # Verify the master's ACTUAL cycle rate matches the generated config BEFORE
     # stepping: N is derived from MASTER_POLL_HZ, and a wrong N would drive the
@@ -135,6 +126,46 @@ def main(argv=None):
                  f"{mc.MASTER_POLL_HZ} Hz, but telemetry measures {live_hz:g} Hz. "
                  f"Regenerate the host config or reflash the master; refusing to run so "
                  f"the policy is not driven at the wrong rate.")
+
+    # Explicit recovery (--reset-slaves): assert SLAVE_REQ_RESET on every slave
+    # (motors all STOP) until each one has entered RESETTING and settled clean,
+    # then drop the request and confirm it left RESETTING. Each slave round
+    # BLOCKS the slave for seconds (clear + re-sweep + verify) — this is the
+    # only way out of a latched MOTOR_FAULT / MOTOR_ABSENT, and it is never
+    # done automatically: stop and investigate, then reset deliberately.
+    if args.reset_slaves:
+        all_slaves = set(range(mc.N_SLAVES))
+        print(f"resetting slave(s) {sorted(all_slaves)} (blocking re-sweep)…")
+        link.log_event("reset_slaves:start")
+        deadline = time.monotonic() + 30.0
+        seen_resetting = set()
+        ok = False
+        while time.monotonic() < deadline:
+            link.send_robot_cmd([], reset_slaves=all_slaves)
+            time.sleep(0.05)
+            st = link.latest_state()
+            for sid, sl in st.slaves.items():
+                if sl["state"] == P.SLAVE_RESETTING:
+                    seen_resetting.add(sid)
+            if seen_resetting >= all_slaves:
+                dirty = [k for k, m in st.motors.items()
+                         if m.state not in (P.MOTOR_DISABLED,) or m.rs_fault_bits]
+                if not dirty:
+                    ok = True
+                    break
+        # Drop the request (plain all-STOP) and let the slaves settle.
+        for _ in range(10):
+            link.send_robot_cmd([])
+            time.sleep(0.05)
+        st = link.latest_state()
+        states = {sid: P.SLAVE_STATE_NAMES.get(sl["state"], sl["state"])
+                  for sid, sl in st.slaves.items()}
+        link.log_event(f"reset_slaves:done:{states}")
+        print(f"reset done; slave states: {states}")
+        if not ok or any(sl["state"] != P.SLAVE_READY for sl in st.slaves.values()):
+            link.close()
+            sys.exit("slave reset did not reach READY with clean motors — "
+                     "check the bus/motors (boot_result in telemetry) and retry.")
 
     N = max(1, round(mc.MASTER_POLL_HZ / args.rate))
     cycle_us = 1e6 / mc.MASTER_POLL_HZ
@@ -224,12 +255,12 @@ def _stat_ms(label, ns_vals):
 
 def _shutdown(link, policy, stop_reason, rate, N, cycle_us, seq,
               skips, late_steps, dropped_steps, budgets, decodes, steps, writes):
-    # Disable any motor still armed (best-effort; safe even on listen). One
-    # cmd_robot_t with an IDLE request for each armed motor.
+    # Stop any motor still armed (best-effort; safe even on listen). One
+    # command frame with a STOP request for each armed motor.
     try:
         armed = link.latest_state().armed_motors()
         if armed:
-            link.send_robot_cmd([MotorCommand(s, l, req=REQ_DISABLE) for (s, l) in armed])
+            link.send_robot_cmd([MotorCommand(s, l, req=REQ_STOP) for (s, l) in armed])
             print(f"disabled {len(armed)} armed motor(s): {armed}")
     except Exception:
         pass
@@ -253,8 +284,7 @@ def _shutdown(link, policy, stop_reason, rate, N, cycle_us, seq,
           f"{dropped_steps} dropped steps")
     print(f"frames RX/TX:   {st['rx_frames']} / {st['tx_frames']}"
           f"   (tx_errors {st['tx_errors']})")
-    print(f"discards:       {st['discard_records']} records / {st['discard_bytes']} bytes"
-          f"   | wrong-version frames: {st['version_frames']}")
+    print(f"discards:       {st['discard_records']} records / {st['discard_bytes']} bytes")
     if st["log_dropped"]:
         print(f"LOG DROPPED:    {st['log_dropped']} records (disk too slow)")
     _stat_ms("decode:        ", decodes)

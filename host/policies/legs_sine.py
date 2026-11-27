@@ -117,9 +117,9 @@ class LegsSinePolicy(Policy):
             kp, kd = default_gains(k[0], k[1])
             if k in self._traj:                # swinging joint
                 pos, vel = self._traj[k].sample(t_ns)
-                cmds.append(MotorCommand(k[0], k[1], req=REQ_ENABLE, valid=True, pos=pos, vel=vel,
-                                         kp=kp, kd=kd, use_config_gains=False))
+                cmds.append(MotorCommand(k[0], k[1], req=REQ_ENABLE, pos=pos, vel=vel,
+                                         kp=kp, kd=kd))
             else:                              # held joint: stiff at the captured pose
-                cmds.append(MotorCommand(k[0], k[1], req=REQ_ENABLE, valid=True, pos=self._hold[k], vel=0.0,
-                                         kp=kp, kd=kd, use_config_gains=False))
+                cmds.append(MotorCommand(k[0], k[1], req=REQ_ENABLE, pos=self._hold[k], vel=0.0,
+                                         kp=kp, kd=kd))
         return Action(motors=cmds)

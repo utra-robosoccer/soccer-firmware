@@ -11,7 +11,7 @@ loads motor_state.csv (measured) and motor_cmd.csv (commanded, for overlay) itse
 
 One figure per motor (3 stacked axes: pos, vel, tau). Measured = solid; commanded
 MIT = dashed; fault onsets = red dashed verticals; control commands = gray markers.
-Times use master_ts_ms (firmware tick) when available, else host_ts; commands are
+Times use master_time_s (master µs clock) when available, else host_ts; commands are
 mapped onto that timeline via the measured rows' median offset.
 """
 import argparse
@@ -21,7 +21,7 @@ import sys
 from collections import defaultdict
 
 import convert_log  # sibling module (host/analysis on sys.path when run as a script)
-from master_link.protocol import DRIVE_FAULT_NAMES, DRIVE_STATE_NAMES  # single source of truth
+from master_link.protocol import MOTOR_FAULT_NAMES, MOTOR_STATE_NAMES  # single source of truth
 
 
 def _f(x):
@@ -61,10 +61,10 @@ def resolve_session(target: str) -> str:
 
 
 # At port open the master's USB TX ring drains ~0.5 s of stale, buffered telemetry
-# whose master_ts_ms sits far behind the live stream, then jumps forward to live. We
-# trim that prefix: find the first large forward master_ts_ms jump in the opening
+# whose master_time_s sits far behind the live stream, then jumps forward to live. We
+# trim that prefix: find the first large forward master_time_s jump in the opening
 # window and keep only the rows after it.
-STALE_JUMP_MS       = 1000.0   # a master_ts_ms step this big marks the stale→live edge
+STALE_JUMP_S        = 1.0      # a master_time_s step this big marks the stale→live edge
 STALE_HOST_WINDOW_S = 2.0      # ...but only when it happens this soon after the first row
 
 
@@ -76,13 +76,13 @@ def _trim_stale_prefix(rows):
     first_host = None
     prev = None
     for i, r in enumerate(rows):
-        m = _f(r.get("master_ts_ms"))
+        m = _f(r.get("master_time_s"))
         if m is None:
             continue
         h = _f(r.get("host_ts"))
         if first_host is None:
             first_host = h
-        if prev is not None and (m - prev) > STALE_JUMP_MS:
+        if prev is not None and (m - prev) > STALE_JUMP_S:
             within = (first_host is None or h is None or (h - first_host) <= STALE_HOST_WINDOW_S)
             return rows[i:] if within else rows
         prev = m
@@ -92,27 +92,27 @@ def _trim_stale_prefix(rows):
 def _load_state(folder):
     """motor -> [(t, pos, vel, tau, cause)], plus the host->master time offset."""
     rows = list(csv.DictReader(open(os.path.join(folder, "motor_state.csv"), newline="")))
-    use_master = any(_f(r.get("master_ts_ms")) is not None for r in rows)
+    use_master = any(_f(r.get("master_time_s")) is not None for r in rows)
     if use_master:
         n_before = len(rows)
         rows = _trim_stale_prefix(rows)
         n_trimmed = n_before - len(rows)
         if n_trimmed:
             print(f"trimmed {n_trimmed} stale pre-open frame(s) from the start")
-    offsets = [(_f(r["master_ts_ms"]) / 1000.0 - _f(r["host_ts"]))
+    offsets = [(_f(r["master_time_s"]) - _f(r["host_ts"]))
                for r in rows
-               if use_master and _f(r.get("master_ts_ms")) is not None
+               if use_master and _f(r.get("master_time_s")) is not None
                and _f(r.get("host_ts")) is not None]
     offset = _median(offsets) if offsets else 0.0
 
     state = defaultdict(list)
     for r in rows:
-        t = (_f(r["master_ts_ms"]) / 1000.0) if use_master else _f(r.get("host_ts"))
+        t = _f(r["master_time_s"]) if use_master else _f(r.get("host_ts"))
         if t is None:
             continue
         state[r["motor"]].append((t, _f(r["pos"]), _f(r["vel"]), _f(r["tau"]),
-                                  int(_f(r["drive_fault"]) or 0), int(_f(r.get("drive_state")) or 0)))
-    return state, offset, ("master_ts_ms" if use_master else "host_ts")
+                                  int(_f(r["fault"]) or 0), int(_f(r.get("state")) or 0)))
+    return state, offset, ("master_time_s" if use_master else "host_ts")
 
 
 def _load_cmd(folder, offset):
@@ -127,12 +127,12 @@ def _load_cmd(folder, offset):
         if h is None:
             continue
         t = h + offset
-        mode = r.get("mode_name", "")
-        if mode == "MIT":
+        req = r.get("req_name", "")
+        if req == "ENABLE":
             out[r["motor"]]["mit"].append((t, _f(r["pos"]), _f(r["vel"]), _f(r["tau_ff"])))
         else:
-            # Non-MIT mode requests (HOLD/DAMPED/TO_ZERO/IDLE) overlay as events.
-            out[r["motor"]]["ctrl"].append((t, mode))
+            # Non-ENABLE requests (STOP) overlay as events.
+            out[r["motor"]]["ctrl"].append((t, req))
     return out
 
 
@@ -148,7 +148,7 @@ def _fault_onsets(samples):
 
 def _mode_transitions(samples):
     """Lifecycle-state transitions [(t, state_int)] — one per change (incl. the first),
-    so the timeline shows HOLD/MIT/DAMPED/TO_ZERO/IDLE/FAULT as labeled markers."""
+    so the timeline shows DISABLED/ENABLING/ENABLED/STOPPING/FAULT as labeled markers."""
     out, prev = [], None
     for s in samples:
         st = s[5]
@@ -194,7 +194,7 @@ def main(argv=None):
     cmds = _load_cmd(folder, offset)
     print(f"session: {folder}   time base: {base}")
 
-    clock = "master clock" if base == "master_ts_ms" else "host clock"
+    clock = "master clock" if base == "master_time_s" else "host clock"
     xlabel = f"Time since streaming start [s] ({clock})"
     date, hms = _session_start(folder)
     logname = os.path.basename(folder)
@@ -226,18 +226,18 @@ def main(argv=None):
             ax.set_ylabel(label)
             ax.grid(True, alpha=0.3)
 
-        # Lifecycle mode changes (HOLD/MIT/DAMPED/TO_ZERO/IDLE/FAULT): labeled verticals.
+        # Lifecycle state changes (DISABLED/ENABLING/ENABLED/…): labeled verticals.
         for t, st in _mode_transitions(samples):
             for ax in axes:
                 ax.axvline(t - t0, color="steelblue", ls="-", lw=0.8, alpha=0.5)
-            axes[0].annotate(DRIVE_STATE_NAMES.get(st, f"?{st}"),
+            axes[0].annotate(MOTOR_STATE_NAMES.get(st, f"?{st}"),
                              xy=(t - t0, 0.02), xycoords=("data", "axes fraction"),
                              color="steelblue", fontsize=7, rotation=90, va="bottom", ha="right")
         # Fault onsets: red verticals labeled with the cause (top).
         for t, cause in _fault_onsets(samples):
             for ax in axes:
                 ax.axvline(t - t0, color="red", ls="--", lw=1.0, alpha=0.8)
-            axes[0].annotate(DRIVE_FAULT_NAMES.get(cause, f"?{cause}"),
+            axes[0].annotate(MOTOR_FAULT_NAMES.get(cause, f"?{cause}"),
                              xy=(t - t0, 1.0), xycoords=("data", "axes fraction"),
                              color="red", fontsize=8, rotation=90, va="top", ha="right")
 

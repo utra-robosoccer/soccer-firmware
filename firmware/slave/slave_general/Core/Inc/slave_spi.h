@@ -13,11 +13,11 @@
 #include "proto_common.h"
 #include "main.h"
 
-/* SPI opcodes (SPI_OP_*) and frame-size macros are defined once in the shared
-   common/include/protocol.h (via proto_common.h) so master and slave cannot
-   drift. One chain per slave → fixed frame sizes (no per-N arithmetic):
-     master→slave: [opcode][spi_seq][cycle_id][cmd_seq][cmd_chain_t][crc16]  (70 B)
-     slave→master: [tele_chain_t][crc16]                                     (119 B) */
+/* SPI opcodes (SPI_OP_*) and frame structs are defined once in the shared
+   common/include/protocol_wire.h (via proto_common.h) so master and slave
+   cannot drift. Fixed frame sizes (no per-N arithmetic):
+     master→slave: spi_cmd_frame_t  = [spi_header_t][cmd_slave_t][crc16]  (64 B)
+     slave→master: spi_tele_frame_t = [tele_slave_t][crc16]              (138 B) */
 
 /* The full-duplex transfer is the larger of the two frames. */
 #define PAYLOAD_LENGTH SPI_XFER_SIZE
@@ -29,7 +29,7 @@ extern uint8_t* volatile  tele_stage_buf; // inactive TX frame — main writes (
 extern volatile uint8_t data_receive_flag;
 extern volatile uint8_t data_tx_ready_flag;
 extern volatile uint8_t spi_error_flag;
-extern volatile uint8_t spi_resyncs;      // DMA realigns (wraps; host takes deltas)
+extern volatile uint16_t spi_resyncs;     // DMA realigns (wraps; host takes deltas)
 extern volatile uint32_t spi_tx_arm_fails; // HAL TX-arm failures (then retried; wraps)
 extern volatile uint32_t spi_last_exchange_us; // µs stamp of the last TxRxCplt (us_clock)
 

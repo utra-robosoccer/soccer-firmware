@@ -1,8 +1,9 @@
 """master_link — the host's link to the robot firmware.
 
-Importable library: the wire ``protocol``, the generated ``motor_config_gen``
-constants, and ``session_logger`` for data logging. Runnable programs live in
-``host/apps``; offline log tools in ``host/analysis``.
+Importable library: the wire ``protocol`` (hand-written ctypes mirror of
+firmware/common/include/protocol_wire.h), the generated ``motor_config_gen``
+constants, ``link`` (MasterLink) and ``datalog`` (binary session logs).
+Runnable programs live in ``host/apps``; offline log tools in ``host/analysis``.
 """
 import os
 import subprocess

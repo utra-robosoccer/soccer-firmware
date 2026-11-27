@@ -94,6 +94,7 @@ static uint32_t last_feedback_count = 0;
 static uint32_t status_led_off_ms = 0;
 static uint8_t  spi_echo_seq    = 0;   /* SPI link-health seq of the last VALID frame */
 static uint32_t cmd_crc_errors  = 0;   /* SPI command frames rejected on CRC */
+static uint8_t  g_slave_state   = SLAVE_BOOT;   /* SlaveState (telemetry) */
 
 /* USER CODE END PV */
 
@@ -184,30 +185,44 @@ static void dbg_print_motor_state(const motor_t *motor)
 }
 #endif /* SLAVE_UART_DEBUG */
 
-/* Assemble + stage this slave's tele_chain_t for the next SPI exchange. Called once per
+/* Assemble + stage this slave's tele_slave_t for the next SPI exchange. Called once per
    loop iteration after the service (send) and feedback handling, so it carries the
    freshest mirrored motor state and the cmd_seq confirmation paired from the most recent
-   reply — which the master then reads on the very next exchange. */
+   reply — which the master then reads on the very next exchange. Also called once with
+   g_slave_state = BOOT before the blocking boot checks and with RESETTING before a
+   blocking reset round, so the master keeps reading an honest frame while we block. */
 static void stage_telemetry(void)
 {
-    tele_chain_t chain;
-    memset(&chain, 0, sizeof(chain));
-    chain.chain_id       = 0u;
-    chain.n_motors       = N_MOTORS;
-    chain.spi_seq_echo   = spi_echo_seq;
-    chain.spi_resyncs      = spi_resyncs;                      /* DMA realigns (wraps) */
-    chain.spi_tx_arm_fails = (uint8_t)spi_tx_arm_fails;        /* TX-arm DMA failures (wraps) */
-    chain.slave_time_us  = spi_last_exchange_us;  /* µs stamp of the exchange that delivered
-                                                     the command this telemetry answers
-                                                     (stamped in the TxRxCplt ISR) */
-    chain.cmd_crc_errors = (uint16_t)cmd_crc_errors;
-    chain.can_tx_errors  = (uint16_t)can_tx_error_count;
+    tele_slave_t tele;
+    memset(&tele, 0, sizeof(tele));
+    tele.time_slave_us = spi_last_exchange_us;  /* µs stamp of the exchange that delivered
+                                                   the command this telemetry answers
+                                                   (stamped in the TxRxCplt ISR) */
+    tele.state    = g_slave_state;
+    tele.n_motors = N_MOTORS;
+    motor_runtime_boot_result(&tele.status.boot);
+    tele.status.spi.cmd_crc_errors = (uint16_t)cmd_crc_errors;
+    tele.status.spi.resyncs        = spi_resyncs;               /* DMA realigns (wraps) */
+    tele.status.spi.tx_arm_fails   = (uint16_t)spi_tx_arm_fails;/* TX-arm DMA failures (wraps) */
+    tele.status.spi.seq_echo       = spi_echo_seq;
+    tele.status.can.tx_errors      = (uint16_t)can_tx_error_count;
+    can_link_error_counters(&tele.status.can.tec, &tele.status.can.rec);
     for (uint8_t _i = 0; _i < N_MOTORS; _i++) {
-        motor_runtime_sample(&chain.motors[_i], _i);
+        motor_runtime_sample(&tele.motors[_i], _i);
     }
     uint8_t frame[PAYLOAD_LENGTH];
-    spi_proto_build_tele(frame, &chain);
+    spi_proto_build_tele(frame, &tele);
     spi_write_next_tx_buf(frame, tele_stage_buf);
+}
+
+/* RESETTING exit: the host dropped SLAVE_REQ_RESET (or stopped commanding at
+   all) → settle to READY or BLOCKED on the re-sweep verdict. Motors still
+   dirty stay MOTOR_FAULT. */
+static void resetting_drop(void)
+{
+    if (g_slave_state == SLAVE_RESETTING) {
+        g_slave_state = motor_runtime_boot_ok() ? SLAVE_READY : SLAVE_BLOCKED;
+    }
 }
 
 /* USER CODE END 0 */
@@ -263,7 +278,12 @@ int main(void)
 
   tx_arm_timer_init(TX_ARM_DEADLINE_US);  /* ready BEFORE the first TxRxCplt starts it */
   spi_dma_init(&hspi1);
-  motor_runtime_init();   /* discover motors via CAN, populate alive mask */
+  stage_telemetry();      /* pre-stage a SLAVE_BOOT frame: exchanges run from the
+                             ISRs while the blocking boot checks sweep the bus,
+                             so the master reads an honest BOOT state meanwhile */
+  motor_runtime_init();   /* blocking: id sweep + zero_sta + fw-version verify */
+  g_slave_state = motor_runtime_boot_ok() ? SLAVE_READY : SLAVE_BLOCKED;
+  stage_telemetry();      /* publish the verdict (READY/BLOCKED + boot_result) */
 
   loop_next_poll_ms   = HAL_GetTick();
   spi_last_rx_ms      = loop_next_poll_ms;
@@ -308,43 +328,59 @@ int main(void)
          current command frame into a main-owned local under a brief IRQ mask
          (COPY, not latch: after a swap the old buffer becomes the DMA's next
          write target), then parse only the local. */
-      uint8_t cmd_local[SPI_CMD_FRAME_SIZE];
+      uint8_t cmd_local[sizeof(spi_cmd_frame_t)];
       __disable_irq();
       memcpy(cmd_local, (const void *)cmd_inbox_buf, sizeof(cmd_local));
       data_receive_flag = 0;
       __enable_irq();
       spi_last_rx_ms = now;   /* link alive: an exchange completed */
 
-      /* Verify the command-frame CRC + version trailer, extract the header and
-         cmd_chain_t. On a CRC failure apply nothing (a corrupt command must not
-         refresh watchdogs or move a motor), count it, and resync the DMA — send
-         nothing this exchange. On a VERSION MISMATCH (CRC-intact frame from a
-         master built against a different wire contract) apply nothing and count
-         it, but do NOT resync: the link itself is framed correctly, and with no
-         fresh commands ever applied the master-loss watchdog keeps the motors
-         safe until someone reflashes. */
-      SpiCmdHdr   hdr;
-      cmd_chain_t chain;
-      uint8_t parse = spi_proto_parse_cmd(cmd_local, &hdr, &chain);
-      if (parse == SPI_PARSE_BAD) {
+      /* Verify the command-frame CRC and extract the header + cmd_slave_t. On
+         a CRC failure apply nothing (a corrupt command must not refresh
+         watchdogs or move a motor), count it, and resync the DMA — send
+         nothing this exchange. */
+      spi_header_t hdr;
+      cmd_slave_t  cmd;
+      if (!spi_proto_parse_cmd(cmd_local, &hdr, &cmd)) {
         cmd_crc_errors++;
         slave_spi_resync(&hspi1);
-      } else if (parse == SPI_PARSE_MISMATCH) {
-        cmd_crc_errors++;             /* counted with CRC rejects (both = "refused") */
       } else {
         spi_echo_seq = hdr.spi_seq;   /* echo the SPI link-health seq */
-        uint8_t cmd_fresh = (hdr.opcode == SPI_OP_ROBOT_CMD) ? 1u : 0u;
+        uint8_t cmd_fresh = (hdr.opcode == SPI_OP_CMD) ? 1u : 0u;
 
-        if (cmd_fresh) {
+        if (cmd_fresh && cmd.req == SLAVE_REQ_RESET) {
+          /* Slave-level reset: accepted only while nothing is armed. Each
+             round BLOCKS for seconds (clear + re-sweep + verify) behind a
+             pre-staged RESETTING frame; exchanges keep running from the ISRs
+             and commands received meanwhile are simply superseded. While the
+             request stays asserted, re-run rounds until everything reports
+             clean; the exit (→ READY/BLOCKED) happens when it is dropped.
+             Per-motor requests in a RESET-bearing command are ignored. */
+          if (g_slave_state == SLAVE_RESETTING) {
+            if (!motor_runtime_reset_clean()) {
+              stage_telemetry();
+              motor_runtime_reset_round();
+              stage_telemetry();
+            }
+          } else if (!motor_runtime_any_armed()) {
+            g_slave_state = SLAVE_RESETTING;
+            stage_telemetry();
+            motor_runtime_reset_round();
+            stage_telemetry();
+          }
+          /* armed → ignore the request entirely */
+        } else if (cmd_fresh) {
+          resetting_drop();   /* a non-RESET command drops an in-progress reset */
           /* Only a real command refreshes the master-link watchdog — a NOP keepalive does
-             NOT (task 6), so the slave's master-loss ramp still fires if the master falls
-             back to keepalives or dies. Level-triggered per-motor mode requests. */
+             NOT, so the slave's master-loss ramp still fires if the master falls
+             back to keepalives or dies. Level-triggered per-motor requests. */
           for (uint8_t _w = 0; _w < N_MOTORS; _w++)
             motor_runtime_refresh_watchdog(_w);
-          uint8_t n = (chain.n_motors > N_MOTORS) ? N_MOTORS : chain.n_motors;
-          for (uint8_t _i = 0; _i < n; _i++) {
-            motor_runtime_apply_cmd(_i, &chain.motors[_i], hdr.cmd_seq);
+          for (uint8_t _i = 0; _i < N_MOTORS; _i++) {
+            motor_runtime_apply_cmd(_i, &cmd.motors[_i], hdr.cmd_seq);
           }
+        } else {
+          resetting_drop();   /* NOPs = no host command → the request is gone */
         }
         /* The arm handshake is async now (arm_sm.h) so apply_cmd no longer blocks; the
            time-base refresh stays as cheap insurance that watchdog/fault checks never
@@ -399,6 +435,7 @@ int main(void)
       loop_next_poll_ms += LOOP_POLL_PERIOD_MS;
       if (slave_service_due(SVC_FALLBACK, 1u, now_cyc, last_send_cyc, last_exch_cyc,
                             svc_min_ticks, svc_fb_ticks)) {
+        resetting_drop();   /* exchanges stopped entirely → the request is gone */
         motor_runtime_update(now, /*cmd_fresh=*/0u);   /* no command → hold/ramp */
         last_send_cyc = now_cyc;
         need_stage = 1u;

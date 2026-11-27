@@ -24,7 +24,7 @@ def read_header(f) -> dict:
     fixed = f.read(fmt._HEADER_FIXED.size)
     if len(fixed) < fmt._HEADER_FIXED.size:
         raise ValueError("log too short for header")
-    magic, log_ver, proto_ver, wall_ns, mono_ns, meta_len = fmt._HEADER_FIXED.unpack(fixed)
+    magic, log_ver, reserved, wall_ns, mono_ns, meta_len = fmt._HEADER_FIXED.unpack(fixed)
     if magic != fmt.MAGIC:
         raise ValueError(f"bad magic {magic!r} (not a RLOG file)")
     meta_bytes = f.read(meta_len)
@@ -32,7 +32,7 @@ def read_header(f) -> dict:
         raise ValueError("log truncated in header metadata")
     return {
         "log_fmt_version": log_ver,
-        "proto_version": proto_ver,
+        "reserved": reserved,   # v1 logs stored the old wire's proto_version here
         "wall_start_ns": wall_ns,
         "mono_start_ns": mono_ns,
         "meta": json.loads(meta_bytes.decode("utf-8")) if meta_len else {},

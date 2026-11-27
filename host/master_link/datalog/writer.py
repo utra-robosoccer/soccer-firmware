@@ -16,7 +16,7 @@ from . import format as fmt
 
 
 class BinaryLogWriter:
-    def __init__(self, path: str, meta: dict, *, proto_version: int,
+    def __init__(self, path: str, meta: dict, *,
                  queue_max: int = 100_000, flush_interval: float = 1.0):
         self.path = path
         os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
@@ -33,7 +33,7 @@ class BinaryLogWriter:
 
         self._file = open(path, "wb")
         meta_bytes = json.dumps(meta, separators=(",", ":"), sort_keys=True).encode("utf-8")
-        self._file.write(fmt.pack_header(proto_version, time.time_ns(),
+        self._file.write(fmt.pack_header(time.time_ns(),
                                          time.monotonic_ns(), meta_bytes))
         self._file.flush()
 

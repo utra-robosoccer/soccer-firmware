@@ -6,7 +6,6 @@
 /* Master spans ALL slaves — it uses the system config (NUM_SLAVES + per-slave
    motor counts), not a single slave's motor_user_config.h. */
 #include "../../../common/include/master_config.h"
-#include "../../../common/include/host_watchdog.h"   /* master host-death dead-man (task 6) */
+#include "../../../common/include/host_watchdog.h"   /* master host-death dead-man */
 #include "../../../common/include/cmd_mailbox.h"     /* host-command mailbox (apply at n+1) */
-#include "../../../common/include/spi_gate.h"        /* SPI version gate (v9.1)             */
 #endif
