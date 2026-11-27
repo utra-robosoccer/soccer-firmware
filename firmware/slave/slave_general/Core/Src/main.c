@@ -86,6 +86,7 @@ UART_HandleTypeDef huart4;
 
 /* USER CODE BEGIN PV */
 static uint32_t loop_next_poll_ms = 0;
+static uint32_t spi_last_rx_ms    = 0;   /* last completed SPI exchange (dead-link detect) */
 #if SLAVE_UART_DEBUG
 static uint32_t dbg_last_print_ms = 0;
 #endif
@@ -265,6 +266,7 @@ int main(void)
   motor_runtime_init();   /* discover motors via CAN, populate alive mask */
 
   loop_next_poll_ms   = HAL_GetTick();
+  spi_last_rx_ms      = loop_next_poll_ms;
   last_feedback_count = can_feedback_count;
 
   /* µs-resolution timebase (DWT cycle counter) for forward/fallback service gating.
@@ -311,6 +313,7 @@ int main(void)
       memcpy(cmd_local, (const void *)cmd_inbox_buf, sizeof(cmd_local));
       data_receive_flag = 0;
       __enable_irq();
+      spi_last_rx_ms = now;   /* link alive: an exchange completed */
 
       /* Verify the command-frame CRC + version trailer, extract the header and
          cmd_chain_t. On a CRC failure apply nothing (a corrupt command must not
@@ -358,6 +361,35 @@ int main(void)
           need_stage = 1u;
         }
       }
+    }
+
+    /* SPI dead-link recovery: the DMA re-arm chain is completion-driven
+       (TxRxCplt → TIM3 → spi_arm_tx), so a failed arm — the error callback's
+       re-arm losing its race with the abort, or HAL refusing the TIM3 arm —
+       leaves the link DEAD: no exchange ever completes again, and the
+       CRC-triggered resync below can't fire without a received frame (bench:
+       a slave rebooted under a free-running master wedged this way within
+       ~250 ms, spi_tx_arm_fails=2, DMA NDTR=0, unrecoverable). Detect it by
+       silence: no completed exchange for SPI_DEAD_RESYNC_MS while the DMA is
+       not cleanly armed → same NSS-gated resync. A silent master over a
+       cleanly armed DMA (host off, master dead) is NOT a dead link — no churn. */
+    if (spi_error_flag) {
+      /* The error callback / a failed TIM3 arm flagged the link dead: resync
+         NOW (clean NSS-gated reset + re-arm) — each exchange spent waiting is
+         a lost command. */
+      spi_error_flag = 0;
+      slave_spi_resync(&hspi1);     /* NSS-gated; a stuck-low NSS skips and retries */
+      spi_last_rx_ms = now;
+    } else if ((int32_t)(now - spi_last_rx_ms) >= (int32_t)SPI_DEAD_RESYNC_MS) {
+      /* Silence backstop for failure modes that raise no flag. */
+      uint8_t armed_clean =
+          (uint8_t)(hspi1.State == HAL_SPI_STATE_BUSY_TX_RX &&
+                    hspi1.hdmarx != NULL &&
+                    __HAL_DMA_GET_COUNTER(hspi1.hdmarx) == PAYLOAD_LENGTH);
+      if (!armed_clean) {
+        slave_spi_resync(&hspi1);
+      }
+      spi_last_rx_ms = now;         /* rate-limit: re-judge after another window */
     }
 
     /* Fallback tick — services ONLY when exchanges have stopped (SPI link lost), so

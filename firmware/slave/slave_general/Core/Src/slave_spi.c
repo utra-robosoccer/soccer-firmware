@@ -146,23 +146,30 @@ void spi_arm_tx(void)
 	}
 	if (HAL_SPI_TransmitReceive_DMA(g_hspi, spi_tx_active, spi_rx_active, PAYLOAD_LENGTH) != HAL_OK) {
 		spi_tx_arm_fails++;
-		/* Retry once; a persistent failure surfaces as a CRC error next exchange and the
-		   main loop's slave_spi_resync does the full reset + re-arm. */
+		/* Retry once; if that also fails, flag the link dead so the MAIN LOOP
+		   runs the full slave_spi_resync. A failed arm must not be left for
+		   "the next exchange's CRC error" — with no DMA armed there IS no next
+		   slave-side exchange, and the link stays dead forever (bench: wedged
+		   this way within ~250 ms of a reboot under a free-running master). */
 		g_hspi->State = HAL_SPI_STATE_READY;
-		if (HAL_SPI_TransmitReceive_DMA(g_hspi, spi_tx_active, spi_rx_active, PAYLOAD_LENGTH) != HAL_OK)
+		if (HAL_SPI_TransmitReceive_DMA(g_hspi, spi_tx_active, spi_rx_active, PAYLOAD_LENGTH) != HAL_OK) {
 			spi_tx_arm_fails++;
+			spi_error_flag = 1;   /* main loop: resync now */
+		}
 	}
 }
 
 void HAL_SPI_ErrorCallback(SPI_HandleTypeDef *hspi)
 {
-	//if we detected error, we restart dma, since the isr handler has already cleared all flags for us
-	spi_error_flag = 1;
-	armed_this_cycle = 1u;          // claim the cycle BEFORE touching SPI, so a TIM3 preemption's
-	tx_arm_timer_cancel();          // spi_arm_tx no-ops and can't race this re-arm
-	HAL_SPI_Abort_IT(hspi);
-	if (HAL_SPI_TransmitReceive_DMA(hspi, spi_tx_active, spi_rx_active, PAYLOAD_LENGTH) != HAL_OK)
-		spi_tx_arm_fails++;
+	/* ISR context: do NOT abort + re-arm here. HAL_SPI_Abort_IT is asynchronous,
+	   so an immediate TransmitReceive_DMA races the abort and usually fails,
+	   leaving dead DMA streams (and a follow-on HAL_SPI_ERROR_DMA storm). Claim
+	   the cycle, flag the error, and let the main loop run slave_spi_resync —
+	   the one clean, NSS-gated reset + re-arm path. */
+	(void)hspi;
+	armed_this_cycle = 1u;          // a TIM3 preemption's spi_arm_tx must no-op
+	tx_arm_timer_cancel();
+	spi_error_flag = 1;             /* main loop: resync now */
 }
 
 void spi_dma_init(SPI_HandleTypeDef *hspi)

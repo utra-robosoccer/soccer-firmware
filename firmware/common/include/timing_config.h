@@ -63,6 +63,13 @@
     ((HOST_CMD_TIMEOUT_MS * MASTER_POLL_HZ + 500u) / 1000u)
 #define HOST_LOST_CYCLES  (HOST_LOST_CYCLES_RAW > 1u ? HOST_LOST_CYCLES_RAW : 1u)
 
+/* Slave SPI dead-link recovery: no completed exchange for this long while the
+ * DMA is not cleanly armed (error callback fired, or the TIM3 re-arm failed)
+ * → run the NSS-gated resync. The arm chain is completion-driven, so a failed
+ * arm otherwise leaves the link dead forever — the CRC-triggered resync can't
+ * fire without a received frame. 10 cycles at 200 Hz. */
+#define SPI_DEAD_RESYNC_MS     50u
+
 #define MASTER_LOST_GRACE_MS   50u   /* slave: hold (v/tau=0) after exchanges stop */
 #define MASTER_LOST_DAMP_MS   300u   /* stop-ramp damp dwell (STOPPING; also master
                                         host-death dwell)                          */
