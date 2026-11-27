@@ -178,7 +178,7 @@ def main(argv=None):
     # Master time (ns) drives policy.step(): perfectly regular and identical on replay.
     # Host arrival time only feeds the loop-timing budget.
     def master_ns(state):
-        return int(state.robot["master_time_us_mono"]) * 1000
+        return int(state.robot["time_master_us_mono"]) * 1000
 
     first = link.latest_state()
     policy.setup(first, master_ns(first) if first.robot else 0)

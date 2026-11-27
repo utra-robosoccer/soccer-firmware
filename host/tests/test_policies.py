@@ -69,7 +69,7 @@ class _FakeLink:
 
     # telemetry
     def _robot(self, cid):
-        return dict(cycle_id=cid, master_time_us_mono=cid * 1000,
+        return dict(cycle_id=cid, time_master_us_mono=cid * 1000,
                     recv_ns=time.monotonic_ns())
 
     def latest_state(self):

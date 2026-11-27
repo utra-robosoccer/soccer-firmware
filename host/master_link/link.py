@@ -125,8 +125,11 @@ class MotorSnap:
     def saturated(self) -> bool: return bool(self.flags & P.MOTOR_FLAG_SATURATED)
     @property
     def fb_age_us(self) -> int:
-        """Age of this motor's feedback at the SPI exchange (slave clock, wrap-safe)."""
-        return (self.slave_time_us - self.time_slave_us) & 0xFFFFFFFF
+        """Age of this motor's feedback at the SPI exchange (slave clock, wrap-safe).
+        Feedback can land AFTER the telemetry was staged for that exchange, making
+        the signed difference slightly negative — that is 'fresh', clamped to 0."""
+        d = (self.slave_time_us - self.time_slave_us) & 0xFFFFFFFF
+        return 0 if d >= 0x80000000 else d
 
 
 @dataclass(frozen=True)
