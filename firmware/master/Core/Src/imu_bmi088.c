@@ -92,7 +92,10 @@ HAL_StatusTypeDef BMI088_Init(BMI088 *imu, I2C_HandleTypeDef *i2c)
     if (chip_id != BMI088_ACCEL_EXPECTED_CHIP_ID) return HAL_ERROR;
     HAL_Delay(10u);
 
-    status = BMI088_WriteAccelRegister(imu, BMI088_ACCEL_CONFIG, 0xA8u);
+    /* 0xAC = bwp "normal" filter, ODR 1600 Hz — fast enough that every poll up
+     * to IMU_POLL_HZ (≤1 kHz) returns a fresh sample. (Was 0xA8 = 100 Hz ODR:
+     * polling faster than 100 Hz just re-read the same sample.) */
+    status = BMI088_WriteAccelRegister(imu, BMI088_ACCEL_CONFIG, 0xACu);
     if (status != HAL_OK) return status;
     HAL_Delay(10u);
     status = BMI088_WriteAccelRegister(imu, BMI088_ACCEL_RANGE, 0x00u);
@@ -125,7 +128,9 @@ HAL_StatusTypeDef BMI088_Init(BMI088 *imu, I2C_HandleTypeDef *i2c)
     status = BMI088_WriteGyroRegister(imu, BMI088_GYRO_RANGE, 0x01u);
     if (status != HAL_OK) return status;
     HAL_Delay(10u);
-    status = BMI088_WriteGyroRegister(imu, BMI088_GYRO_BANDWIDTH, 0x07u);
+    /* 0x02 = ODR 1000 Hz, filter BW 116 Hz (was 0x07 = 100 Hz ODR / 32 Hz BW):
+     * fresh gyro sample per poll up to 1 kHz. */
+    status = BMI088_WriteGyroRegister(imu, BMI088_GYRO_BANDWIDTH, 0x02u);
     if (status != HAL_OK) return status;
     HAL_Delay(10u);
     status = BMI088_WriteGyroRegister(imu, BMI088_GYRO_INT_CONTROL, 0x80u);

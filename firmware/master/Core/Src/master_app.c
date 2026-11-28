@@ -254,7 +254,9 @@ void master_app_init(SPI_HandleTypeDef *hspi, UART_HandleTypeDef *huart)
 
 void master_app_loop(void)
 {
+#if IMU_POLL_HZ > 0u
     static uint32_t next_imu_poll_ms = 0;
+#endif
 
     /* Drain the USB RX ring (scan + dispatch host frames) and pump the TX ring
        every iteration — both single-producer here in the main loop. */
@@ -298,10 +300,12 @@ void master_app_loop(void)
            exchanges. Anchored here the poll is long done before the next tick;
            the blocking read MUST fit the cycle (why 500 Hz requires 400 kHz).
            A missing IMU → no-op. */
+#if IMU_POLL_HZ > 0u
         uint32_t imu_now_ms = HAL_GetTick();
         if ((int32_t)(imu_now_ms - next_imu_poll_ms) >= 0) {
             next_imu_poll_ms = imu_now_ms + IMU_SERVICE_POLL_PERIOD_MS;
             (void)ImuService_Poll();
         }
+#endif
     }
 }

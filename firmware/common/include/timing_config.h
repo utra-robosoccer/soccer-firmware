@@ -16,10 +16,24 @@
  * once per cycle. Pick a divisor of 1000 so the whole-ms periods stay exact.
  * 500 Hz needs I2C1 at 400 kHz (the blocking BMI088 poll must fit the 2 ms
  * cycle) and runs the 5-motor CAN chain at ~62% bus load. */
+/* 500 Hz is the ceiling for THIS topology (5 motors on one 1 Mbps chain):
+ * every non-ABSENT motor costs cmd+reply ≈ 260 µs of bus per tick, so a tick
+ * needs ~1.3 ms of bus — 62% load at 500 Hz, >100% at 1 kHz. Bench 2026-11-28:
+ * at 1000 Hz the master runs clean (0 overruns, IMU 1 kHz) but the slave's
+ * CAN TX oversubscribes and its main loop wedges (telemetry freezes while the
+ * SPI ISR re-serves the stale frame). 1 kHz needs ≤2-3 motors per chain. */
 #define MASTER_POLL_HZ  500u   /* SPI poll / command delivery                  */
 #define TELEMETRY_HZ    500u   /* telemetry emission (one tele_master_t/cycle) */
 #define SLAVE_TICK_HZ   500u   /* slave control tick (motor_runtime_update)    */
 #define HOST_CMD_HZ     200u   /* expected host command rate (run_policy)      */
+
+/* BMI088 poll rate (0 = never poll — the read is BLOCKING I2C, ~0.4 ms at
+ * 400 kHz, anchored at idle-window start; it must fit the cycle's idle time).
+ * The sensor ODRs are fixed fast (accel 1600 Hz, gyro 1000 Hz in
+ * imu_bmi088.c), so the poll rate alone decides the data rate; every poll
+ * returns a fresh sample up to 1 kHz. Matched to the cycle so the policy
+ * gets IMU and motor data at the same rate. */
+#define IMU_POLL_HZ     500u
 
 /* Master SPI1 clock divider off APB2 (72 MHz): MX_SPI1_Init maps it to the
  * SPI_BAUDRATEPRESCALER_* enum. Valid: 2,4,8,16,32,64,128,256. All of 64/32/

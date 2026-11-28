@@ -2,8 +2,13 @@
 #define IMU_H
 
 #include "imu_bmi088.h"
+#include "../../../common/include/timing_config.h"   /* IMU_POLL_HZ */
 
-#define IMU_SERVICE_POLL_PERIOD_MS 10u
+/* Poll period from the configured rate; with IMU_POLL_HZ 0 the service is
+ * never polled (master_app compiles the poll out). */
+#if IMU_POLL_HZ > 0u
+#define IMU_SERVICE_POLL_PERIOD_MS (1000u / IMU_POLL_HZ)
+#endif
 
 /*
  * Latest BMI088 sample. Each three-element axis array is ordered X, Y, Z.
