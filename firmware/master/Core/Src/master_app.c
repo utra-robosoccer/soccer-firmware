@@ -289,14 +289,15 @@ void master_app_loop(void)
 
         /* Sample the BMI088 at 100 Hz — at the START of the idle window,
            i.e. only right after a cycle's service. ImuService_Poll does two
-           BLOCKING I2C1 reads (~1.6 ms typical at 100 kHz); on its old free-running
-           ms deadline it could start ANYWHERE in the 5 ms cycle, including just
-           before the next TIM2 tick, pushing every other cycle's service ~1.7 ms
-           late. The late exchange compressed the gap to the next one below the
-           slave's TX-arm deadline (3 ms after completion) and collided with its
-           unarmed DMA — bench: alternating 6.69/3.31 ms service deltas and a tele
-           CRC error on ~45% of exchanges. Anchored here the poll starts at
-           ~t0+0.7 ms and is long done before the next tick. A missing IMU → no-op. */
+           BLOCKING I2C1 reads (~0.4 ms at 400 kHz; was ~1.6 ms at 100 kHz); on
+           its old free-running ms deadline it could start ANYWHERE in the cycle,
+           including just before the next TIM2 tick, pushing every other cycle's
+           service late. The late exchange compressed the gap to the next one
+           below the slave's TX-arm deadline and collided with its unarmed DMA —
+           bench: alternating service deltas and a tele CRC error on ~45% of
+           exchanges. Anchored here the poll is long done before the next tick;
+           the blocking read MUST fit the cycle (why 500 Hz requires 400 kHz).
+           A missing IMU → no-op. */
         uint32_t imu_now_ms = HAL_GetTick();
         if ((int32_t)(imu_now_ms - next_imu_poll_ms) >= 0) {
             next_imu_poll_ms = imu_now_ms + IMU_SERVICE_POLL_PERIOD_MS;

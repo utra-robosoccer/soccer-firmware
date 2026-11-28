@@ -10,10 +10,15 @@
 #ifndef TIMING_CONFIG_H
 #define TIMING_CONFIG_H
 
-/* ── Rates (Hz) — reported in MasterStatus and the .bin log header ─────────── */
-#define MASTER_POLL_HZ  200u   /* SPI poll / command delivery                  */
-#define TELEMETRY_HZ    200u   /* MSG_ROBOT_TELE emission                      */
-#define SLAVE_TICK_HZ   200u   /* slave control tick (motor_runtime_update)    */
+/* ── Rates (Hz) — the host reads these via gen_motor_config ────────────────
+ * The three loop rates must stay equal: the slave ticks once per SPI exchange,
+ * so SLAVE_TICK_HZ == MASTER_POLL_HZ by construction, and telemetry is emitted
+ * once per cycle. Pick a divisor of 1000 so the whole-ms periods stay exact.
+ * 500 Hz needs I2C1 at 400 kHz (the blocking BMI088 poll must fit the 2 ms
+ * cycle) and runs the 5-motor CAN chain at ~62% bus load. */
+#define MASTER_POLL_HZ  500u   /* SPI poll / command delivery                  */
+#define TELEMETRY_HZ    500u   /* telemetry emission (one tele_master_t/cycle) */
+#define SLAVE_TICK_HZ   500u   /* slave control tick (motor_runtime_update)    */
 #define HOST_CMD_HZ     200u   /* expected host command rate (run_policy)      */
 
 /* Master SPI1 clock divider off APB2 (72 MHz): MX_SPI1_Init maps it to the

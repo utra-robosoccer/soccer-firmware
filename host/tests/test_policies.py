@@ -24,7 +24,10 @@ from policies.base import (  # noqa: E402
 from policies.man_1s_1m_policy import Man1s1mPolicy, SINE_OMEGA, SINE_FREQ_HZ  # noqa: E402
 from master_link import motor_config_gen as mc            # noqa: E402
 
-POLL_HZ = mc.MASTER_POLL_HZ   # 200
+# The stepping scenarios are written for a 200 Hz master (rate 200 → N=1,
+# rate 50 → N=4). The runner is patched to this rate so the tests don't
+# track whatever rate the firmware is currently configured for.
+POLL_HZ = 200
 
 
 class _Snap:
@@ -114,6 +117,7 @@ def _run(frames, rate, poll_hz=POLL_HZ):
     out = io.StringIO()
     code = None
     with mock.patch.object(run_policy, "MasterLink", lambda *a, **k: link), \
+         mock.patch.object(run_policy.mc, "MASTER_POLL_HZ", POLL_HZ), \
          mock.patch.dict(run_policy.POLICIES, {"stepcap": _StepPolicy}):
         try:
             with redirect_stdout(out):
